@@ -43,6 +43,10 @@ services:
       # route yet — the Platform API is rebuilt in a later pass, same
       # as the rest of Module 0's slices.
       PLATFORM_DATABASE_URL: postgresql://arcnave_platform:${ARCNAVE_PLATFORM_PASSWORD}@db:5432/${POSTGRES_DB:-arcnave}
+      # Signs/verifies tenant access JWTs (HS256). Back in the app's
+      # env now that JWT auth is rebuilt (ADR-016) — was removed for
+      # the schema/RLS-only scaffolding pass since nothing used it yet.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY in .env}
     ports:
       - "8000:8000"
     volumes:

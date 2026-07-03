@@ -31,13 +31,11 @@ version was originally built:
   resolves `college_id` from (1) subdomain (`Host` header), (2) JWT
   claim, (3) explicit `X-College-Code` header, same priority order and
   same fail-on-disagreement (never silent-pick-one) behavior as the
-  Python version. Source (2) is a real, live `// TODO(auth)` — the
-  code path exists and is ready to activate, but `req.jwtClaims` is
-  always `undefined` until AuthMiddleware is rebuilt (a later slice),
-  so it can never contribute a candidate yet. Opens a per-request
-  transaction on `arcnave_app` and calls
-  `set_config('app.current_tenant', ..., true)` when a tenant
-  resolves.
+  Python version. Source (2)'s `// TODO(auth)` is now resolved — see
+  JWT auth below; `req.jwtClaims` is real and populated by the time
+  this middleware reads it. Opens a per-request transaction on
+  `arcnave_app` and calls `set_config('app.current_tenant', ..., true)`
+  when a tenant resolves.
   - **The one piece that was not a direct port, and needed real
     care:** Starlette's `await call_next(request)` gives a single
     awaitable point to commit-after/rollback-around; Express's
@@ -78,11 +76,65 @@ version was originally built:
   pooled connection never leak into each other (the middleware-level
   analogue of the RLS leak test); and the rollback-on-error case
   described above. All passing.
+- **JWT auth** (`backend/src/security.js`,
+  `backend/src/repositories/authRepository.js`,
+  `backend/src/services/authService.js`,
+  `backend/src/routes/auth.js`) — tenant-side login, refresh rotation,
+  logout, and a password-reset stub, same scope as the deleted Python
+  `auth_service.py`/`security.py`/`api/v1/auth.py`. Registered after
+  `tenantMiddleware` in `app.js` — ordinary tenant-scoped routes using
+  `req.dbClient`/`req.collegeId`, not to be confused with
+  `AuthMiddleware` below.
+  - Password hashing via the `argon2` npm package (`node-argon2`), not
+    a placeholder. Its API was checked against the real package source
+    before relying on it, not assumed to mirror Python argon2-cffi's:
+    it genuinely does expose `needsRehash(digest, options)`, so
+    opportunistic rehash-on-login was kept, not dropped.
+  - `createAccessToken`/`decodeAccessToken` via `jsonwebtoken` — same
+    `sub`/`college_id`/`role`/`type: "access"` claim shape,
+    `JWT_SECRET_KEY` required with no fallback (same reasoning as
+    `DATABASE_URL`). One `TokenError` class wraps `jsonwebtoken`'s
+    whole exception surface, same as the deleted Python `TokenError`.
+  - `generateRefreshToken`/`hashRefreshToken` via `node:crypto`
+    (`randomBytes` + SHA-256) — SHA-256, not argon2, deliberately: a
+    server-generated high-entropy token isn't a brute-force target the
+    way a password is.
+  - `login` — one generic `AuthError` covering unknown username, wrong
+    password, and inactive account alike (enumeration protection).
+    `refresh` — rotation; reuse of an already-revoked token logs
+    `refresh_token_reuse_detected` via plain `console.warn` (the
+    structured/request-ID-enriched logging layer is its own later
+    slice, not built this pass) rather than being a routine rejection.
+    `revoke` (logout) — idempotent. `requestPasswordReset` — a genuine
+    stub that throws, turned into `501` at the route layer; no fake
+    `NotificationService`.
+- **AuthMiddleware** (`backend/src/middleware/auth.js`) — decodes a
+  bearer token if present and sets `req.jwtClaims`; non-enforcing,
+  never rejects a missing/invalid token (that's RBAC, the next slice).
+  Registered *before* `tenantMiddleware` in `app.js`. Worth noting as a
+  genuine simplification over the Python port, not a direct
+  translation: Express runs `app.use()` in literal registration order
+  (unlike Starlette, where middleware added last runs first), so "Auth
+  before Tenant" is just declaring them in that order — no inversion
+  required.
+- **Tests** — `backend/tests/auth.test.js`, 12 cases against a live
+  Postgres container: login success (and the issued JWT's claims
+  checked, not just its presence), wrong password, unknown username,
+  inactive user; refresh rotation (old token stops working), reuse of
+  a revoked token rejected *and* actually verified as logged (`console.warn`
+  captured for the duration of that one call, not trusted from reading
+  the code); logout revokes a token and idempotently no-ops for an
+  unknown one; password-reset `501`s; plus the three JWT-claim
+  tenant-resolution cases that couldn't exist until now — resolves
+  from a JWT claim alone, agrees with a matching subdomain (not a
+  false-positive conflict), and a JWT claiming one tenant plus a
+  subdomain resolving to a different one `400`s, never silently
+  picking either. All 25 Node tests pass across the three test files.
 
 Not built yet in Node (same order as the original build, separate
-follow-ups): AuthMiddleware/JWT auth, RBAC, request-scoped logging, the
-Super Admin Portal API, ConfigurationService, principal invitation. CI
-remains disabled pending a Node-specific workflow.
+follow-ups): RBAC, request-scoped logging, the Super Admin Portal API,
+ConfigurationService, principal invitation. CI remains disabled
+pending a Node-specific workflow.
 
 ---
 

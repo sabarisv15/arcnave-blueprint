@@ -88,15 +88,15 @@ async function resolveTenant(req, client) {
     if (resolved) candidates.subdomain = resolved;
   }
 
-  // TODO(auth): req.jwtClaims is set by AuthMiddleware, which doesn't
-  // exist yet — Module 0's slices are being rebuilt incrementally, in
-  // the same order they were originally built (ADR-016). Until
-  // AuthMiddleware exists, req.jwtClaims is always undefined and this
-  // source can never contribute a candidate — this is not a stub or a
-  // fake check, it's the same logic the Python version ran once its
-  // own AuthMiddleware existed, just dormant until there's a claim to
-  // read. An absent/invalid claim is simply "this source didn't
-  // resolve," not an error, same as an unregistered subdomain below.
+  // req.jwtClaims is set by AuthMiddleware (middleware/auth.js),
+  // registered before this middleware in app.js so it always runs
+  // first. An absent/invalid claim (no bearer token, expired,
+  // tampered) already left req.jwtClaims null there — that's simply
+  // "this source didn't resolve," same as an unregistered subdomain,
+  // not a separate error path here. The claimed college_id still goes
+  // through the same DB existence check as the explicit-code source
+  // below: a validly-signed JWT proves the claim wasn't tampered
+  // with, not that the college it names still exists.
   const jwtClaims = req.jwtClaims;
   if (jwtClaims && jwtClaims.college_id) {
     const resolved = await lookupCollegeIdByCode(client, jwtClaims.college_id);

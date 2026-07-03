@@ -3,8 +3,10 @@
 const express = require('express');
 const { appPool } = require('./db/pool');
 const asyncHandler = require('./middleware/asyncHandler');
+const { authMiddleware } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
 const errorHandler = require('./middleware/errorHandler');
+const createAuthRouter = require('./routes/auth');
 
 // A factory, not a pre-built singleton — Express's error-handling
 // middleware only catches errors from routes registered *before* it
@@ -19,16 +21,25 @@ const errorHandler = require('./middleware/errorHandler');
 function createApp({ registerExtraRoutes } = {}) {
   const app = express();
 
+  app.use(express.json());
+
   // Minimal liveness + DB connectivity check — same purpose as the
   // original Python scaffold's /api/v1/health. Registered before
-  // tenantMiddleware on purpose: a liveness probe shouldn't require a
-  // resolved tenant (or even a transaction) to succeed, same as the
-  // Python version's /health not needing one.
+  // authMiddleware/tenantMiddleware on purpose: a liveness probe
+  // shouldn't require a resolved tenant (or even a transaction) to
+  // succeed, same as the Python version's /health not needing one.
   app.get('/api/v1/health', asyncHandler(async (req, res) => {
     await appPool.query('SELECT 1');
     res.json({ status: 'ok' });
   }));
 
+  // AuthMiddleware before TenantMiddleware — resolveTenant reads
+  // req.jwtClaims, which AuthMiddleware sets. Express runs app.use()
+  // in the literal order it's called, so this is simply declaring
+  // them in the order they must run; no inversion needed (see
+  // middleware/auth.js's docstring for the contrast with the
+  // Python/Starlette port).
+  app.use(authMiddleware);
   app.use(asyncHandler(tenantMiddleware));
 
   // Proves the whole resolve -> set_tenant_context -> route-handler
@@ -47,6 +58,10 @@ function createApp({ registerExtraRoutes } = {}) {
     }
     res.json({ college_id: collegeId });
   }));
+
+  // Ordinary tenant-scoped routes, registered after tenantMiddleware
+  // like whoami above — not to be confused with AuthMiddleware.
+  app.use('/api/v1', createAuthRouter());
 
   if (typeof registerExtraRoutes === 'function') {
     registerExtraRoutes(app);

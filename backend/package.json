@@ -11,7 +11,9 @@
     "test": "node --test tests/"
   },
   "dependencies": {
+    "argon2": "^0.41.1",
     "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
     "pg": "^8.12.0"
   },
   "devDependencies": {

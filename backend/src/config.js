@@ -41,4 +41,14 @@ module.exports = {
   // the start, matching how it's wired in docker-compose.yml, rather
   // than being bolted on later.
   platformDatabaseUrl: required('PLATFORM_DATABASE_URL'),
+
+  // Signs/verifies access JWTs. A real secret, required — no default,
+  // same reasoning as databaseUrl: a hardcoded fallback here would be
+  // a hardcoded auth bypass waiting to happen in prod.
+  jwtSecretKey: required('JWT_SECRET_KEY'),
+  jwtAlgorithm: process.env.JWT_ALGORITHM || 'HS256',
+  accessTokenExpireMinutes: Number(process.env.ACCESS_TOKEN_EXPIRE_MINUTES) || 15,
+  // Refresh tokens are opaque, stored server-side as token_hash only
+  // (never the raw token) — see src/security.js.
+  refreshTokenExpireDays: Number(process.env.REFRESH_TOKEN_EXPIRE_DAYS) || 30,
 };
