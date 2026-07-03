@@ -56,15 +56,34 @@ new rule is decided, in the module that owns it.
 - Class Tutor is assigned only by HOD, for one class at a time;
   credentials for the Class Profile are sent automatically once
   assigned.
-- **Open question — not yet decided**: the source requirements list
-  a role called "College Admin" distinct from Principal, and list
-  "Class Tutor" as its own role rather than an attribute of Faculty.
-  Current design treats Class Tutor as an assignment on a Faculty
-  member, not a separate role, and has no College Admin role at all
-  (only Principal at the tenant level, Super Admin at the platform
-  level). Resolve explicitly during Module 2 (Staff Management) —
-  don't let this get decided implicitly by whichever way the code
-  happens to get written first.
+- **Resolved (Module 2 kickoff)** — Class Tutor: an assignment on a
+  Faculty member, not a separate role. `users.role` does not gain a
+  `class_tutor` value; a class/section record carries a tutor
+  reference (a faculty user_id) instead. A faculty member's `role`
+  stays `staff` regardless of whether they currently hold a tutor
+  assignment — "role" means job title, tutor-of-a-class is a
+  duty layered on top of it, checked via the assignment, not via
+  `requireRole`. Matches the registration chains below unchanged:
+  "Class Tutor is assigned only by HOD" is an assignment action, not
+  a role grant.
+- **Resolved (Module 2 kickoff)** — College Admin: a real, new
+  tenant-level role (`users.role = 'college_admin'`), distinct from
+  Principal, but narrowly scoped to two things: (1) bulk-provisioning
+  user accounts during a college's *initial onboarding* onto ARCNAVE
+  — an already-running college can have 100+ existing faculty on day
+  one, and requiring Principal to individually approve each one
+  through the normal registration chain isn't realistic at that
+  volume; (2) uploading/managing college document templates
+  (`DocumentService`-owned, per the Documents/Reports rule above).
+  College Admin does **not** replace or share Principal's approval
+  authority in the steady-state Staff/HOD registration chains below —
+  those are unchanged for anyone joining after initial onboarding.
+  College Admin is an onboarding/operational role, not a second apex
+  role competing with Principal. (Open follow-up, not blocking: the
+  actual bulk-provisioning mechanism — one-by-one repeated calls vs.
+  a real CSV/bulk-import capability — is a Module 2 build decision,
+  not a role-definition one; resolve it when that slice is built, not
+  here.)
 
 ## Finance
 - Fee changes require approval before taking effect.
