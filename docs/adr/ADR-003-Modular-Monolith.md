@@ -3,9 +3,9 @@
 Status: Accepted
 
 ## Decision
-ARCNAVE is built as a single FastAPI application with clean internal
-module boundaries (Business Services), not as separately deployed
-microservices.
+ARCNAVE is built as a single Express (Node.js) application with clean
+internal module boundaries (Business Services), not as separately
+deployed microservices.
 
 ## Alternatives considered
 - **Microservices per domain** (separate deployable Student service,

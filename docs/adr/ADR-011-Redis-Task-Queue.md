@@ -41,3 +41,27 @@ needs revisiting" would be answering a different question than the one
 this row asks. Priority stays High, unchanged — the real trigger
 (Documents/OCR, Notifications) hasn't been built yet per the Roadmap
 order.
+
+## Addendum — 2026-07-03 (post ADR-016)
+
+Not a rewrite of the decision above — a note that the *named
+mechanism* it decided on no longer exists. ADR-016 replaced the Python
+backend with Express (Node.js); `FastAPI BackgroundTasks` isn't
+something Express has an equivalent of built in, and nothing has
+replaced it. This is a real gap, not a wording difference — tracked in
+`Decisions-To-Revisit.md`'s Redis Task Queue row, whose Current Choice
+now honestly reads "none chosen yet" rather than naming a mechanism
+that no longer applies.
+
+Deliberately not resolved here: a Node v1 equivalent (a plain
+`setImmediate`/`setTimeout`-based approach, a lightweight job table,
+or something else) is a real technical decision nobody has made yet,
+and picking one now — with no actual background-work use case built to
+validate the choice against — would be exactly the kind of
+guessed-ahead-of-need decision this module has deliberately avoided
+everywhere else. It gets chosen when Module 8 (Workflow &
+Notifications) first actually needs background work, not before. The
+`BackgroundTasks`-vs-Celery *question itself* (light in-process work
+vs. a real task queue) is unaffected by the language switch and
+doesn't need re-litigating — only "light in-process work" needs a new
+Node-shaped answer.

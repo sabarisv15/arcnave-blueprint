@@ -3,13 +3,13 @@
 Status: Accepted
 
 ## Decision
-The database role that runs Alembic migrations (`arcnave_admin` /
-`POSTGRES_USER`) and the role the FastAPI app connects as
+The database role that runs migrations (`arcnave_admin` /
+`POSTGRES_USER`) and the role the Express app connects as
 (`arcnave_app`) are always different roles. `arcnave_admin` owns every
 table. `arcnave_app` owns nothing, is never granted superuser, and is
 created separately in `docker/postgres/init/01-app-role.sh`. Wired via
 two distinct connection strings in `docker-compose.yml`:
-`ALEMBIC_DATABASE_URL` (migrations) and `DATABASE_URL` (runtime).
+`MIGRATION_DATABASE_URL` (migrations) and `DATABASE_URL` (runtime).
 
 ## Alternatives considered
 - **Single role for both migrations and runtime traffic**: rejected.
@@ -32,8 +32,9 @@ subject to a policy, and they are not the same bypass:
    has no effect on it. There is no policy-level fix.
 
 The official `postgres` Docker image provisions `POSTGRES_USER` as a
-superuser. That role also owns every table, because it's the role
-Alembic connects as to run `CREATE TABLE`. So for `arcnave_admin`
+superuser. That role also owns every table, because it's the role the
+migration tool (`node-pg-migrate`) connects as to run `CREATE TABLE`.
+So for `arcnave_admin`
 specifically, `FORCE ROW LEVEL SECURITY` does nothing — the superuser
 bypass already lets it through regardless. The only thing that
 actually protects tenant data from a misbehaving query is that the
@@ -50,7 +51,7 @@ changes.
 
 ## Consequences
 - Migrations and the running app must always use different
-  credentials — never point `DATABASE_URL` at `ALEMBIC_DATABASE_URL`'s
+  credentials — never point `DATABASE_URL` at `MIGRATION_DATABASE_URL`'s
   role, even for convenience in local dev.
 - `arcnave_app` must never be granted `SUPERUSER`, and must never be
   made the owner of any tenant table.

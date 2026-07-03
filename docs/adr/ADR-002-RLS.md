@@ -15,11 +15,11 @@ policies filter every query by that setting automatically.
   codebase, leaks one college's data to another. This is the single
   most common real-world multi-tenant SaaS bug.
 - **Bare connection-level `SET`** instead of `SET LOCAL`: rejected.
-  With a pooled connection (FastAPI/SQLAlchemy), a connection that
-  sets tenant context and returns to the pool without resetting can
-  leak that context into the next request that reuses it. `SET
-  LOCAL` is scoped to the transaction and resets automatically when
-  it ends.
+  With a pooled connection (e.g. `node-postgres`'s `Pool`), a
+  connection that sets tenant context and returns to the pool without
+  resetting can leak that context into the next request that reuses
+  it. `SET LOCAL` is scoped to the transaction and resets
+  automatically when it ends.
 
 ## Reasoning
 RLS makes the wrong query physically incapable of returning another

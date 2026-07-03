@@ -48,7 +48,7 @@ Responsibilities:
   before any query runs. Never a bare connection-level `SET` — pooled
   connections would leak tenant context across requests. See ADR-002.
 
-### 2.4 API layer — FastAPI
+### 2.4 API layer — Express
 - All endpoints under `/api/v1/...`. Versioned from day one, because
   mobile clients (Flutter) can't be force-updated the way a web
   refresh can — old app versions must keep working against v1 even
@@ -141,11 +141,16 @@ tool-calling cycle.
   user_id, service, action, duration_ms, status), daily rotation,
   error alerts, `/health` endpoint, audit logs kept separate from
   application logs.
-- **Background jobs**: FastAPI `BackgroundTasks` for v1 (email after
-  approval, small report generation, embedding a few documents).
-  Redis + a real task queue (Celery/RQ/Dramatiq) only once bulk
-  imports, bulk notifications, or bulk OCR make that necessary — see
-  Decisions-To-Revisit.md.
+- **Background jobs**: no mechanism chosen yet. `FastAPI
+  BackgroundTasks` was the v1 plan under the Python backend; ADR-016
+  retired it along with the rest of that stack, and nothing has
+  replaced it — a real gap, not a naming difference, tracked in
+  Decisions-To-Revisit.md rather than guessed at here. A Node
+  equivalent gets chosen when Module 8 (Workflow & Notifications)
+  first actually needs background work, not before. Redis + a real
+  task queue (Celery/RQ/Dramatiq, or a Node equivalent) only once bulk
+  imports, bulk notifications, or bulk OCR make lightweight background
+  work insufficient — see Decisions-To-Revisit.md.
 - **Import pipeline**: CSV/Excel → validation → staging tables →
   preview → conflict detection (Register Number / EMIS / Admission
   Number as business keys — **never Aadhaar**, see compliance note
