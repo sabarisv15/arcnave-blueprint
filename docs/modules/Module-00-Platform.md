@@ -1,5 +1,91 @@
 # Module 0 — Platform Foundation
 
+> **Superseded** — this document describes the original Python/FastAPI
+> implementation (ADR-016 replaced it with Express/Node.js).
+> Recoverable via `git log`/`git show`. Not rewritten yet; do not treat
+> anything below as describing the current backend.
+
+## Node rebuild — current status
+
+This is the up-to-date record of the Express/Node.js rebuild (ADR-016).
+Everything else in this document, from "Status: Complete" onward,
+describes the deleted Python implementation and is kept only as
+historical/design reference (resolution priority order, RLS reasoning,
+etc. — the *design* didn't change, only the code implementing it).
+
+Built and tested so far, in the same incremental order the Python
+version was originally built:
+
+- **Schema + RLS**, ported faithfully from the deleted Alembic
+  migrations into two `node-pg-migrate` migrations
+  (`backend/migrations/1751500000000_module-0-platform-foundation.js`,
+  `..._1751600000000_principal-invitations.js`) — same tables, same
+  `FORCE ROW LEVEL SECURITY`, same directional grants, not redesigned.
+- **RLS pooled-connection leak test**
+  (`backend/tests/rls-tenant-isolation.test.js`) — re-proven from
+  scratch against `node-postgres`'s own pooling, not assumed to still
+  hold just because the SQL didn't change. Connection reuse verified
+  via `pg_backend_pid()`, same technique as the original Python test,
+  since it's a Postgres builtin rather than anything driver-specific.
+- **Tenant Middleware** (`backend/src/middleware/tenant.js`) —
+  resolves `college_id` from (1) subdomain (`Host` header), (2) JWT
+  claim, (3) explicit `X-College-Code` header, same priority order and
+  same fail-on-disagreement (never silent-pick-one) behavior as the
+  Python version. Source (2) is a real, live `// TODO(auth)` — the
+  code path exists and is ready to activate, but `req.jwtClaims` is
+  always `undefined` until AuthMiddleware is rebuilt (a later slice),
+  so it can never contribute a candidate yet. Opens a per-request
+  transaction on `arcnave_app` and calls
+  `set_config('app.current_tenant', ..., true)` when a tenant
+  resolves.
+  - **The one piece that was not a direct port, and needed real
+    care:** Starlette's `await call_next(request)` gives a single
+    awaitable point to commit-after/rollback-around; Express's
+    `next()` has no equivalent — it does not return a promise that
+    resolves once downstream handling (including the route handler)
+    has finished. The correct Express pattern turned out to be two
+    separate hooks: `res.on('finish', ...)` for the commit path (fires
+    once a response has actually been sent, whether from a normal
+    success or an intentional error response a handler sent directly)
+    and the 4-argument error-handling middleware
+    (`backend/src/middleware/errorHandler.js`, reached only via
+    `next(err)`) for the rollback path. Both hooks can end up seeing
+    the same request — a `settled` flag in `tenant.js` ensures only
+    whichever runs first actually touches the transaction. Proven, not
+    assumed: `tests/tenant-middleware.test.js`'s rollback test drives a
+    route that does a real partial write to `configurations` and then
+    throws, then asserts via the migration-owner connection that
+    nothing was persisted.
+  - `backend/src/app.js` exports a `createApp()` factory rather than a
+    singleton, specifically so a test can insert its own route
+    *before* `errorHandler` is attached — Express only routes an error
+    to error-handling middleware registered later in the stack than
+    where it occurred, never earlier, so a route added after the app
+    module already finished executing would never reach the real error
+    handler otherwise.
+- `GET /api/v1/whoami` — same proof-of-pipeline shape as the Python
+  version: reads `current_setting('app.current_tenant', true)` back
+  from the database itself, not any in-memory value, so a passing
+  response proves the whole chain actually reached Postgres.
+- **Tests** — `backend/tests/tenant-middleware.test.js`, 8 cases
+  against a live Postgres container (started via a real
+  `app.listen(0)`, driven with Node's built-in `http` module rather
+  than `fetch()` specifically so the `Host` header can be set with
+  certainty): subdomain resolves; explicit code resolves; the two
+  agreeing doesn't false-positive as a conflict; the two disagreeing
+  400s; no tenant resolving 400s; `/health` still needs no tenant; six
+  sequential requests alternating between two tenants on the same
+  pooled connection never leak into each other (the middleware-level
+  analogue of the RLS leak test); and the rollback-on-error case
+  described above. All passing.
+
+Not built yet in Node (same order as the original build, separate
+follow-ups): AuthMiddleware/JWT auth, RBAC, request-scoped logging, the
+Super Admin Portal API, ConfigurationService, principal invitation. CI
+remains disabled pending a Node-specific workflow.
+
+---
+
 Status: **Complete.** Every item on this module's build list is done
 and tested (see Features below). This document now freezes except bug
 fixes, per `Roadmap.md` — Module 1 (Student) starts fresh, on top of

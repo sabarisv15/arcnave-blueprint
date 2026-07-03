@@ -2,21 +2,59 @@
 
 const express = require('express');
 const { appPool } = require('./db/pool');
+const asyncHandler = require('./middleware/asyncHandler');
+const { tenantMiddleware } = require('./middleware/tenant');
+const errorHandler = require('./middleware/errorHandler');
 
-const app = express();
+// A factory, not a pre-built singleton — Express's error-handling
+// middleware only catches errors from routes registered *before* it
+// in the stack (Express walks the middleware array forward-only when
+// searching for the next matching layer after next(err), never
+// backward). A test that needs to add its own route and still have
+// errors from it reach the real error handler has to be able to
+// insert that route before errorHandler is attached, not after — see
+// tests/tenant-middleware.test.js's rollback-on-error test, which is
+// exactly why `registerExtraRoutes` exists. index.js calls this with
+// no arguments for the real app.
+function createApp({ registerExtraRoutes } = {}) {
+  const app = express();
 
-// Minimal liveness + DB connectivity check — same purpose as the
-// original Python scaffold's /api/v1/health: prove the app process
-// and the arcnave_app connection both work, nothing more. Tenant
-// resolution, auth, and everything else Module 0 built is rebuilt in
-// later, separate passes.
-app.get('/api/v1/health', async (req, res, next) => {
-  try {
+  // Minimal liveness + DB connectivity check — same purpose as the
+  // original Python scaffold's /api/v1/health. Registered before
+  // tenantMiddleware on purpose: a liveness probe shouldn't require a
+  // resolved tenant (or even a transaction) to succeed, same as the
+  // Python version's /health not needing one.
+  app.get('/api/v1/health', asyncHandler(async (req, res) => {
     await appPool.query('SELECT 1');
     res.json({ status: 'ok' });
-  } catch (err) {
-    next(err);
-  }
-});
+  }));
 
-module.exports = app;
+  app.use(asyncHandler(tenantMiddleware));
+
+  // Proves the whole resolve -> set_tenant_context -> route-handler
+  // pipeline actually reaches Postgres: reads current_setting() back
+  // from the database itself, not any in-memory value TenantMiddleware
+  // computed. A passing response is only possible if every step
+  // actually ran, not just that the middleware thinks it did.
+  app.get('/api/v1/whoami', asyncHandler(async (req, res) => {
+    const result = await req.dbClient.query(
+      "SELECT current_setting('app.current_tenant', true) AS college_id",
+    );
+    const collegeId = result.rows[0] ? result.rows[0].college_id : null;
+    if (!collegeId) {
+      res.status(400).json({ detail: 'No tenant could be resolved for this request' });
+      return;
+    }
+    res.json({ college_id: collegeId });
+  }));
+
+  if (typeof registerExtraRoutes === 'function') {
+    registerExtraRoutes(app);
+  }
+
+  app.use(errorHandler);
+
+  return app;
+}
+
+module.exports = createApp;
