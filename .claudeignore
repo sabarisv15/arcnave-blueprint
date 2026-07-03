@@ -1,0 +1,10 @@
+# Extra excludes for Claude Code context scans, beyond .gitignore.
+# None of this needs to be read for engineering work — npm/build
+# tools read it, not a person or an agent.
+node_modules/
+dist/
+build/
+*.lock
+package-lock.json
+.venv/
+__pycache__/
