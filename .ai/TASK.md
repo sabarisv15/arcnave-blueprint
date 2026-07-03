@@ -1,131 +1,178 @@
 # TASK
 
 ## Objective
-Module 2 (Staff), fourth vertical slice: repoint `HodDashboard.jsx`'s
-and `PrincipalDashboard.jsx`'s Add/Edit Staff modal (`staffForm`,
-currently POSTing to `/api/hod/staff`) to the real `/api/v1/staff`
-routes from `routes/staff.js`. Same process as `c9b6248`
-(StudentEditorModal repoint).
+Module 3 (Academic), first vertical slice: ERD + migration + repository
+only for a `classes` table — no service/API/UI yet. Same discipline as
+Module 1's first slice (`fbfd1c9`) and Module 2's first slice
+(`31f5a8b`): a class/section entity was explicitly deferred to this
+module by name in both the Staff migration and BusinessRules.md.
 
-## Grounding: this is not a pure field-rename job
-Checked `backend/src/` before assuming anything: **no `/api/hod/*`
-route exists anywhere in the Node backend.** `grep -rn "hod/staff"
-backend/src/` returns nothing. This isn't "old backend, new backend,
-pick the new one" — it's dead code today. Every request `staffForm`'s
-submit handler currently makes (`GET /api/hod/staff`,
-`POST /api/hod/staff`) already 404s against the real Express app
-(Express's default HTML 404, not even a JSON body `err.error` could
-parse). So this slice is a real fix, not a like-for-like swap.
+## Grounding (read before assuming any field list)
+No `ClassEditorModal.jsx`/admin "create class" screen exists — classes
+are grounded against the three frontend files that already read/write
+class + timetable data as working (non-404ing shape), not a form that
+creates them:
 
-## The deeper gap this task's framing undersells
-The task description points at field-name mismatches (`phone` vs
-`phone_number`, `staff_code` vs `staff_id`) — real, and listed below —
-but there's a bigger one underneath: the prototype's `staffForm`
-submit is a **single one-step flow that both creates a login account
-and a staff profile**, returning generated credentials
-(`generatedCreds`/`generatedCredentials`) immediately. The real
-`POST /api/v1/staff` (via `staffService.createStaff`) does **not**
-create accounts — it requires an already-existing `user_id` (Module
-2's first-slice `.ai/TASK.md` scope decision, restated in every slice
-since: "staff models an already-provisioned staff member... does not
-build any part of the HOD/Principal approval chain or credential
-generation"). There is no account-creation endpoint anywhere in this
-codebase reachable from a staff-onboarding flow yet — building one is
-Module 0/Module 8 territory, not a UI repoint.
+- `frontend/src/pages/HodDashboard.jsx` — `classesList` (from
+  `GET /api/hod/classes`), each entry carries `class_name` (e.g.
+  `"3rd Sem · CS-A"`), `tutor_id`, `semester`. The tutor-link flow
+  (`staffForm.linked_semester` -> `POST /api/hod/link-tutor` with body
+  `{ tutor_id, semester, ... }`) identifies a class by `semester`, not
+  by any id — confirming `semester` is a real, distinct field, not
+  just a substring of `class_name`. Timetable review
+  (`handleTimetableReview` -> `POST /api/hod/timetable-review`, body
+  `{ tutor_id, action, remarks }`) actions are `'Approve'` (direct),
+  `'Forward'` (-> Principal), `'Reject'`.
+- `frontend/src/pages/PrincipalDashboard.jsx` — same `pendingTimetables`
+  shape (`class_name`, `tutor_id`, `submitted_at`), same review action
+  set restricted to `'Approve'`/`'Reject'` (Principal is a final gate,
+  no further forwarding).
+- `frontend/src/pages/TutorClass.jsx` / `TutorClassMonitor.jsx` — the
+  actual per-class settings object: `timetable_status` (literal
+  strings seen: `'No Tutor'`, `'Pending HOD'`, `'Pending Principal'`,
+  `'Approved'`, `'Rejected'`), `timetable_data` (`{ headers: [...],
+  rows: [...] }` — a free-text day/hour grid, e.g. a cell reads
+  `"Data Structures (Priya)"`; subjects and staff names live as text
+  *inside* the grid, there is no normalized subjects/faculty-allocation
+  table backing it anywhere in the working frontend), `timetable_path`
+  (uploaded CSV reference), `timetable_remarks` (populated on
+  rejection).
 
-**Decision: only the EDIT path is repointed to the real API. CREATE
-stays on `/api/hod/staff`, unchanged, still broken exactly as it is
-today** — not a regression, since it's already 404ing; not silently
-patched over either. This is the same "leave what's out of scope
-alone" call `c9b6248` made for `TutorClass.jsx` ("roster still won't
-show newly-created students — expected... different backend/data
-store entirely until a future module's slice repoints it"). Inventing
-a `user_id` input field on this form, or building an account-creation
-endpoint, would both be structure nobody asked for yet (CLAUDE.md
-discipline) — flagged as the real, open, larger gap, not solved here.
+This confirms Architecture.md's list ("academic year, semester,
+subjects, curriculum, faculty allocation, timetable, calendar") is the
+long-run shape of the whole module, not what the first working screen
+actually needs — matching Module 1/2's own "first slice is one table"
+discipline, not an attempt to build all of Module 3 at once.
 
-A consequence of only repointing EDIT: `staffList` (loaded via the
-still-un-repointed `GET /api/hod/staff`) will keep 404ing/returning
-empty in the running app, so the "Edit" button per row never actually
-renders against live data today — this repoint is only exercisable
-once a future slice repoints that GET loader too. Same situation
-`c9b6248` was already in for `TutorClass.jsx`; verification here uses
-the same workaround (reproduce the exact fetch call against a live
-stack directly, not by clicking through the actual dashboard, since
-the click-path is unreachable regardless of this change).
+## Key design decision: one `classes` table, not a normalized subject/timetable-period schema yet
+The real, working frontend never queries a separate `subjects` table
+or a per-period faculty-allocation record — timetable content is an
+opaque CSV-derived grid (`headers`/`rows`) attached to a class. Building
+a normalized subjects/periods/faculty-allocation schema now would be
+structure nobody asked for yet (CLAUDE.md discipline, the same call
+Module 2's `.ai/TASK.md` made against inventing a `departments` table).
+This slice models exactly what's grounded: a `classes` row per
+class/section, carrying its own timetable review state and the parsed
+grid as JSONB. Normalizing subjects/periods out of that JSONB blob is
+explicitly left to a later Module 3 slice, if/when a real screen needs
+to query by subject or by faculty allocation rather than just
+displaying the grid.
+
+## Key design decision: no `timetable_path` column in this slice
+The frontend's `timetable_path` is a reference to an uploaded CSV file.
+CLAUDE.md rule 2 / Architecture.md 2.5: `DocumentService` is the sole
+owner of all file storage, and it doesn't exist yet (Module 6). Adding
+a raw file-path column here would let `classes`/`AcademicService`
+quietly become a second file-storage owner — the same trap flagged and
+avoided for Class Tutor in the Module 2 migration. `timetable_data`
+(the already-parsed JSON grid) is in scope; the raw uploaded file is
+not — flagged as an open gap for whichever slice wires up real CSV
+upload (Academic, calling into `DocumentService` once it exists), not
+decided or silently dropped here.
+
+## Key design decision: `tutor_user_id` references `users(id)`, not `staff(id)`
+BusinessRules.md's "Resolved (Module 2 kickoff)" entry already settled
+this: "a class/section record carries a tutor reference (a faculty
+user_id) instead" — not a `staff.id` FK. `staffRepository.js`'s own
+top-of-file comment names this exact table as deferred to Module 3.
+Followed verbatim, not re-litigated here.
 
 ## Files likely affected
-- `frontend/src/pages/HodDashboard.jsx`
-- `frontend/src/pages/PrincipalDashboard.jsx`
+- `backend/migrations/1752000000000_module-3-academic-schema.js` (new
+  — next timestamp after `1751900000000_module-2-staff-schema.js`)
+- `backend/src/repositories/classRepository.js` (new)
 
 ## Exact changes
 
-**Both files**: add `accessToken` to the existing `useAuth()`
-destructure (both already import `useAuth` from `'../App'` and use it
-for other fields — `logout, user` in `HodDashboard.jsx`, `user` in
-`PrincipalDashboard.jsx` — just missing `accessToken`, same as
-`StudentEditorModal.jsx` needed).
+**ERD — `classes` table** (tenant-scoped, RLS per BusinessRules
+Multi-tenancy, same pattern as `students`/`staff`):
 
-**Field mapping, `staffForm` (camelish/prototype names) -> real API
-snake_case body** (only what's sent for the EDIT/PUT path; CREATE's
-body is untouched):
-| `staffForm` field | real API field | notes |
-|---|---|---|
-| `name` | `full_name` | |
-| `staff_id` | `staff_code` | Module 2's first-slice `.ai/TASK.md` already renamed this column deliberately — this is where that rename surfaces at the UI boundary. |
-| `phone_number` | `phone` | |
-| `aicte_id` | `aicte_id` | unchanged |
-| `joined_year` | `joined_year` | unchanged |
-| `department` (Principal only — Hod's form has no department field) | `department` | unchanged |
-| `linked_semester` | *(none)* | drives a separate `/api/hod/link-tutor` call, untouched — Class Tutor assignment is Module 3 (Academic/timetable) territory per BusinessRules.md's already-resolved Module 2 decision, not a `staff` column. |
+- `id` UUID PK, default gen
+- `college_id` TEXT NOT NULL, FK -> `colleges(college_id)`
+- `class_name` TEXT NOT NULL — free-text display label (e.g. `"3rd Sem
+  · CS-A"`), same "free-text class name" precedent BusinessRules.md
+  already documents for Attendance/Students ("only free-text class
+  names... exist").
+- `department` TEXT — freeform, no `departments` table, same decision
+  Module 2 made for `staff.department` and for the same reason
+  (nothing today needs it as a normalized entity).
+- `semester` TEXT — free text (`'3rd Sem'`, etc., not an integer),
+  matches the real `linked_semester` values used at the
+  `/api/hod/link-tutor` boundary.
+- `tutor_user_id` UUID, FK -> `users(id)`, nullable (a class starts
+  with no tutor assigned — `'No Tutor'` status). `UNIQUE
+  (tutor_user_id)` enforces BusinessRules' "Class Tutor is assigned
+  only by HOD, for one class at a time" at the DB level — multiple
+  NULLs (untutored classes) remain valid since Postgres treats NULLs
+  as distinct in a UNIQUE constraint.
+- `timetable_status` TEXT NOT NULL DEFAULT `'No Tutor'` — no CHECK
+  constraint, matching house convention (`users.role`,
+  `colleges.subscription_status` also have no DB-level CHECK on their
+  known value sets); known real values documented here in comments
+  instead: `'No Tutor'`, `'Pending HOD'`, `'Pending Principal'`,
+  `'Approved'`, `'Rejected'`. `'Approved'` is the literal gate value
+  CLAUDE.md rule 7 and BusinessRules.md's Academic section reference
+  for unlocking Attendance.
+- `timetable_data` JSONB — nullable (`{ headers: [...], rows: [...] }`
+  grid), matches the real frontend shape exactly.
+- `timetable_remarks` TEXT — nullable, populated on rejection.
+- `created_at`, `updated_at` TIMESTAMPTZ
 
-`user_id`/`college_id` are never in this mapping — a profile's account
-link and tenant are set once at creation (which this slice doesn't
-touch) and excluded from `staffService.updateStaff`'s
-`ALLOWED_FIELDS` regardless.
+No Aadhaar column (CLAUDE.md rule 8 — not that this table would ever
+plausibly need one, keeping the same explicit-absence discipline
+regardless). No `subjects`/`faculty_allocation`/`timetable_periods`
+tables yet — deferred per the design decision above, not an oversight.
 
-**`HodDashboard.jsx`'s `handleStaffFormSubmit`**: branch on
-`editingStaff`.
-- Edit branch (new): `PUT /api/v1/staff/${editingStaff._id ||
-  editingStaff.id || editingStaff.staff_id}` (same `_id || id ||
-  <natural-key>` fallback convention `StudentEditorModal.jsx` used),
-  `Authorization: Bearer <accessToken>` header, mapped body per table
-  above. Error: `err.detail` (real API's error field, not `err.error`).
-  Success: toast, close the modal, `loadData()` — **do not** set
-  `generatedCreds`: the real `PUT` response is the repository's native
-  staff row (no `username`/`password` — those live on `users`, which
-  `staffService` never joins in). The existing JSX
-  `{generatedCreds && (...)}` block and `{generatedCreds ? 'Close' :
-  'Cancel'}` button label both need no change — they already do the
-  right thing when `generatedCreds` is simply never set. The
-  `linked_semester` -> `/api/hod/link-tutor` follow-up call is
-  untouched, still keyed off `editingStaff.username` (the only place a
-  username exists in this flow, since `staffService` doesn't return
-  one).
-- Create branch: **byte-identical to current code**, still POSTing to
-  `/api/hod/staff`, still setting `generatedCreds` from
-  `data.credentials`.
+**Migration** (`node-pg-migrate`, reversible per CLAUDE.md rule 6):
+- `up`: create `classes` as above, enable + force RLS, tenant_isolation
+  policy on `college_id` (identical pattern to Module 1/2's
+  migrations — not reinvented), `UNIQUE (college_id, class_name)`,
+  `UNIQUE (tutor_user_id)`. Placeholder `GRANT SELECT, INSERT, UPDATE,
+  DELETE` to `arcnave_app` — same "no soft-delete field decided yet"
+  treatment `students`/`staff`/`configurations` already got.
+- `down`: drop table.
 
-**`PrincipalDashboard.jsx`'s `handleStaffFormSubmit`**: same shape of
-branch on `editingStaff`.
-- Edit branch (new): `PUT /api/v1/staff/${editingStaff._id ||
-  editingStaff.id || editingStaff.staff_id}`, `Authorization` header,
-  mapped body (includes `department`, unlike Hod's). Error:
-  `err.detail`. Success: toast, `setShowStaffModal(false)`,
-  `loadData()` — do not set `generatedCredentials`.
-- Create branch: byte-identical to current code.
+**Repository** (`classRepository.js`, mirrors `staffRepository.js`'s
+shape — query mechanics only, no business logic, never calls another
+repository per CLAUDE.md rule 4):
+- `create(client, fields)`
+- `findById(client, id)`
+- `findByTutorUserId(client, tutorUserId)` — the natural lookup for
+  "which class does this logged-in tutor own" (same role
+  `findByUserId` plays for staff), no explicit `college_id` filter
+  beyond RLS since `tutor_user_id` is globally unique (`UNIQUE
+  (tutor_user_id)`), same reasoning `staffRepository.findByUserId`
+  documents for its own `UNIQUE (user_id)` column.
+- `findByCollegeAndClassName(client, collegeId, className)` — secondary
+  human-facing lookup, explicit `college_id` filter in addition to RLS
+  since `class_name` is only unique per `(college_id, class_name)`,
+  same pattern as `findByStaffCode`/`findByRollNo`.
+- `update(client, id, fields)` (partial, same entries-filter pattern as
+  `staffRepository.update`)
+- `remove(client, id)` (hard delete — no soft-delete column exists,
+  same placeholder treatment as `students`/`staff`)
+- `list(client, { limit, offset })`
 
 ## Acceptance criteria
-- Both files' edit-path `fetch` calls reproduced byte-for-byte
-  (URL, method, headers, body) against a live Express + real Docker
-  Postgres stack: a real `staff` row updated via `PUT
-  /api/v1/staff/:id`, response is the updated row, no 500/404 from a
-  field-shape mismatch.
-- `err.detail` (not `err.error`) is what reaches `showToast` on a
-  real 400/404/409 from the edit path.
-- CREATE path in both files is unmodified — confirmed via `git diff`
-  showing zero changes to those lines.
-- No other file touched (`TutorClass.jsx`, `/api/hod/link-tutor`,
-  `/api/hod/classes` all untouched — genuinely out of scope, same as
-  `c9b6248`'s treatment of `TutorClass.jsx`).
-- No Aadhaar field anywhere (there never was one in this form).
+- Migration runs `up` and `down` cleanly against a DB that already has
+  Module 0/1/2 (`users`/`colleges`/`students`/`staff`) applied.
+- RLS enabled + forced, `tenant_isolation` policy present, matches the
+  `students`/`staff` pattern exactly.
+- `UNIQUE(college_id, class_name)` and `UNIQUE(tutor_user_id)` both
+  enforced at the DB level — prove with a real duplicate-insert
+  failure for each, not just by reading the DDL.
+- Inserting a `classes` row with a `tutor_user_id` that doesn't exist
+  in `users` fails on the FK constraint.
+- Two classes with `tutor_user_id IS NULL` can coexist (proves NULLs
+  aren't caught by the UNIQUE constraint) — concrete proof the
+  "class starts with no tutor" default state is representable.
+- No Aadhaar column anywhere. No `timetable_path`/file-storage column
+  anywhere (this slice's scope boundary, see design decision above).
+- Repository has zero references to Storage, other repositories, or
+  business-service logic.
+- No service, API route, UI, or `docs/architecture/ERD.md` /
+  `docs/modules/` file touched in this slice — matches `fbfd1c9`'s and
+  `31f5a8b`'s actual scope (both `RESULT.md`s changed only the
+  migration + repository files, nothing docs-side), not the broader
+  "ERD" wording in the vertical-slice list taken literally as a doc
+  edit.
