@@ -542,9 +542,61 @@ have `req.jwtClaims` in scope).
 
 All 77 Node tests pass across the eight test files.
 
-Not built yet in Node: nothing left in Module 0's original build list
-— the only remaining item is the Node-specific CI workflow, which
-covers *how* these tests run in CI, not application code.
+- **CI pipeline** (`.github/workflows/ci.yml`) — the last item on
+  Module 0's original build list. Real triggers (`push`/`pull_request`
+  on `main`) re-enabled; the `workflow_dispatch`-only/`if: false`
+  disabling from the schema-only scaffolding pass is gone now that
+  there's a real Node backend with real tests to run.
+  - The bare `services:` Postgres container step (GitHub does not run
+    `docker-entrypoint-initdb.d` the way docker-compose does, so
+    `docker/postgres/init/01-app-role.sh`/`02-platform-role.sh` still
+    run as explicit steps once the service is reachable) is
+    language-agnostic and carried over verbatim from the disabled
+    Python-era workflow, unchanged.
+  - Python steps swapped for their Node equivalents:
+    `actions/setup-node@v4` (Node 20, matching `backend/Dockerfile`'s
+    `node:20-slim` — checked, not guessed) in place of
+    `setup-python`; `npm ci` in place of `pip install -r
+    requirements.txt`; `npm run migrate` (already defined in
+    `package.json`, wraps `node-pg-migrate`) in place of `alembic
+    upgrade head`; `npm test` (`node --test tests/`) in place of
+    `pytest`.
+  - `ALEMBIC_DATABASE_URL` — stale, renamed to `MIGRATION_DATABASE_URL`
+    as part of the Node switch — replaced. Every env var CI sets was
+    checked directly against `config.js`'s actual `required(...)`
+    list (`DATABASE_URL`, `MIGRATION_DATABASE_URL`,
+    `PLATFORM_DATABASE_URL`, `JWT_SECRET_KEY`,
+    `PLATFORM_JWT_SECRET_KEY`) rather than assumed from the old
+    workflow's variable names, so CI neither fails on a variable the
+    app never asked for nor silently skips one it does.
+  - **The `ruff check` lint step was dropped, not replaced with an
+    ESLint equivalent** — checked, not assumed: there is no ESLint
+    config anywhere in `backend/` yet. Inventing one as a side quest
+    inside this task would have been scope creep; the gap is flagged
+    explicitly in Known Limitations below instead of silently dropped
+    with no record.
+  - **Verified the same way the original Python CI workflow was**:
+    the exact sequence — a fresh, non-docker-compose `postgres:16`
+    container, the two init-role scripts run from a separate
+    throwaway container connecting over TCP with `PGPASSWORD` (not
+    in-container trust auth), `npm ci`, `npm run migrate`, `npm test`
+    — run manually against Docker before considering this done. All
+    77 tests passed. This confirms the *sequence* is correct
+    independent of whether the YAML syntax is also accepted by
+    GitHub's runner, which still needs a real push to confirm.
+
+**Known limitation carried forward from this slice: there is no lint
+step in Node CI at all**, unlike the Python-era workflow's `ruff
+check`. Not an oversight — no ESLint config exists anywhere in
+`backend/` yet, and scaffolding one (config, plugin choices, a
+baseline pass over already-written code to decide what to ignore)
+would have been a real side quest inside a task scoped to porting the
+CI *workflow*, not establishing a new tooling standard. Revisit once
+there's an actual ESLint setup to wire in, rather than inventing a
+placeholder config just to have a lint step.
+
+Not built yet in Node: nothing left in Module 0's original build
+list. **Every item is now done.**
 
 ---
 
