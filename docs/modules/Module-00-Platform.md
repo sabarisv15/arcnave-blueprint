@@ -790,17 +790,15 @@ not a permission matrix:
   actual alerting destination exists.
 - MFA hooks are out of scope for Module 0 per `Roadmap.md` (future
   work, not built now).
-- **CI has never actually run on GitHub.** No GitHub remote exists yet
-  (git itself wasn't installed on the dev machine when this was
-  written); `.github/workflows/ci.yml` was verified by manually
-  reproducing its exact command sequence against Docker, not by
-  triggering a real Actions run. Once this repo is pushed to GitHub,
-  still worth confirming: the workflow YAML itself parses and triggers
-  correctly (syntax errors don't surface in a manual shell walkthrough
-  at all), the `services:` health-check gating behaves the same on
-  GitHub's actual runner infrastructure as it did locally, and job
-  timing/resource limits on GitHub's hosted runners don't introduce
-  flakiness the local Docker run wouldn't show.
+- ~~CI has never actually run on GitHub.~~ **Resolved 2026-07-03**:
+  repo pushed to `https://github.com/sabarisv15/arcnave-blueprint`,
+  `.github/workflows/ci.yml` triggered for real on GitHub's hosted
+  runners and passed on both pushes since (commit `35c7293`, 50s;
+  commit `ccd00f7`, 48s) — confirmed via the Actions tab, not just a
+  successful `git push`. The `services:` Postgres container, the
+  explicit `docker-entrypoint-initdb.d`-equivalent role-creation step,
+  the migration step, and the full test suite all behave the same on
+  GitHub's infrastructure as they did in the local manual walkthrough.
 
 ## Future Enhancements
 
