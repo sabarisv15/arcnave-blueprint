@@ -209,11 +209,21 @@ export default function PrincipalDashboard() {
         setStaffList(staffData.staff || []);
       }
 
-      // 3. Fetch all classes list
-      const classRes = await fetch('/api/hod/classes');
+      // 3. Fetch all classes list — repointed to the real API
+      // (routes/classes.js). Unlike the old /api/hod/classes prototype
+      // endpoint (never existed in the Node backend, always 404'd),
+      // GET /api/v1/classes is real, requireAuth-gated (needs the
+      // Authorization header below, which none of this function's other
+      // fetches send), and returns a bare array, not a { classes: [...] }
+      // envelope. Its rows carry tutor_user_id (a real users.id UUID)
+      // instead of the prototype's tutor_id (a username string) — every
+      // downstream read of this list is updated to match. See .ai/TASK.md.
+      const classRes = await fetch('/api/v1/classes', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
       if (classRes.ok) {
         const classData = await classRes.json();
-        setClassesList(classData.classes || []);
+        setClassesList(classData || []);
       }
 
       // 4. Fetch pending timetables
@@ -290,12 +300,17 @@ export default function PrincipalDashboard() {
   // Onboard / Link Tutor Confirmation handler
   const handleLinkTutor = async (semester, tutorUsername) => {
     try {
-      // Find class mapping object
+      // Find class mapping object. This still posts to the old
+      // /api/hod/link-tutor prototype endpoint below, which doesn't exist
+      // in the Node backend and always 404s — real tutor assignment
+      // requires WorkflowService (Module 8) plus a username -> user_id
+      // resolution neither of which exist yet, so this write path is
+      // deliberately left as-is, not repointed. See .ai/TASK.md.
       const targetCls = classesList.find(c => c.semester === semester);
       const reqBody = {
         semester,
         staff_username: tutorUsername,
-        className: targetCls ? targetCls.className : undefined
+        className: targetCls ? targetCls.class_name : undefined
       };
 
       const res = await fetch('/api/hod/link-tutor', {
@@ -1227,10 +1242,10 @@ export default function PrincipalDashboard() {
                       <div key={idx} className="p-3 bg-slate-50/50 border border-slate-105 rounded-xl flex items-center justify-between gap-3">
                         <div>
                           <p className="text-xs font-black text-slate-800">{cls.semester}</p>
-                          <p className="text-[9px] text-slate-400 font-semibold mt-0.5">{cls.className}</p>
+                          <p className="text-[9px] text-slate-400 font-semibold mt-0.5">{cls.class_name}</p>
                         </div>
-                        <select 
-                          value={cls.tutor_id || ''}
+                        <select
+                          value={cls.tutor_user_id || ''}
                           onChange={e => handleLinkTutor(cls.semester, e.target.value)}
                           className="px-2 py-1.5 text-[10px] bg-white border border-slate-200 rounded-lg focus:outline-none font-bold text-slate-655 max-w-[130px]"
                         >

@@ -185,7 +185,7 @@ const getStaffScheduleForToday = (timetable, username) => {
 
 export default function TutorClass() {
   const { showToast } = useToast();
-  const { user } = useAuth();
+  const { user, accessToken } = useAuth();
 
   const [currentUser, setCurrentUser] = useState(user);
   const [selectedTutorId, setSelectedTutorId] = useState('');
@@ -206,18 +206,27 @@ export default function TutorClass() {
   const [uploadingTimetable, setUploadingTimetable] = useState(false);
   const [deptClasses, setDeptClasses] = useState([]);
 
+  // Repointed to the real API (routes/classes.js). Unlike the old
+  // /api/hod/classes prototype endpoint (never existed in the Node
+  // backend, always 404'd), GET /api/v1/classes is real, requireAuth-gated
+  // (needs the Authorization header below), and returns a bare array, not
+  // a { classes: [...] } envelope. Its rows carry tutor_user_id (a real
+  // users.id UUID) instead of the prototype's tutor_id (a username
+  // string) — the dropdown below is updated to match. See .ai/TASK.md.
   useEffect(() => {
     if (user?.role === 'hod') {
-      fetch('/api/hod/classes')
+      fetch('/api/v1/classes', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
         .then(res => res.json())
         .then(data => {
-          if (data && data.classes) {
-            setDeptClasses(data.classes);
+          if (Array.isArray(data)) {
+            setDeptClasses(data);
           }
         })
         .catch(err => console.error('Failed to fetch department classes:', err));
     }
-  }, [user]);
+  }, [user, accessToken]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('roll_number');
@@ -669,8 +678,8 @@ export default function TutorClass() {
                     {user?.role === 'hod' && deptClasses.length > 0 && (
                       <optgroup label="Department Classes">
                         {deptClasses.map((c, idx) => (
-                          <option key={idx} value={c.tutor_id || `unassigned_${c.className}`}>
-                            {c.className} {c.tutor_id ? `(@${c.tutor_id})` : '(No Tutor Linked)'}
+                          <option key={idx} value={c.tutor_user_id || `unassigned_${c.class_name}`}>
+                            {c.class_name} {c.tutor_user_id ? `(@${c.tutor_user_id})` : '(No Tutor Linked)'}
                           </option>
                         ))}
                       </optgroup>

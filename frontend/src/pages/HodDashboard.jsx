@@ -408,12 +408,23 @@ export default function HodDashboard() {
         setStaffList(staffData.staff);
       }
 
-      // Class mappings
-      const classRes = await fetch('/api/hod/classes');
+      // Class mappings — repointed to the real API (routes/classes.js).
+      // Unlike the old /api/hod/classes prototype endpoint (which never
+      // existed in the Node backend and always 404'd), GET /api/v1/classes
+      // is real, requireAuth-gated (needs the Authorization header below,
+      // which none of this function's other fetches send), and returns a
+      // bare array, not a { classes: [...] } envelope. Its rows carry
+      // tutor_user_id (a real users.id UUID) instead of the prototype's
+      // tutor_id (a username string) — every downstream read of this list
+      // below is updated to match. See .ai/TASK.md for what that shape
+      // change does and doesn't unlock in this slice.
+      const classRes = await fetch('/api/v1/classes', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
       if (handleAuthError(classRes)) return;
       if (classRes.ok) {
         const classData = await classRes.json();
-        setClassesList(classData.classes);
+        setClassesList(classData);
       }
 
       // Monitor Tutor Classes
@@ -436,16 +447,23 @@ export default function HodDashboard() {
     loadData();
   }, []);
 
-  // Set default timetable and dashboard selections once classesList loads
+  // Set default timetable and dashboard selections once classesList loads.
+  // tutor_user_id (real API) replaces tutor_id (prototype username) — see
+  // the loadData comment above. Both selectedTimetableTutor and
+  // selectedDashboardTutor still only ever reach the old, still-unrepointed
+  // /api/monitor/* and /api/timetable/* endpoints below, so this rename has
+  // no functional effect on those calls (they 404 identically either way);
+  // it's here so this value at least reflects what classesList really
+  // contains.
   useEffect(() => {
     if (classesList.length > 0) {
-      const activeTutors = classesList.filter(c => c.tutor_id);
+      const activeTutors = classesList.filter(c => c.tutor_user_id);
       if (activeTutors.length > 0) {
-        setSelectedTimetableTutor(activeTutors[0].tutor_id);
-        setSelectedDashboardTutor(activeTutors[0].tutor_id);
+        setSelectedTimetableTutor(activeTutors[0].tutor_user_id);
+        setSelectedDashboardTutor(activeTutors[0].tutor_user_id);
       } else {
-        setSelectedTimetableTutor(classesList[0].tutor_id || '');
-        setSelectedDashboardTutor(classesList[0].tutor_id || '');
+        setSelectedTimetableTutor(classesList[0].tutor_user_id || '');
+        setSelectedDashboardTutor(classesList[0].tutor_user_id || '');
       }
     }
   }, [classesList]);
@@ -614,8 +632,14 @@ export default function HodDashboard() {
     setEditingStaff(staff);
     setGeneratedCreds(null);
     
-    // Find if this staff is linked to any semester
-    const matchedClass = classesList.find(c => c.tutor_id === staff.username);
+    // Find if this staff is linked to any semester. This match never
+    // succeeds today: classesList.tutor_user_id is a real users.id UUID,
+    // staff.username lives on a different, still-unrepointed prototype
+    // endpoint (/api/hod/staff) that 404s and leaves staffList empty — see
+    // .ai/TASK.md. Left as the closest correct comparison for when
+    // staffList itself is repointed to the real GET /api/v1/staff (out of
+    // scope here), not silently dropped.
+    const matchedClass = classesList.find(c => c.tutor_user_id === staff.username);
     const linked_semester = matchedClass ? matchedClass.semester : 'None';
 
     setStaffForm({
@@ -2071,12 +2095,17 @@ export default function HodDashboard() {
                   
                   <div className="space-y-3">
                     {classesList?.map((cls, idx) => {
-                      const tutor = staffList.find(s => s.username === cls.tutor_id);
+                      // staffList is still sourced from the unrepointed
+                      // /api/hod/staff prototype endpoint (404s, stays
+                      // empty), so this never matches — tutor stays
+                      // undefined and only the raw tutor_user_id badge
+                      // below renders. See .ai/TASK.md.
+                      const tutor = staffList.find(s => s.username === cls.tutor_user_id);
                       return (
                         <div key={idx} className="p-3 bg-slate-50/50 border border-slate-100 rounded-xl flex justify-between items-center">
                           <div>
                             <p className="text-xs font-extrabold text-slate-450 uppercase tracking-wider">{cls.semester}</p>
-                            <p className="text-sm font-bold text-slate-800">{cls.className}</p>
+                            <p className="text-sm font-bold text-slate-800">{cls.class_name}</p>
                             {tutor && (
                               <p className="text-[10px] font-semibold text-slate-500 mt-1">
                                 Login: <span className="font-mono bg-amber-50 px-1 py-0.5 rounded text-amber-800 border border-amber-250/20">{tutor.username}</span> / <span className="font-mono bg-amber-50 px-1 py-0.5 rounded text-amber-800 border border-amber-250/20">{tutor.password || 'staff123'}</span>
@@ -2084,9 +2113,9 @@ export default function HodDashboard() {
                             )}
                           </div>
                           <div>
-                            {cls.tutor_id ? (
+                            {cls.tutor_user_id ? (
                               <span className="text-xs font-black text-amber-600 bg-amber-50 border border-amber-200/50 px-2.5 py-1 rounded-lg">
-                                @{cls.tutor_id}
+                                @{cls.tutor_user_id}
                               </span>
                             ) : (
                               <span className="text-xs font-semibold text-slate-400 italic">No Tutor Assigned</span>
@@ -2115,7 +2144,7 @@ export default function HodDashboard() {
                       <p className="text-xs text-slate-400 py-6 text-center italic">No staff profiles created yet.</p>
                     ) : (
                       staffList?.map((staff, idx) => {
-                        const matchedClass = classesList.find(c => c.tutor_id === staff.username);
+                        const matchedClass = classesList.find(c => c.tutor_user_id === staff.username);
                         // Find workload for this staff
                         const staffNameKey = (staff.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
                         const wl = staffWorkload[staffNameKey] || null;
