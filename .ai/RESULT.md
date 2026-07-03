@@ -1,95 +1,120 @@
 # RESULT
 
 ## Files changed
-- backend/src/routes/students.js (new)
-- backend/tests/students.test.js (new)
-- backend/src/tenantApp.js (one require + one `app.use()` line)
+- frontend/src/App.jsx
+- frontend/src/pages/Login.jsx
 
 ## What changed, per file
-- `routes/students.js`: `createStudentsRouter()` factory, same shape as
-  `routes/configurations.js` — `express.Router()`, routes relative to the
-  eventual `/api/v1` mount, `asyncHandler` on every handler,
-  `requireResolvedTenant(req, res)` copied verbatim, `client = req.dbClient`,
-  `collegeId = req.collegeId`, `userId = req.jwtClaims.sub`. Five endpoints:
-  `POST /students` (201), `GET /students/:id` (404 if `null`),
-  `GET /students` (list, `?limit=&offset=` passed through as numbers or
-  `undefined` — the 50/0 defaults live in the service/repository, not
-  reimplemented here), `PUT /students/:id` (404 if `null`),
-  `DELETE /students/:id` (204, or 404 if `null`). Error mapping:
-  `StudentValidationError` → 400, `StudentRollNoConflictError` → 409, both
-  via a small shared `mapStudentServiceError` helper used in the
-  `create`/`update` handlers (the only two that can throw either — `remove`
-  has no try/catch, since `removeStudent` doesn't raise either error).
-  Writes gated with `requireRole('principal')`, reads with `requireAuth`,
-  commented in-file as an explicit interim placeholder the same way
-  `configurations.js` flagged its own principal-only gate — not a claim
-  that principal-only editing is the real long-term rule. Request bodies
-  are translated snake_case → camelCase via a local `STUDENT_BODY_FIELDS`
-  map / `bodyToServiceFields()` (matches `StudentEditorModal.jsx`'s existing
-  snake_case payload shape); responses are returned as studentRepository's
-  native snake_case row, un-translated — picked because it's strictly less
-  code than translating back, and the frontend already expects snake_case
-  field names, so there's nothing to gain by reshaping on the way out.
-- `tenantApp.js`: added `const createStudentsRouter = require('./routes/students');`
-  next to the other route requires, and `app.use(createStudentsRouter());`
-  in the same block as `createAuthRouter()`/`createConfigurationsRouter()`,
-  after `tenantMiddleware` — no other change to this file.
-- `students.test.js`: HTTP-level integration tests (same shape as
-  `configurations.test.js`) against a live Postgres — all 5 endpoints,
-  both error mappings hit via the real service/DB (a genuine duplicate
-  `roll_no` on create, a genuine duplicate on update), 404 on unknown ids,
-  RBAC (principal-only writes, any-authenticated-user reads, 401
-  unauthenticated), an aadhaar-shaped field silently absent from the
-  response, cross-tenant `roll_no` reuse, and one audit-log row per create.
+- `App.jsx`: `login(username, password, collegeCode)` now POSTs
+  `/api/v1/auth/login` with `X-College-Code` (only on this call — see
+  Flags) and `{ username, password }`; on success it stores
+  `access_token`/`refresh_token` under fixed `localStorage` keys, then
+  calls `GET /api/v1/auth/me` with the new token to populate `user` as
+  `{ user_id, college_id, role }` (never a client-decoded JWT shape).
+  Failure reads `err.detail`. Session restore on load now reads a
+  stored `access_token` and calls `/auth/me`: 200 populates `user`, 401
+  clears both stored tokens and falls through to logged-out, no
+  retry/loop. `logout()` POSTs `/api/v1/auth/logout` with
+  `{ refresh_token }` **and an `Authorization: Bearer <access_token>`
+  header** (added after live testing — see Tests/Flags), then clears
+  `localStorage`/state unconditionally regardless of the response.
+  `useAuth()` now also exposes `accessToken` for the next slice's
+  `Authorization` headers. No other page's fetch calls touched.
+- `Login.jsx`: removed the `/api/colleges/code/:code` lookup and its
+  "College Verified" confirmation UI/state (`collegeInfo`, the async
+  `handleCollegeCode`). Step 1 is now a synchronous "collect the code,
+  advance to step 2" — no server round-trip. `handleLogin` passes
+  `collegeCode.trim().toLowerCase()` straight to `login()` (same
+  normalization the old code applied before its now-removed lookup
+  call). Removed the now-unused `CheckCircle2` import. Two-step shape
+  unchanged.
 
 ## Tests
-Ran against a throwaway `postgres:16` Docker container migrated through all
-three existing migrations (roles created manually, matching
-`docker/postgres/init/`), with `DATABASE_URL`/`MIGRATION_DATABASE_URL`/
-`PLATFORM_DATABASE_URL`/`JWT_SECRET_KEY`/`PLATFORM_JWT_SECRET_KEY` set for
-the process. Container removed after.
+Built with `vite build` after each change (clean, no warnings beyond
+the pre-existing chunk-size notice). Then ran the actual login/logout/
+session-restore flow against a **live** stack — a throwaway
+`postgres:16` container migrated through all three existing
+migrations, the real Express backend (`node src/index.js`) on port
+5000, and the real Vite dev server on port 3000 (confirming its
+existing `/api` → `localhost:5000` proxy actually forwards
+`/api/v1/...`) — with a real seeded college (`demo`) and a real
+`principal` user (argon2-hashed password, not a stub). No browser
+automation tool (`chromium-cl`i/Playwright) was available in this
+Windows sandbox — no Linux container/xvfb to run one — so the UI
+wasn't driven through an actual rendered page; every fetch call
+`App.jsx`/`Login.jsx` make was instead exercised directly via `curl`
+against the identical URLs/headers/bodies the React code sends,
+against the same live backend + DB the code will actually talk to.
+This should be spot-checked in a real browser before shipping — flagged
+below.
 
-1. `node --check` on `routes/students.js` and `tenantApp.js` — clean.
-2. `node --test tests/students.test.js` — **18/18 pass**, including:
-   - `StudentValidationError` → 400 for a missing `roll_no` and, separately,
-     a missing `full_name` — real service call, not a hand-thrown error.
-   - `StudentRollNoConflictError` → 409 for (a) two `POST`s with the same
-     `roll_no` in one tenant, and (b) a `PUT` that updates one student onto
-     another's existing `roll_no` — both from the real
-     `students_college_id_roll_no_key` constraint via a real `arcnave_app`
-     connection, not simulated.
-   - 404 on `GET`/`PUT`/`DELETE` for a nonexistent id; a second `DELETE`
-     on an already-deleted id also 404s.
-   - RBAC: `staff` gets 403 on `POST`; no token gets 401 on `POST` and on
-     `GET`; `staff` gets 200 on `GET` (reads aren't principal-gated).
-   - Cross-tenant: the same `roll_no` succeeds independently in two
-     different tenants; tenant B can't `GET` tenant A's student by id
-     (404, RLS-scoped).
-   - Exactly one `student_created` audit row per successful create.
-3. `node --test tests/` (full suite) — **106/106 pass**, no regressions.
+1. **Login success** — `POST /api/v1/auth/login` with `X-College-Code: demo`
+   and the seeded principal's real credentials returns a genuine JWT;
+   `GET /api/v1/auth/me` with that token returns exactly
+   `{ user_id, college_id: "demo", role: "principal" }` — the shape
+   `login()` uses to populate `user`.
+2. **Wrong password** — same call with a bad password returns
+   `{"detail":"Invalid username or password"}`, 401 — confirms
+   `err.detail` (not `err.error`) is the right field to read.
+3. **Unknown college code** — `X-College-Code: doesnotexist` returns
+   `{"detail":"No tenant could be resolved for this request"}`, 400 —
+   distinguishable from the 401 above, as required.
+4. **Session restore** — `/auth/me` with a garbage/invalid token
+   returns 401 (the path that clears stored tokens client-side).
+5. **Logout / revoke — real bug found and fixed.** First attempt
+   called `/auth/logout` with only `{ refresh_token }` and no
+   `Authorization` header (matching the task's literal wording, which
+   only specifies the body). `revoked_at` stayed `NULL` in the DB
+   after a 204 response. Root cause: `refresh_tokens` has `FORCE ROW
+   LEVEL SECURITY`; with no tenant resolved (no subdomain in local
+   dev, no header), `app.current_tenant` is never set for that
+   request's transaction, so RLS hides the row from
+   `authService.revoke`'s lookup entirely — `revoke()` silently no-ops
+   on a row it can never see, and the route still returns 204 either
+   way. Fixed by sending `Authorization: Bearer <access_token>` on the
+   logout call so `tenantMiddleware` resolves the tenant from the
+   JWT's `college_id` claim, same as every other post-login request.
+   Re-verified end to end: logged in, captured the refresh token,
+   computed its SHA-256 hash independently (matching `security.js`'s
+   `hashRefreshToken`), confirmed the row's `revoked_at` was `NULL`
+   pre-logout, called `/auth/logout` with the `Authorization` header,
+   and confirmed `revoked_at` was a real timestamp afterward —
+   verified in the database directly, not just trusting the 204.
+6. Confirmed no backend files changed (`git status --short backend/`
+   empty) and no other frontend page's fetch calls were touched
+   (only `App.jsx`/`Login.jsx` in the diff).
 
 ## Flags / open questions
-- **RBAC is a conservative placeholder, not a final decision** — per the
-  task: BusinessRules.md's real rule (only the assigned Class Tutor may
-  edit; only timetable-assigned faculty may view) can't be enforced today
-  because "Class Tutor" isn't a resolved role (Module 2) and there's no
-  timetable/assignment data yet (Module 3). `requireRole('principal')` on
-  writes / `requireAuth` on reads is copied directly from
-  `configurations.js`'s own precedent for this exact situation, and must be
-  revisited once Module 2 resolves the Class Tutor question.
-- **snake_case/camelCase translation is one-directional** — request bodies
-  are translated (snake_case in, camelCase to the service); responses are
-  returned as-is in the repository's native snake_case, not translated
-  back. Explicitly the simpler of the two options the task offered; flagged
-  in case round-tripping through camelCase is actually wanted for some
-  future consumer of this API.
-- **`GET /students` (list) has no RLS-independent tenant filter beyond
-  what RLS already provides** — same as every other student lookup in this
-  slice, tenant scoping is entirely `current_setting('app.current_tenant')`
-  on the `req.dbClient` connection; there's no defense-in-depth
-  `WHERE college_id = ...` at this layer for list specifically (unlike
-  `findByRollNo`, which does filter explicitly for the non-globally-unique
-  case). Consistent with how `studentRepository.list` was already written
-  in the first slice, not a new decision here.
-- **No route/UI change beyond the 5 endpoints and the one `tenantApp.js`
-  hook** — no frontend repoint in this slice, per the task.
+- **Logout needed an `Authorization` header the task didn't literally
+  specify** — the task's exact wording for `logout()` only mentions
+  the `{ refresh_token }` body. Without the header, the call still
+  "succeeds" (204) but silently revokes nothing, because of
+  `refresh_tokens`' RLS policy (see Tests #5). Added the header since
+  the alternative is a logout that doesn't actually log anyone out
+  server-side — flagging in case there's a reason this was
+  deliberately left out that I'm not seeing.
+- **Dropped the college-verification round-trip, as instructed** —
+  step 1 no longer confirms the college name before step 2; a bad code
+  now only surfaces once the real login call runs, as a 400 distinct
+  from a 401. This is the one intentional UX regression called out in
+  the task, not something dropped silently.
+- **Refresh-token rotation / silent-refresh-on-401 is out of scope, as
+  instructed** — the refresh token is stored and used for the logout
+  revoke call only; there is no auto-refresh interceptor. An expired
+  access token today means the user has to log in again rather than
+  being silently refreshed — acceptable per the task, revisit if
+  access-token expiry (15 min, per `config.js`) becomes a practical
+  problem.
+- **No browser-level verification was possible in this sandbox** — see
+  Tests above. Every fetch call was verified at the HTTP level against
+  a real backend/DB, but the actual rendered `Login.jsx` flow (button
+  clicks, step transitions, redirect-by-role) was not driven through
+  a real browser. Recommend a manual click-through (or
+  `/run-skill-generator` to capture a repeatable browser-driving setup
+  for this repo) before considering this slice fully verified.
+- **`vite.config.js`'s dev proxy target (`localhost:5000`) was not
+  changed and was not in scope** — confirmed it does forward
+  `/api/v1/...` correctly (tested directly), so no action needed, but
+  noting it since the task's `/api/v1` paths only reach the real
+  backend in dev because that proxy target happens to already be where
+  this backend listens.

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../App';
 import {
   Building2, Lock, User, ShieldAlert, ArrowRight,
-  CheckCircle2, ChevronLeft, Sparkles, GraduationCap
+  ChevronLeft, Sparkles, GraduationCap
 } from 'lucide-react';
 
 const DEMO = [
@@ -93,24 +93,23 @@ export default function Login() {
   const { login } = useAuth();
   const [step, setStep] = useState(1);
   const [collegeCode, setCollegeCode] = useState('');
-  const [collegeInfo, setCollegeInfo] = useState(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleCollegeCode = async (e) => {
+  // No public "look up a college by code" endpoint exists — step 1
+  // just collects the code and advances; a bad code surfaces as a 400
+  // "No tenant could be resolved for this request" from the actual
+  // login call in step 2 (distinguishable from a 401 wrong-password),
+  // not from a confirmation round-trip here. Intentional UX
+  // regression vs. the old "College Verified: <name>" step — see
+  // .ai/TASK.md.
+  const handleCollegeCode = (e) => {
     e.preventDefault();
     setError('');
     if (!collegeCode.trim()) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/colleges/code/${encodeURIComponent(collegeCode.trim().toLowerCase())}`);
-      if (!res.ok) throw new Error((await res.json()).error || 'Invalid college code');
-      setCollegeInfo(await res.json());
-      setStep(2);
-    } catch (err) { setError(err.message); }
-    finally { setLoading(false); }
+    setStep(2);
   };
 
   const handleLogin = async (e) => {
@@ -118,7 +117,7 @@ export default function Login() {
     setError('');
     setLoading(true);
     try {
-      await login(username, password, collegeInfo?.college_id);
+      await login(username, password, collegeCode.trim().toLowerCase());
     } catch (err) { setError(err.message || 'Invalid credentials.'); }
     finally { setLoading(false); }
   };
@@ -364,19 +363,6 @@ export default function Login() {
                   style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', color: '#007AFF', fontSize: 13.5, fontWeight: 600, marginBottom: 22, fontFamily: 'inherit', padding: 0, letterSpacing: '-0.01em' }}>
                   <ChevronLeft style={{ width: 15, height: 15 }} /> Change college
                 </button>
-
-                {/* Verified badge */}
-                {collegeInfo && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 13, background: 'rgba(52,199,89,0.09)', border: '1px solid rgba(52,199,89,0.24)', borderRadius: 16, padding: '13px 16px', marginBottom: 24 }}>
-                    <div style={{ width: 36, height: 36, borderRadius: 11, background: 'rgba(52,199,89,0.16)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                      <CheckCircle2 style={{ width: 19, height: 19, color: '#34C759' }} />
-                    </div>
-                    <div>
-                      <p style={{ fontSize: 10.5, fontWeight: 700, color: '#34C759', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>College Verified</p>
-                      <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--label,#000)', letterSpacing: '-0.02em' }}>{collegeInfo.name}</p>
-                    </div>
-                  </div>
-                )}
 
                 <h2 style={{ fontSize: 24, fontWeight: 800, color: 'var(--label,#000)', letterSpacing: '-0.035em', marginBottom: 24 }}>
                   Sign in to portal

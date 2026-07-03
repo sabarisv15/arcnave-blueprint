@@ -6,6 +6,23 @@ import { CheckCircle2, AlertTriangle, Info, XCircle, X } from 'lucide-react';
 const AuthContext = createContext(null);
 const ToastContext = createContext(null);
 
+// Fixed localStorage keys for the real backend's bearer tokens — a
+// persisted app, not a one-off artifact, so normal SPA
+// token-persistence practice applies (see .ai/TASK.md).
+const ACCESS_TOKEN_KEY = 'arcnave_access_token';
+const REFRESH_TOKEN_KEY = 'arcnave_refresh_token';
+
+// Asks the server who the token belongs to rather than trusting a
+// shape decoded client-side from the JWT — same verification
+// discipline as this backend's own /whoami route.
+async function fetchCurrentUser(accessToken) {
+  const res = await fetch('/api/v1/auth/me', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
 export function useAuth() {
   return useContext(AuthContext);
 }
@@ -116,6 +133,7 @@ function IndexRedirect() {
 
 export default function App() {
   const [user, setUser] = useState(null);
+  const [accessToken, setAccessToken] = useState(null);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
   const [systemStatus, setSystemStatus] = useState({ online: true, fallback: false, gemini: false });
@@ -127,14 +145,24 @@ export default function App() {
 
   const closeToast = () => setToast(null);
 
-  // Fetch Current Session on Startup
+  // Fetch Current Session on Startup — restore from a stored access
+  // token if one exists. 401 (expired/invalid) clears it and falls
+  // through to logged-out state; no retry/loop.
   useEffect(() => {
     const checkAuth = async () => {
+      const storedToken = localStorage.getItem(ACCESS_TOKEN_KEY);
+      if (!storedToken) {
+        setLoading(false);
+        return;
+      }
       try {
-        const response = await fetch('/api/auth/me');
-        if (response.ok) {
-          const data = await response.json();
-          setUser(data.user);
+        const me = await fetchCurrentUser(storedToken);
+        if (me) {
+          setUser(me);
+          setAccessToken(storedToken);
+        } else {
+          localStorage.removeItem(ACCESS_TOKEN_KEY);
+          localStorage.removeItem(REFRESH_TOKEN_KEY);
         }
       } catch (err) {
         console.warn('System appears offline or API failed.', err);
@@ -163,32 +191,71 @@ export default function App() {
     checkSystem();
   }, []);
 
-  const login = async (username, password, college_id) => {
-    const res = await fetch('/api/auth/login', {
+  const login = async (username, password, collegeCode) => {
+    // X-College-Code is only needed on this call: no JWT exists yet
+    // to carry a college_id claim, and local dev has no real subdomain
+    // routing, so the header is tenantMiddleware's only resolvable
+    // source here. Every request made after login relies on the
+    // issued token's own claim instead — see logout()/fetchCurrentUser
+    // below, neither of which sends this header.
+    const res = await fetch('/api/v1/auth/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, college_id: college_id || 'college_demo' })
+      headers: { 'Content-Type': 'application/json', 'X-College-Code': collegeCode || '' },
+      body: JSON.stringify({ username, password }),
     });
     if (!res.ok) {
       const err = await res.json();
-      throw new Error(err.error || 'Failed to login');
+      throw new Error(err.detail || 'Failed to login');
     }
-    const data = await res.json();
-    setUser(data.user);
-    showToast(`Welcome back, ${data.user.username}!`, 'success');
-    return data.user;
+    const tokens = await res.json();
+
+    const me = await fetchCurrentUser(tokens.access_token);
+    if (!me) {
+      throw new Error('Login succeeded but session verification failed');
+    }
+
+    localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access_token);
+    localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token);
+    setAccessToken(tokens.access_token);
+    setUser(me);
+    showToast(`Welcome back, ${username}!`, 'success');
+    return me;
   };
 
   const logout = async () => {
+    const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
     try {
-      await fetch('/api/auth/logout', { method: 'POST' });
+      // Authorization header is required here, not optional: this
+      // route's revoke runs against refresh_tokens, which has RLS
+      // (see the Module 0 migration). With no tenant resolved
+      // (no subdomain locally, no header), app.current_tenant stays
+      // unset and RLS hides the row from the UPDATE entirely — the
+      // route still returns 204 either way (authService.revoke is a
+      // silent no-op on a row it can't see), so a missing/expired
+      // access token here means logout looks like it worked but never
+      // actually revoked anything server-side. The stored access
+      // token's college_id claim is what lets tenantMiddleware resolve
+      // a tenant for this call.
+      await fetch('/api/v1/auth/logout', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
     } catch (e) {}
+    // Idempotent client-side regardless of the response — same spirit
+    // as authService.revoke's server-side idempotence.
+    localStorage.removeItem(ACCESS_TOKEN_KEY);
+    localStorage.removeItem(REFRESH_TOKEN_KEY);
+    setAccessToken(null);
     setUser(null);
     showToast('Logged out successfully.', 'warning');
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, systemStatus, setUser }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, accessToken, systemStatus, setUser }}>
       <ToastContext.Provider value={{ showToast }}>
         <BrowserRouter>
           {/* Fallback Mode Indicator Alert — iOS glass banner */}

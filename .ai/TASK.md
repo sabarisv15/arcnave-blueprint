@@ -1,95 +1,115 @@
 # TASK
 
 ## Objective
-Module 1 (Student), third vertical slice: API routes on top of
-`studentService.js`. Still no UI repoint — that's the next slice
-after this one.
+**Module 0 (Platform Foundation), UI slice — not Module 1.** The
+Student UI slice can't proceed until this exists: nothing in the
+frontend currently obtains or sends a real JWT, so no page can call
+any `/api/v1/...` route yet. Scope here is strictly "make login work
+against the real backend and make the token available to future
+slices" — not a general frontend rewrite. Every other page
+(`HodDashboard.jsx`, `TutorClass.jsx`, `StaffDashboard.jsx`, etc.)
+keeps calling its old prototype endpoints untouched; repointing those
+is each their own future slice, module by module.
 
 ## Files likely affected
-- `backend/src/routes/students.js` (new)
-- `backend/src/tenantApp.js` (add one require + one `app.use()` line,
-  same as `createConfigurationsRouter` and `createAuthRouter` — no
-  other change to this file)
+- `frontend/src/App.jsx` (auth context: `login`, `logout`, session
+  restore on load)
+- `frontend/src/pages/Login.jsx` (one simplification — see below)
 
-## Context
-- `backend/src/services/studentService.js` already exists:
-  `createStudent`, `getStudent`, `updateStudent`, `removeStudent`,
-  `listStudents`, plus `StudentValidationError` and
-  `StudentRollNoConflictError`.
-- Follow `routes/configurations.js` exactly — it's the closest
-  precedent (RLS-scoped tenant resource, service-layer domain
-  errors, optimistic-style conflict mapping): factory function
-  `createStudentsRouter()` returning an `express.Router()`, routes
-  registered relative to the eventual `/api/v1` mount (CLAUDE.md rule
-  5 — the prefix is supplied externally by `tenantApp.js`, never
-  hardcoded here), `asyncHandler` wrapping every handler,
-  `requireResolvedTenant(req, res)` guard copied the same way, `client`
-  = `req.dbClient`, `collegeId` = `req.collegeId`, `userId` =
-  `req.jwtClaims.sub`.
+## Context — what's actually there today (checked, not assumed)
+- `App.jsx`'s `login()` currently POSTs `/api/auth/login` (old
+  prototype, cookie-session-based) and expects `{ user }` back. The
+  real backend (`routes/auth.js`) is `/api/v1/auth/login`, POST
+  `{ username, password }`, returns
+  `{ access_token, refresh_token, token_type }` — a bearer JWT, not a
+  cookie session. Error bodies are `{ detail: ... }`, not `{ error: ... }`
+  — every route in this codebase uses `detail` consistently; fix the
+  `err.error` reads too.
+- Tenant resolution (`middleware/tenant.js`) checks, in priority
+  order: subdomain → JWT claim → `X-College-Code` header, and 400s on
+  disagreement between sources. Local dev has no real subdomain
+  routing, so: send `X-College-Code: <the code the user typed>` on
+  the `/auth/login` call itself (no JWT exists yet, so subdomain/JWT
+  both fail to resolve and the header is the only source). Do **not**
+  keep sending it on requests made after login — once a valid JWT
+  exists, its `college_id` claim resolves the tenant on its own, and
+  sending a stale/mismatched header alongside a valid token would hit
+  the 400 mismatch-conflict path for no reason.
+- `GET /api/v1/auth/me` (already built, `requireAuth`-gated) returns
+  `{ user_id, college_id, role }` from the verified JWT claims — use
+  this to populate `user` state after login and on page-load session
+  restore, replacing whatever shape `{ user }` used to have.
+- **No public "look up a college by code" endpoint exists yet** —
+  `POST /colleges` is `requirePlatformAdmin`-gated (creating colleges,
+  not looking one up), and there is no unauthenticated equivalent.
+  Deliberate scope decision for this slice: **don't build one.**
+  `Login.jsx`'s step 1 currently round-trips to `/api/colleges/code/:code`
+  to show a "College Verified: `<name>`" confirmation before step 2 —
+  drop that round-trip. Step 1 just collects the code and advances to
+  step 2; the code gets validated implicitly when step 2's actual
+  login call runs (a bad code surfaces as a 400 "No tenant could be
+  resolved for this request" from `tenantMiddleware`, distinguishable
+  from a 401 wrong-password). This is the one intentional UX
+  regression in this slice — flag it as such, don't silently drop it
+  without saying so.
+- Refresh-token rotation / silent-refresh-on-401 is explicitly **out
+  of scope** here. Store the `refresh_token`, use it for `logout()`'s
+  revoke call, but don't build an auto-refresh interceptor — that's
+  its own slice if/when access-token expiry actually becomes a
+  problem in practice.
 
 ## Exact changes
 
-**Endpoints**:
-- `POST /students` — `createStudent`. 201 on success.
-- `GET /students/:id` — `getStudent`. 404 if `null`.
-- `GET /students` — `listStudents`. Accepts `?limit=&offset=` query
-  params, passed through as-is (service/repository already default
-  them to 50/0 — don't re-implement that default here).
-- `PUT /students/:id` — `updateStudent`. 404 if the service returns
-  `null` (id not found).
-- `DELETE /students/:id` — `removeStudent`. 404 if `null`, else 204.
+**`App.jsx` — `login(username, password, collegeCode)`**:
+- POST `/api/v1/auth/login`, headers include
+  `X-College-Code: collegeCode`, body `{ username, password }`.
+- On success: store `access_token`/`refresh_token` (localStorage,
+  fixed keys — this is a real persisted app, not a Claude artifact;
+  normal SPA token-persistence practice applies here). Call
+  `GET /api/v1/auth/me` with the new token to populate `user` (
+  `{ user_id, college_id, role }`) — don't trust a shape decoded
+  client-side from the JWT itself, ask the server, same as the
+  existing `/whoami`-style verification discipline elsewhere in this
+  backend.
+- On failure: read `err.detail`, not `err.error`.
 
-**Request/response body shape — snake_case, not camelCase**:
-`StudentEditorModal.jsx` (the frontend this module will eventually
-repoint) already POSTs a snake_case payload (`roll_no`, `full_name`,
-`mark_10th`, ...) matching the DB columns directly — see its
-`handleSave`. Translate snake_case body keys to the camelCase params
-`studentService` expects at the route boundary (a small mapping
-function in this file, not a shared util yet — one file uses it so
-far). This keeps the later UI-repoint slice a URL/fetch-path change,
-not a payload-reshaping one. Response bodies: same translation in
-reverse, or just return the repository's native row shape
-(snake_case, since that's what Postgres returns) — pick whichever
-keeps this file simplest and say which you picked.
+**`App.jsx` — session restore on load**: if a stored `access_token`
+exists, call `GET /api/v1/auth/me` with it. 200 → populate `user`,
+stop showing the loading spinner. 401 (expired/invalid) → clear
+stored tokens, treat as logged out — don't loop or retry.
 
-**Error mapping** (same discipline as `configurations.js`'s
-`ConfigurationVersionConflictError` → 409 catch):
-- `StudentValidationError` → 400
-- `StudentRollNoConflictError` → 409
-- Service returning `null` (not a thrown error) → 404, per endpoint
-  as listed above.
+**`App.jsx` — `logout()`**: POST `/api/v1/auth/logout` with
+`{ refresh_token: <stored refresh token> }` in the body (the new
+backend needs it to revoke; the old one didn't). Clear localStorage
+and `user` state regardless of the response — logout is idempotent
+client-side too, same spirit as `authService.revoke`'s
+server-side idempotence.
 
-**RBAC — conservative default, explicitly not a final decision**:
-BusinessRules.md's Staff section says only the assigned Class Tutor
-may edit a student profile, and only faculty assigned via the
-timetable may view one — but "Class Tutor" isn't a resolved role yet
-(BusinessRules.md flags this as open, to be resolved in Module 2) and
-there's no timetable/assignment data yet (Module 3, not built).
-Neither can be enforced correctly today. Match
-`configurations.js`'s own precedent for exactly this situation: gate
-writes (`POST`/`PUT`/`DELETE`) with `requireRole('principal')` — a
-real, working role string already used elsewhere in this codebase —
-and reads (`GET`) with `requireAuth` (any authenticated tenant user).
-This is a deliberately conservative placeholder, not a claim that
-principal-only editing is correct long-term; comment it the same way
-`configurations.js` did, and it must be revisited once Module 2
-resolves the Class Tutor role question.
+**Expose the token for future slices**: whatever `useAuth()` returns
+today (`user`, `login`, `logout`, `loading`), add `accessToken` to it.
+The next slice (Module 1's actual UI repoint) needs this to attach
+`Authorization: Bearer <token>` to `/api/v1/students` calls — don't
+make that slice re-derive token storage from scratch.
 
-**`tenantApp.js`**: add `const createStudentsRouter = require('./routes/students');`
-near the other route requires, and `app.use(createStudentsRouter());`
-in the same block as `createAuthRouter()`/`createConfigurationsRouter()`
-(after `tenantMiddleware`, not before — these are ordinary tenant-scoped
-routes, not `/health`- or `/invitations/accept`-style exceptions).
+**`Login.jsx`**: remove the `/api/colleges/code/:code` fetch call and
+the "College Verified" step-1 confirmation UI (per the scope decision
+above); step 1 becomes a plain "collect the code, go to step 2" form.
+Keep the two-step shape (code, then credentials) — just drop the
+server round-trip in between.
 
 ## Acceptance criteria
-- All 5 endpoints wired, each a thin translation layer — no business
-  logic here that isn't already in `studentService.js`.
-- `StudentValidationError` → 400, `StudentRollNoConflictError` → 409,
-  not-found → 404, verified against the actual service (not
-  hand-thrown errors in a test), same rigor as the service slice's
-  live-DB duplicate-roll-no test.
-- Writes require `principal` role; reads require any authenticated
-  tenant user — both flagged in-file as an interim default per above.
-- No other repository, no Storage, no WorkflowService reached from
-  this file — only `studentService.js`.
-- No UI code touched in this slice.
+- Login with a real seeded user (principal/staff/hod) against a live
+  DB succeeds end-to-end: token stored, `user` populated with the
+  real role from `/auth/me`, redirect-by-role logic (already in
+  `App.jsx`, untouched) fires correctly.
+- Wrong password → visible error from `err.detail`, not a silent
+  failure or `undefined`.
+- Wrong/unknown college code → distinguishable error (400, "No tenant
+  could be resolved"), not confused with a wrong-password 401.
+- Page reload while logged in restores the session from the stored
+  token without forcing re-login.
+- Logout clears state and actually revokes the refresh token
+  server-side (verify the row's `revoked_at` gets set, don't just
+  trust the 204).
+- No other page's fetch calls touched — every other `/api/...`
+  (non-`v1`) call in the frontend is untouched, out of scope.
