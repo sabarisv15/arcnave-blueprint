@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# These are throwaway credentials for an ephemeral CI Postgres
+# container that is created and destroyed within a single job run —
+# there is no persistent database or deployment target they protect.
+# Treating them as GitHub Secrets would imply a confidentiality need
+# that doesn't exist here; real secrets (prod DB, prod JWT keys) never
+# appear in this file.
+env:
+  POSTGRES_USER: arcnave_admin
+  POSTGRES_PASSWORD: ci_admin_password
+  POSTGRES_DB: arcnave
+  ARCNAVE_APP_PASSWORD: ci_app_password
+  ARCNAVE_PLATFORM_PASSWORD: ci_platform_password
+  JWT_SECRET_KEY: ci_jwt_secret_key_not_for_prod_1234567890
+  PLATFORM_JWT_SECRET_KEY: ci_platform_jwt_secret_key_not_for_prod_1234567890
+  DATABASE_URL: postgresql+psycopg://arcnave_app:ci_app_password@localhost:5432/arcnave
+  ALEMBIC_DATABASE_URL: postgresql+psycopg://arcnave_admin:ci_admin_password@localhost:5432/arcnave
+  PLATFORM_DATABASE_URL: postgresql+psycopg://arcnave_platform:ci_platform_password@localhost:5432/arcnave
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        ports:
+          - 5432:5432
+        # GitHub Actions blocks job steps until this health check
+        # passes, so no separate "wait for postgres" step is needed.
+        options: >-
+          --health-cmd="pg_isready -U arcnave_admin -d arcnave"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install ruff
+
+      - name: Lint with ruff
+        run: ruff check backend
+
+      # A bare `services:` Postgres container is NOT docker-compose —
+      # GitHub does not mount docker/postgres/init/*.sh as
+      # docker-entrypoint-initdb.d the way docker-compose does. Those
+      # scripts must be run explicitly, once the service is reachable,
+      # exactly as they'd run on first container boot locally.
+      - name: Create arcnave_app and arcnave_platform roles
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGPASSWORD: ${{ env.POSTGRES_PASSWORD }}
+        run: |
+          bash docker/postgres/init/01-app-role.sh
+          bash docker/postgres/init/02-platform-role.sh
+
+      - name: Run migrations
+        working-directory: backend
+        run: python -m alembic upgrade head
+
+      - name: Run tests
+        working-directory: backend
+        run: python -m pytest tests/ -v

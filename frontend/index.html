@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <title>arcnave — Campus Automation</title>
+    <meta name="description" content="arcnave smart campus automation portal for staff, HOD and principal." />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <script>
+      window.onerror = function(message, source, lineno, colno, error) {
+        fetch('http://localhost:5000/api/ai/error-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'onerror',
+            message: message,
+            source: source,
+            lineno: lineno,
+            colno: colno,
+            stack: error ? error.stack : ''
+          })
+        }).catch(err => console.error('Error logger failed:', err));
+        return false;
+      };
+      window.onunhandledrejection = function(event) {
+        fetch('http://localhost:5000/api/ai/error-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'unhandledrejection',
+            message: event.reason ? (event.reason.message || String(event.reason)) : 'Promise rejected',
+            stack: event.reason ? event.reason.stack : ''
+          })
+        }).catch(err => console.error('Error logger failed:', err));
+      };
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
