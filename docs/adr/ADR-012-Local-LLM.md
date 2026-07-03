@@ -17,3 +17,11 @@ to change exists.
 A dedicated GPU server becomes available, or cloud AI cost becomes
 significant enough to justify the operational overhead of self-
 hosting.
+
+## Review — 2026-07-03 (post Module 0)
+
+No change. Module 0 built no AI functionality at all — the AI Tool
+Registry and every AI-authority concern (AI-Governance.md) remain
+entirely deferred to Module 9 per the Roadmap, untouched by anything
+built here. Nothing in this module bears on GPU availability or cloud
+cost.
