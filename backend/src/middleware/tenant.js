@@ -20,25 +20,39 @@
 // ran — a real bug, not a style difference.
 //
 // The correct Express pattern is two separate hooks:
-//   - res.on('finish', ...) — fires once a response has actually been
-//     sent, whether that response came from a route handler that
-//     completed normally OR one that sent an intentional error
-//     response directly (e.g. res.status(400).json(...) with no
-//     throw). This is the commit path, matching the Python version's
-//     behavior of committing on any response that came back through
-//     call_next() without an uncaught exception escaping it.
+//   - intercepting res.end (see below) for the commit path — reached
+//     whenever a response is about to be sent, whether that response
+//     came from a route handler that completed normally OR one that
+//     sent an intentional error response directly (e.g.
+//     res.status(400).json(...) with no throw). Matches the Python
+//     version's behavior of committing on any response that came back
+//     through call_next() without an uncaught exception escaping it.
 //   - the 4-arg error-handling middleware (middleware/errorHandler.js)
 //     — reached only when something calls next(err). This is the
 //     rollback path.
-// Both hooks can end up seeing the same request (the error handler's
-// own response also eventually fires 'finish') — the `settled` flag
-// below ensures whichever runs first (rollback, always first when an
-// error occurred, since errorHandler awaits the rollback before
-// sending its response) is the only one that actually touches the
-// transaction; the other becomes a no-op. See
+// The `settled` flag below ensures whichever runs first (rollback,
+// always first when an error occurred, since errorHandler awaits the
+// rollback before sending its response) is the only one that actually
+// touches the transaction; the other becomes a no-op. See
 // tests/tenant-middleware.test.js's rollback-on-error case, which
 // proves this sequencing empirically rather than assuming it from
 // reading the code.
+//
+// **The commit path was originally res.on('finish', ...) and that was
+// a real, live bug, found empirically, not by inspection.** 'finish'
+// fires only *after* Node has already flushed the response to the
+// client's socket — meaning a fast client could receive a "success"
+// response and immediately issue a follow-up request (e.g. login,
+// then refresh, in tests/auth.test.js) that raced the COMMIT itself.
+// Caught via a rapid login-then-refresh diagnostic that reproduced
+// "Invalid refresh token" on a token that had just been issued,
+// consistently, once the sequence ran tightly enough — the exact
+// class of bug this project's "prove it, don't assume it" tests exist
+// to catch, just discovered a slice later than the code that caused
+// it. Fixed by intercepting res.end (the low-level method every
+// response helper — res.json, res.send, res.status().json() —
+// eventually calls): commit first, and only call the real res.end
+// once the commit has actually completed.
 
 const { appPool } = require('../db/pool');
 const { getRequestContext } = require('../logging/context');
@@ -188,15 +202,35 @@ async function tenantMiddleware(req, res, next) {
   const context = getRequestContext();
   if (context) context.collegeId = collegeId;
 
-  res.on('finish', () => {
-    commitAndRelease().catch((err) => {
-      logError('failed_to_commit_tenant_scoped_transaction', {
-        requestId: req.requestId,
-        collegeId: req.collegeId,
-        error: err.message,
+  // Every response path (res.json, res.send, an explicit res.end(),
+  // and errorHandler.js's own res.status(500).json(...)) funnels
+  // through res.end eventually — intercepting it here is the one
+  // choke point that reliably runs before any byte reaches the
+  // client, regardless of which helper the route handler used.
+  const originalEnd = res.end.bind(res);
+  res.end = (...args) => {
+    res.end = originalEnd;
+    commitAndRelease()
+      .then(() => originalEnd(...args))
+      .catch((err) => {
+        logError('failed_to_commit_tenant_scoped_transaction', {
+          requestId: req.requestId,
+          collegeId: req.collegeId,
+          error: err.message,
+        });
+        // The route handler already believes it succeeded (it called
+        // res.json/res.end with a success body) — but the commit
+        // genuinely failed, so telling the client otherwise would be
+        // worse than this bug ever was. Nothing has been flushed to
+        // the socket yet (this runs before originalEnd), so it's
+        // still safe to override with a real error response.
+        if (!res.headersSent) {
+          res.status(500).json({ detail: 'Internal server error' });
+        } else {
+          originalEnd();
+        }
       });
-    });
-  });
+  };
 
   next();
 }

@@ -15,9 +15,9 @@ const { logError } = require('../logging/logger');
 // is set by TenantMiddleware for any request that got as far as
 // opening a transaction; awaiting it here — before sending any
 // response — guarantees the rollback has actually completed (and
-// `settled` flipped true) before the response goes out, so the
-// commit-path listener on 'finish' correctly no-ops instead of racing
-// this handler.
+// `settled` flipped true) before the response goes out, so
+// TenantMiddleware's own res.end interception correctly no-ops
+// instead of racing this handler.
 // eslint-disable-next-line no-unused-vars
 async function errorHandler(err, req, res, next) {
   if (req.rollbackTransaction) {

@@ -41,19 +41,33 @@ version was originally built:
     awaitable point to commit-after/rollback-around; Express's
     `next()` has no equivalent — it does not return a promise that
     resolves once downstream handling (including the route handler)
-    has finished. The correct Express pattern turned out to be two
-    separate hooks: `res.on('finish', ...)` for the commit path (fires
-    once a response has actually been sent, whether from a normal
-    success or an intentional error response a handler sent directly)
-    and the 4-argument error-handling middleware
+    has finished. The correct Express pattern is two separate hooks:
+    intercepting `res.end` for the commit path (see below) and the
+    4-argument error-handling middleware
     (`backend/src/middleware/errorHandler.js`, reached only via
-    `next(err)`) for the rollback path. Both hooks can end up seeing
-    the same request — a `settled` flag in `tenant.js` ensures only
-    whichever runs first actually touches the transaction. Proven, not
-    assumed: `tests/tenant-middleware.test.js`'s rollback test drives a
-    route that does a real partial write to `configurations` and then
-    throws, then asserts via the migration-owner connection that
-    nothing was persisted.
+    `next(err)`) for the rollback path. A `settled` flag in `tenant.js`
+    ensures only whichever runs first actually touches the
+    transaction. Proven, not assumed: `tests/tenant-middleware.test.js`'s
+    rollback test drives a route that does a real partial write to
+    `configurations` and then throws, then asserts via the
+    migration-owner connection that nothing was persisted.
+  - **The commit path was originally `res.on('finish', ...)`, and that
+    was a real, live bug — found empirically during the
+    ConfigurationService slice, not by inspection.** `'finish'` fires
+    only *after* Node has already flushed the response to the client's
+    socket, meaning a fast client could receive a "success" response
+    and immediately issue a follow-up request that raced the `COMMIT`
+    itself. Surfaced as intermittent `auth.test.js` failures
+    ("Invalid refresh token" on a token issued moments earlier) that
+    reproduced consistently under a tight, rapid login-then-refresh
+    diagnostic — the exact class of bug this project's tests exist to
+    catch, just discovered a slice later than the code that caused it.
+    Fixed by intercepting `res.end` itself (the low-level method every
+    response helper funnels through) so the commit always completes
+    *before* any byte reaches the client, not after. Confirmed with 3
+    consecutive clean full-suite runs plus a 30-iteration rapid
+    login-then-refresh stress diagnostic, where the bug had previously
+    reproduced within 1–2 iterations every time.
   - `backend/src/app.js` exports a `createApp()` factory rather than a
     singleton, specifically so a test can insert its own route
     *before* `errorHandler` is attached — Express only routes an error
@@ -357,11 +371,88 @@ have `req.jwtClaims` in scope).
     secrets), not a role/type check that could be a weaker guarantee;
     and the isolation proof described above.
 
-All 55 Node tests pass across the six test files.
+- **ConfigurationService** (`backend/src/repositories/configurationRepository.js`,
+  `backend/src/repositories/auditLogRepository.js`,
+  `backend/src/services/configurationService.js`,
+  `backend/src/routes/configurations.js`) — the generic JSONB config
+  store mechanism, same scope as the deleted Python
+  `configuration_service.py`/`configuration_repository.py`/
+  `api/v1/configurations.py`. `category`/`configuration` stay opaque —
+  no category enum, no shape validation, same restraint as everywhere
+  else in this module.
+  - **Checked the Python version's actual behavior before writing
+    anything, per the build brief — three things confirmed, not
+    reinvented:** an unset category is a clean `404`, never a default
+    empty object; the `version` column implements genuine optimistic
+    concurrency (the caller must pass the version they last read, `409`
+    on any mismatch), never a blind increment-on-every-write; writes
+    are gated to `require_role("principal")` specifically — a
+    hardcoded single role the Python version's own comment already
+    flagged as a conservative default, not a settled decision, ported
+    as-is rather than silently resolved or silently loosened.
+  - **`configurationRepository.upsertConfiguration` is a single
+    `INSERT ... ON CONFLICT (college_id, category) DO UPDATE ... WHERE
+    configurations.version = $expectedVersion` statement — not a
+    structural port of the Python version's two-function
+    create/update split, but a faithful port of the *observable*
+    concurrency behavior it implemented.** Postgres's own
+    conditional-`DO UPDATE` natively covers every case the Python
+    version needed exception-handling for: no existing row → the
+    `INSERT` branch fires unconditionally (the service layer validates
+    `expectedVersion` shape *before* calling this, same as Python's
+    pre-check); existing row, version matches → the `WHERE` passes,
+    `UPDATE` proceeds; existing row, version doesn't match (a stale
+    write, *or* two callers racing to create the same category — the
+    loser always sees a real row by the time it runs) → the `WHERE`
+    fails, nothing is modified, `RETURNING` yields zero rows. That
+    last case was proven with a real stale-version test, not assumed
+    from reading Postgres's conditional-upsert documentation.
+  - `GET /api/v1/configurations/:category` — `requireAuth` (any
+    authenticated tenant user), matching the Python version's
+    `require_role(*TENANT_ROLES)`. `PUT /api/v1/configurations/:category`
+    — `requireRole('principal')`, matching the Python version exactly.
+    Both check `req.collegeId !== null` before calling the service,
+    same defensive reasoning as the login route: `requireAuth`/
+    `requireRole` verify the JWT is valid, not that `TenantMiddleware`
+    actually resolved a tenant for it — those are genuinely separate
+    failure modes (a validly-signed token can claim a `college_id`
+    that doesn't resolve to any real college).
+  - Every successful write still creates one `audit_log` row
+    (`action: 'configuration_updated'`, ported alongside the rest —
+    the Python version's `set_configuration` treated it as part of the
+    same operation, not an optional extra, so leaving it out here
+    would have been a silent behavior gap relative to "what the Python
+    version actually did." New, small, cross-cutting
+    `auditLogRepository.js` — the same one-function-only restraint the
+    Python version's `audit_log_repository.py` had.
+  - **Tests** — `backend/tests/configurations.test.js`, 11 cases: get
+    on an unset category `404`s; set creates at version 1; set on an
+    existing category updates and increments version across three
+    successive writes; a stale `expected_version` is rejected with
+    `409`, tested against a version that was made genuinely stale by a
+    real intervening write (not just an arbitrary wrong number), and
+    the rejected write is confirmed to have changed nothing; a
+    non-null `expected_version` against a category that doesn't exist
+    yet is also rejected; write `403`s for `staff`, `401`s
+    unauthenticated; read succeeds for `staff` (not just `principal`),
+    `401`s unauthenticated; **the tenant-scoping proof** — two tenants
+    set the *same* category name independently, both land at version 1
+    (a collision would mean the route used some connection other than
+    `req.dbClient`, bypassing RLS's tenant scoping), and each only
+    reads back its own value; and the audit log row + metadata check.
+  - **A real, pre-existing bug in `tenant.js` surfaced while writing
+    this slice's tests, unrelated to ConfigurationService itself — see
+    the Tenant Middleware entry above for the fix.** Worth noting here
+    specifically because it's exactly the kind of bug a
+    write-then-immediately-verify test (which most of
+    `configurations.test.js` is) would have been vulnerable to if it
+    hadn't already been fixed by the time these tests were written.
+
+All 67 Node tests pass across the seven test files.
 
 Not built yet in Node (same order as the original build, separate
-follow-ups): ConfigurationService, principal invitation. CI remains
-disabled pending a Node-specific workflow.
+follow-up): principal invitation. CI remains disabled pending a
+Node-specific workflow.
 
 ---
 
