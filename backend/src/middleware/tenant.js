@@ -19,44 +19,22 @@
 // after would very likely commit before the route handler actually
 // ran — a real bug, not a style difference.
 //
-// The correct Express pattern is two separate hooks:
-//   - intercepting res.end (see below) for the commit path — reached
-//     whenever a response is about to be sent, whether that response
-//     came from a route handler that completed normally OR one that
-//     sent an intentional error response directly (e.g.
-//     res.status(400).json(...) with no throw). Matches the Python
-//     version's behavior of committing on any response that came back
-//     through call_next() without an uncaught exception escaping it.
-//   - the 4-arg error-handling middleware (middleware/errorHandler.js)
-//     — reached only when something calls next(err). This is the
-//     rollback path.
-// The `settled` flag below ensures whichever runs first (rollback,
-// always first when an error occurred, since errorHandler awaits the
-// rollback before sending its response) is the only one that actually
-// touches the transaction; the other becomes a no-op. See
-// tests/tenant-middleware.test.js's rollback-on-error case, which
-// proves this sequencing empirically rather than assuming it from
-// reading the code.
-//
-// **The commit path was originally res.on('finish', ...) and that was
-// a real, live bug, found empirically, not by inspection.** 'finish'
-// fires only *after* Node has already flushed the response to the
-// client's socket — meaning a fast client could receive a "success"
-// response and immediately issue a follow-up request (e.g. login,
-// then refresh, in tests/auth.test.js) that raced the COMMIT itself.
-// Caught via a rapid login-then-refresh diagnostic that reproduced
-// "Invalid refresh token" on a token that had just been issued,
-// consistently, once the sequence ran tightly enough — the exact
-// class of bug this project's "prove it, don't assume it" tests exist
-// to catch, just discovered a slice later than the code that caused
-// it. Fixed by intercepting res.end (the low-level method every
-// response helper — res.json, res.send, res.status().json() —
-// eventually calls): commit first, and only call the real res.end
-// once the commit has actually completed.
+// The actual transaction/commit/rollback machinery now lives in
+// db/tenantTransaction.js (openTenantTransaction) — extracted out of
+// this file so routes/invitations.js's POST /invitations/accept (the
+// one deliberate bypass of normal tenant resolution in this codebase)
+// can reuse the exact same, already-hardened logic with a caller-
+// supplied collegeId, rather than duplicating it. See that file's
+// module comment for the two-hook design (res.end interception for
+// commit, middleware/errorHandler.js for rollback) and for the real,
+// live bug that design fixes: committing in a res.on('finish')
+// listener, which fires only *after* the response was already sent,
+// let a fast client race the COMMIT with an immediate follow-up
+// request — found empirically via a rapid login-then-refresh
+// diagnostic during the ConfigurationService slice, not by inspection.
 
 const { appPool } = require('../db/pool');
-const { getRequestContext } = require('../logging/context');
-const { logError } = require('../logging/logger');
+const { openTenantTransaction } = require('../db/tenantTransaction');
 
 class TenantMismatchError extends Error {
   constructor(candidates) {
@@ -153,84 +131,12 @@ async function tenantMiddleware(req, res, next) {
     return;
   }
 
-  let client;
   try {
-    client = await appPool.connect();
-    await client.query('BEGIN');
-    if (collegeId !== null) {
-      await client.query("SELECT set_config('app.current_tenant', $1, true)", [collegeId]);
-    }
+    await openTenantTransaction(req, res, collegeId);
   } catch (err) {
-    if (client) client.release();
     next(err);
     return;
   }
-
-  let settled = false;
-
-  const commitAndRelease = async () => {
-    if (settled) return;
-    settled = true;
-    try {
-      await client.query('COMMIT');
-    } finally {
-      client.release();
-    }
-  };
-
-  const rollbackAndRelease = async () => {
-    if (settled) return;
-    settled = true;
-    try {
-      await client.query('ROLLBACK');
-    } finally {
-      client.release();
-    }
-  };
-
-  req.dbClient = client;
-  req.collegeId = collegeId;
-  req.rollbackTransaction = rollbackAndRelease;
-
-  // Mutates the AsyncLocalStorage store requestContextMiddleware
-  // already opened for this request, in place, rather than opening a
-  // second nested context — collegeId starts null there and this is
-  // the one place it becomes known. This is what lets a log line from
-  // deep inside authService.refresh() (which only ever receives
-  // `client`, never `req`) still pick up collegeId automatically, the
-  // same way it already picks up requestId.
-  const context = getRequestContext();
-  if (context) context.collegeId = collegeId;
-
-  // Every response path (res.json, res.send, an explicit res.end(),
-  // and errorHandler.js's own res.status(500).json(...)) funnels
-  // through res.end eventually — intercepting it here is the one
-  // choke point that reliably runs before any byte reaches the
-  // client, regardless of which helper the route handler used.
-  const originalEnd = res.end.bind(res);
-  res.end = (...args) => {
-    res.end = originalEnd;
-    commitAndRelease()
-      .then(() => originalEnd(...args))
-      .catch((err) => {
-        logError('failed_to_commit_tenant_scoped_transaction', {
-          requestId: req.requestId,
-          collegeId: req.collegeId,
-          error: err.message,
-        });
-        // The route handler already believes it succeeded (it called
-        // res.json/res.end with a success body) — but the commit
-        // genuinely failed, so telling the client otherwise would be
-        // worse than this bug ever was. Nothing has been flushed to
-        // the socket yet (this runs before originalEnd), so it's
-        // still safe to override with a real error response.
-        if (!res.headersSent) {
-          res.status(500).json({ detail: 'Internal server error' });
-        } else {
-          originalEnd();
-        }
-      });
-  };
 
   next();
 }

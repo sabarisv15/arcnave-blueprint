@@ -1,15 +1,18 @@
 'use strict';
 
-// Business logic for the Super Admin Portal API: platform-admin login
-// and college creation only, this pass (matching the deleted Python
-// version's own original scope before principal invitation was added
-// later — that slice is still not built here either, per the build
-// order in Module-00-Platform.md).
+// Business logic for the Super Admin Portal API: platform-admin login,
+// college creation, and principal invitation.
 //
-// This module only ever touches platform_admins/colleges — no path to
-// users/refresh_tokens/audit_log/configurations exists here, and
-// arcnave_platform has no GRANT on those tables regardless (see the
-// ported migrations), so even a bug couldn't reach them.
+// invitePrincipal is Option B from Module-00-Platform.md's Known
+// Limitations writeup (now resolved): this module records an
+// invitation row and hands back a bearer token, but never writes to
+// `users` itself — creating the actual account happens on the tenant
+// side (see routes/invitations.js), through the normal RLS-protected
+// tenant write path. arcnave_platform has no GRANT on
+// users/refresh_tokens/audit_log/configurations (see the ported
+// migrations) and gets none here either — only SELECT/INSERT/UPDATE
+// on principal_invitations (0002 migration), so even a bug in this
+// file could not reach tenant data.
 //
 // No per-request transaction wrapping here, unlike tenant routes —
 // deliberately, not an oversight. Every operation in this pass is a
@@ -25,8 +28,10 @@
 // introducing a request-scoped transaction middleware this pass has
 // no actual need for.
 
+const config = require('../config');
 const security = require('../security');
 const platformRepository = require('../repositories/platformRepository');
+const principalInvitationRepository = require('../repositories/principalInvitationRepository');
 
 // Generic platform-admin authentication failure — same single-
 // message-for-every-failure-mode reasoning as AuthError in
@@ -37,6 +42,14 @@ class PlatformAuthError extends Error {}
 // college_id or subdomain already exists (colleges' two UNIQUE
 // constraints).
 class DuplicateCollegeError extends Error {}
+
+// invitePrincipal's target college_id doesn't exist. Raised from a
+// foreign_key_violation (23503) on the INSERT — principal_invitations
+// has exactly one FK (college_id -> colleges), so any 23503 here
+// unambiguously means this; no separate existence check needed,
+// same reasoning as DuplicateCollegeError's unique_violation catch
+// above.
+class CollegeNotFoundError extends Error {}
 
 async function login(pool, { username, password }) {
   const admin = await platformRepository.getPlatformAdminByUsername(pool, username);
@@ -63,4 +76,48 @@ async function createCollege(pool, { collegeId, name, subdomain, createdBy }) {
   }
 }
 
-module.exports = { PlatformAuthError, DuplicateCollegeError, login, createCollege };
+// Records an invitation and returns the raw token — the route layer
+// hands it back directly in the response body as a temporary stand-in
+// for actually emailing an accept-link, since NotificationService
+// doesn't exist yet (same pattern as password-reset's 501 stub). The
+// raw token is never persisted — only its hash, via security.js's
+// existing generateRefreshToken/hashRefreshToken, reused verbatim
+// rather than duplicated: an invitation token has the same threat-
+// model shape as a refresh token (server-generated high-entropy
+// randomness), so the same reasoning for SHA-256 over argon2 applies
+// unchanged.
+async function invitePrincipal(pool, { collegeId, email, createdBy }) {
+  const rawToken = security.generateRefreshToken();
+  const expiresAt = new Date(Date.now() + config.principalInvitationExpireHours * 60 * 60 * 1000);
+  let invitation;
+  try {
+    invitation = await principalInvitationRepository.createInvitation(pool, {
+      collegeId,
+      email,
+      tokenHash: security.hashRefreshToken(rawToken),
+      createdBy,
+      expiresAt,
+    });
+  } catch (err) {
+    // 23503 = foreign_key_violation.
+    if (err.code === '23503') {
+      throw new CollegeNotFoundError(`No college with college_id ${JSON.stringify(collegeId)}`);
+    }
+    throw err;
+  }
+  return {
+    collegeId: invitation.college_id,
+    email: invitation.email,
+    token: rawToken,
+    expiresAt: invitation.expires_at,
+  };
+}
+
+module.exports = {
+  PlatformAuthError,
+  DuplicateCollegeError,
+  CollegeNotFoundError,
+  login,
+  createCollege,
+  invitePrincipal,
+};

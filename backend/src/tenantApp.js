@@ -9,6 +9,7 @@ const { tenantMiddleware } = require('./middleware/tenant');
 const errorHandler = require('./middleware/errorHandler');
 const createAuthRouter = require('./routes/auth');
 const createConfigurationsRouter = require('./routes/configurations');
+const createInvitationsRouter = require('./routes/invitations');
 
 // The tenant-facing API — a genuinely separate Express app from
 // platformApp.js, mounted at /api/v1 in app.js. Owns the full tenant
@@ -51,6 +52,13 @@ function createTenantApp({ registerExtraRoutes } = {}) {
     await appPool.query('SELECT 1');
     res.json({ status: 'ok' });
   }));
+
+  // POST /invitations/accept — also registered before authMiddleware/
+  // tenantMiddleware, same reasoning as /health: this route resolves
+  // its own tenant scope from the invitation token itself (see
+  // routes/invitations.js), not from anything tenantMiddleware would
+  // resolve. It never reaches authMiddleware/tenantMiddleware at all.
+  app.use(createInvitationsRouter());
 
   // AuthMiddleware before TenantMiddleware — resolveTenant reads
   // req.jwtClaims, which AuthMiddleware sets. Express runs app.use()

@@ -59,4 +59,9 @@ module.exports = {
   // mistaken for platform access. See security.js's
   // createPlatformAccessToken/decodePlatformAccessToken.
   platformJwtSecretKey: required('PLATFORM_JWT_SECRET_KEY'),
+
+  // How long a principal-invitation token (services/platformService.js
+  // invitePrincipal) stays acceptable. A safe default, not a business
+  // rule yet — nothing in BusinessRules.md specifies this.
+  principalInvitationExpireHours: Number(process.env.PRINCIPAL_INVITATION_EXPIRE_HOURS) || 72,
 };

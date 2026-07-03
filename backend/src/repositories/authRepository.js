@@ -8,10 +8,19 @@
 // — same as tenant.js's own colleges lookups, just against different
 // tables.
 //
-// No createUser here — this pass only ports login/refresh/logout
-// (auth_service.py's original scope). Creating a user is principal
-// invitation's concern, a separate later slice, not needed by
-// anything built this pass.
+// createUser is a plain, generic INSERT — not principal-invitation-
+// specific, even though that's the first caller. Reusable by any
+// future flow that needs to create a tenant user.
+
+async function createUser(client, { collegeId, username, email, passwordHash, role, isActive }) {
+  const result = await client.query(
+    `INSERT INTO users (college_id, username, email, password_hash, role, is_active)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id, college_id, username, email, role, is_active`,
+    [collegeId, username, email, passwordHash, role, isActive],
+  );
+  return result.rows[0];
+}
 
 async function getUserByUsername(client, collegeId, username) {
   const result = await client.query(
@@ -57,6 +66,7 @@ async function revokeRefreshToken(client, tokenId) {
 }
 
 module.exports = {
+  createUser,
   getUserByUsername,
   getUserById,
   updatePasswordHash,

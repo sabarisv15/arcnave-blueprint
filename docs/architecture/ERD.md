@@ -57,8 +57,10 @@ be look-up-able by an opaque bearer token before the requester has
 been resolved to any tenant at all (that's the entire point of an
 invitation link). An RLS policy keyed on `app.current_tenant` would
 fail closed on every lookup here, since nothing has set that context
-yet. See `backend/alembic/versions/0002_principal_invitations.py` for
-the full reasoning and the directional `arcnave_platform`
+yet. See `backend/migrations/1751600000000_principal-invitations.js`
+(the Node/node-pg-migrate migration — ADR-016 replaced the original
+Python/Alembic one this file used to point at, same table, unchanged)
+for the full reasoning and the directional `arcnave_platform`
 (SELECT/INSERT/UPDATE) vs. `arcnave_app` (SELECT/UPDATE, no INSERT)
 grants that make "the platform creates, the tenant only ever
 consumes" a DB-enforced fact.

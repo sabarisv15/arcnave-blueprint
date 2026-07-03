@@ -448,11 +448,103 @@ have `req.jwtClaims` in scope).
     `configurations.test.js` is) would have been vulnerable to if it
     hadn't already been fixed by the time these tests were written.
 
-All 67 Node tests pass across the seven test files.
+- **Principal invitation** (`backend/src/repositories/principalInvitationRepository.js`,
+  `backend/src/db/tenantTransaction.js`,
+  `backend/src/routes/invitations.js`, plus additions to
+  `platformService.js`/`routes/platform.js`/`authRepository.js`) —
+  Option B (invite-record-now, create-user-later), same scope as the
+  deleted Python `principal_invitation_service.py`/
+  `principal_invitation_repository.py`. Unusually well-documented
+  already — the Features entry above (this document, further up) had
+  the full historical Python design written out in detail; ported
+  faithfully from that rather than re-derived. Migration
+  (`1751600000000_principal-invitations.js`) was already done in the
+  Super Admin Portal API slice — this was purely the application
+  layer.
+  - `POST /api/v1/platform/colleges/:college_id/invite-principal`
+    (`requirePlatformAdmin`, on `platformApp`) — creates the
+    invitation, returns the raw token directly in the response body
+    (temporary stand-in for real email delivery, same pattern as the
+    `501` password-reset stub — NotificationService still doesn't
+    exist), `404` if `college_id` doesn't exist (a `23503`
+    foreign_key_violation on the INSERT, the one and only FK this
+    table has).
+  - `POST /api/v1/invitations/accept` (on `tenantApp`, deliberately
+    unauthenticated — no `requireAuth`/`requireRole`) — `{token,
+    username, password}` → creates the `users` row with
+    `role: 'principal'`, `is_active: true` immediately (the invitation
+    itself is the activation; there's no one else at that college yet
+    to approve them). Token generation/hashing reuses `security.js`'s
+    existing `generateRefreshToken`/`hashRefreshToken` verbatim, same
+    threat-model reasoning as refresh tokens, not a new scheme. A
+    generic, enumeration-safe `401` ("Invalid or expired invitation")
+    covers expired, already-accepted, and unknown tokens alike; reuse
+    of an already-accepted token additionally logs
+    `principal_invitation_reuse_detected` via `logWarn` — a merely-
+    expired-never-accepted token does not log, same asymmetry
+    `authService.refresh` already has between stale and reused
+    refresh tokens. `409` if the requested username is already taken
+    within that tenant.
+  - **The one genuinely new architectural problem this slice had,
+    since the Python version never split into separate tenantApp/
+    platformApp instances:** `/invitations/accept` is the single
+    deliberate bypass of normal tenant resolution in the whole
+    codebase — the caller has no subdomain/JWT/explicit-code (no
+    account exists yet), so the invitation's own `college_id` is the
+    tenant signal, not anything `tenantMiddleware` would resolve. It's
+    registered *before* `authMiddleware`/`tenantMiddleware` in
+    `tenantApp.js`, same as `/health`, and opens its own transaction
+    scoped to the invitation's `college_id` once the token's been
+    looked up on a short-lived resolution connection (mirroring
+    `tenantMiddleware`'s own colleges lookup — `principal_invitations`
+    has no RLS, so this needs no tenant context at all).
+  - **Did not hand-roll a second copy of the transaction/commit/
+    rollback machinery for this one route.** `tenant.js` had just gone
+    through a real, subtle bug in exactly that logic (the `res.end`-
+    interception fix, see Tenant Middleware above) — duplicating it
+    here would have risked reintroducing an equivalent bug
+    independently, in a route with a much smaller test surface.
+    Instead, that logic was extracted out of `tenant.js` into
+    `db/tenantTransaction.js`'s `openTenantTransaction(req, res,
+    collegeId)`, taking an already-known `collegeId` as a parameter.
+    `tenantMiddleware` now just calls it with whatever `resolveTenant`
+    resolved (unchanged behavior, confirmed by the full existing test
+    suite still passing unmodified); `/invitations/accept` calls it
+    with the invitation's `college_id` once known. Both callers get
+    the identical guarantees, including `getRequestContext().collegeId`
+    being mutated in place the same way `tenant.js` already did — so
+    this route's own log lines and the final access-log entry reflect
+    the right tenant even though it never went through normal
+    resolution.
+  - `authRepository.createUser` — a plain, generic INSERT, not
+    principal-invitation-specific, reusable by any future flow that
+    needs to create a tenant user.
+  - **Tests** — `backend/tests/principal-invitation.test.js`, 8 cases:
+    invitation creation requires a platform-admin token, succeeds,
+    `404`s for an unknown college; accept creates a user verified as
+    tenant-scoped through RLS itself (a second engine, `set_config`'d
+    to each college in turn — the same technique as
+    `test_rls_tenant_isolation.py`), and the created account is
+    proven to actually log in through the ordinary tenant path; an
+    expired token and a reused already-accepted token both `401` with
+    the identical message, and the reuse case is confirmed logged by
+    capturing `console.warn` output the same way `auth.test.js`
+    already does, not trusted from the code path being present; an
+    unknown token `401`s with the same message too; a duplicate
+    username within one tenant `409`s; and the cross-tenant proof —
+    two colleges, two invitations, the *same* requested username,
+    confirming neither invitation's acceptance can ever create or be
+    seen under the other's `college_id`.
+  - `docs/architecture/ERD.md` — one stale reference fixed (it still
+    pointed at the deleted Python migration path for
+    `principal_invitations`; now points at the Node one). The schema
+    itself did not change.
 
-Not built yet in Node (same order as the original build, separate
-follow-up): principal invitation. CI remains disabled pending a
-Node-specific workflow.
+All 77 Node tests pass across the eight test files.
+
+Not built yet in Node: nothing left in Module 0's original build list
+— the only remaining item is the Node-specific CI workflow, which
+covers *how* these tests run in CI, not application code.
 
 ---
 

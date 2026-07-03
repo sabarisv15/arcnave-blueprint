@@ -53,6 +53,29 @@ function createPlatformRouter() {
     }
   }));
 
+  router.post('/colleges/:college_id/invite-principal', requirePlatformAdmin, asyncHandler(async (req, res) => {
+    const { email } = req.body || {};
+    try {
+      const invitation = await platformService.invitePrincipal(platformPool, {
+        collegeId: req.params.college_id,
+        email,
+        createdBy: req.platformClaims.sub,
+      });
+      res.json({
+        college_id: invitation.collegeId,
+        email: invitation.email,
+        token: invitation.token,
+        expires_at: invitation.expiresAt,
+      });
+    } catch (err) {
+      if (err instanceof platformService.CollegeNotFoundError) {
+        res.status(404).json({ detail: `No college with college_id ${JSON.stringify(req.params.college_id)}` });
+        return;
+      }
+      throw err;
+    }
+  }));
+
   return router;
 }
 
