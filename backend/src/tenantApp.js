@@ -10,6 +10,7 @@ const errorHandler = require('./middleware/errorHandler');
 const createAuthRouter = require('./routes/auth');
 const createConfigurationsRouter = require('./routes/configurations');
 const createInvitationsRouter = require('./routes/invitations');
+const createStudentsRouter = require('./routes/students');
 
 // The tenant-facing API — a genuinely separate Express app from
 // platformApp.js, mounted at /api/v1 in app.js. Owns the full tenant
@@ -90,6 +91,7 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   // like whoami above — not to be confused with AuthMiddleware.
   app.use(createAuthRouter());
   app.use(createConfigurationsRouter());
+  app.use(createStudentsRouter());
 
   if (typeof registerExtraRoutes === 'function') {
     registerExtraRoutes(app);
