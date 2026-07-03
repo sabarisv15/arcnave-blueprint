@@ -187,10 +187,15 @@ test('auth', async (t) => {
     const first = await post(baseUrl, '/api/v1/auth/refresh', tenantHeaders, { refresh_token: refreshToken });
     assert.equal(first.status, 200);
 
+    // authService.refresh's reuse-detection log goes through
+    // logWarn (src/logging/logger.js) as of the request-scoped
+    // logging slice — a single JSON string per call, not the
+    // (message, object) two-arg shape a bare console.warn call would
+    // have produced. Parse it rather than checking args[0] directly.
     const originalWarn = console.warn;
-    const calls = [];
-    console.warn = (...args) => {
-      calls.push(args);
+    const lines = [];
+    console.warn = (text) => {
+      lines.push(text);
     };
     let second;
     try {
@@ -200,8 +205,8 @@ test('auth', async (t) => {
     }
     assert.equal(second.status, 401);
     assert.ok(
-      calls.some((args) => args[0] === 'refresh_token_reuse_detected'),
-      'expected console.warn to be called with refresh_token_reuse_detected',
+      lines.some((text) => JSON.parse(text).message === 'refresh_token_reuse_detected'),
+      'expected console.warn to be called with a refresh_token_reuse_detected log line',
     );
   });
 

@@ -41,6 +41,8 @@
 // reading the code.
 
 const { appPool } = require('../db/pool');
+const { getRequestContext } = require('../logging/context');
+const { logError } = require('../logging/logger');
 
 class TenantMismatchError extends Error {
   constructor(candidates) {
@@ -176,9 +178,23 @@ async function tenantMiddleware(req, res, next) {
   req.collegeId = collegeId;
   req.rollbackTransaction = rollbackAndRelease;
 
+  // Mutates the AsyncLocalStorage store requestContextMiddleware
+  // already opened for this request, in place, rather than opening a
+  // second nested context — collegeId starts null there and this is
+  // the one place it becomes known. This is what lets a log line from
+  // deep inside authService.refresh() (which only ever receives
+  // `client`, never `req`) still pick up collegeId automatically, the
+  // same way it already picks up requestId.
+  const context = getRequestContext();
+  if (context) context.collegeId = collegeId;
+
   res.on('finish', () => {
     commitAndRelease().catch((err) => {
-      console.error('Failed to commit tenant-scoped transaction:', err);
+      logError('failed_to_commit_tenant_scoped_transaction', {
+        requestId: req.requestId,
+        collegeId: req.collegeId,
+        error: err.message,
+      });
     });
   });
 

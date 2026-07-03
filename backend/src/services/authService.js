@@ -14,6 +14,7 @@
 const config = require('../config');
 const security = require('../security');
 const authRepository = require('../repositories/authRepository');
+const { logWarn } = require('../logging/logger');
 
 // Generic authentication failure. Deliberately not more specific than
 // this at the service boundary: unknown username, wrong password, and
@@ -64,11 +65,15 @@ async function refresh(client, rawRefreshToken) {
   }
 
   if (stored.revoked_at !== null) {
-    // Plain console.warn for now — the structured/request-ID-enriched
-    // logging layer (request_context equivalent) is its own later
-    // slice, same order as the original build. This is still a real,
-    // inspectable warning, not a placeholder.
-    console.warn('refresh_token_reuse_detected', {
+    // logWarn here has no `req` available at all — authService only
+    // ever receives `client`, deliberately (see this file's module
+    // comment). requestId/collegeId still show up on this line
+    // automatically via AsyncLocalStorage (logging/context.js), not
+    // because anything here passed them explicitly — this is the real
+    // call site tests/request-logging.test.js's concurrent-requests
+    // test exists to prove, alongside the deliberately-delayed
+    // test-only route.
+    logWarn('refresh_token_reuse_detected', {
       collegeId: stored.college_id,
       userId: stored.user_id,
       refreshTokenId: stored.id,

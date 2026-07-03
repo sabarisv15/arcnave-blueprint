@@ -3,6 +3,7 @@
 const express = require('express');
 const { appPool } = require('./db/pool');
 const asyncHandler = require('./middleware/asyncHandler');
+const { requestContextMiddleware } = require('./middleware/requestContext');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
 const errorHandler = require('./middleware/errorHandler');
@@ -20,6 +21,12 @@ const createAuthRouter = require('./routes/auth');
 // no arguments for the real app.
 function createApp({ registerExtraRoutes } = {}) {
   const app = express();
+
+  // Outermost middleware — registered first so every other middleware
+  // and route, including /health below, runs inside the request-
+  // scoped AsyncLocalStorage context it opens, and so its own access-
+  // log line covers every request regardless of what else happens.
+  app.use(requestContextMiddleware);
 
   app.use(express.json());
 

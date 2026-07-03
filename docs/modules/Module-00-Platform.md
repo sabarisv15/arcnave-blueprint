@@ -168,13 +168,97 @@ version was originally built:
     token's actual claims. `requireRole`'s subset restriction: `401`
     with no token, `403` for `staff` (outside the `hod`/`principal`
     allowed set), `200` for `hod`/`principal`.
+- **Request-scoped structured logging**
+  (`backend/src/logging/context.js`, `backend/src/logging/logger.js`,
+  `backend/src/middleware/requestContext.js`) — replaces every ad hoc
+  `console.warn`/`console.error` call added in the previous two slices;
+  none were left sitting next to the new logger.
+  - `runWithRequestContext`/`getRequestContext` wrap `node:async_hooks`'s
+    `AsyncLocalStorage`, store shape `{ requestId, collegeId }`
+    (deliberately narrower than the deleted Python version's three-field
+    `{request_id, tenant_id, user_id}` — no `user_id` yet; flagged
+    below, not silently dropped).
+  - **The Python gotcha this replaces was Starlette-specific, not
+    assumed to carry over — and it didn't.** The deleted Python
+    version's forced workaround existed because
+    `BaseHTTPMiddleware` runs downstream handling inside a copied
+    asyncio Task, so an inner layer's contextvar mutation wasn't
+    guaranteed to propagate back to an outer layer's task after
+    `await call_next()` returned. Express has no equivalent
+    architecture — `next()` continues the chain in-line, no task-copying
+    wrapper — so there was reason to expect
+    `als.run(store, () => next())` might just work cleanly. That
+    expectation was proven, not assumed: see the concurrent-requests
+    test below, the direct equivalent of
+    `test_rls_tenant_isolation.py`'s `pg_backend_pid()` proof applied
+    to log context instead of tenant context. It passed on the first
+    real run with no propagation issue found.
+  - `requestContextMiddleware` is registered *first* in `app.js` —
+    before even `express.json()` and `/api/v1/health` — so its access
+    log covers every request and every other middleware/route runs
+    inside the `AsyncLocalStorage` context it opens.
+  - `tenant.js`'s `resolveTenant` mutates `getRequestContext().collegeId`
+    in place once a tenant resolves, rather than opening a second
+    nested context — this is what lets a log line from deep inside
+    `authService.refresh()` (which only ever receives `client`, never
+    `req`) pick up `collegeId` automatically, the same way it already
+    picks up `requestId`.
+  - **The access-log line itself reads `req.requestId`/`req.collegeId`
+    directly, not `getRequestContext()`** — stated plainly per the
+    build brief, not silently picked: the `res.on('finish', ...)`
+    callback already closes over `req`, a reliable plain-object
+    reference mutated in place by `tenantMiddleware` before `'finish'`
+    ever fires, so there's no reason to route through
+    `AsyncLocalStorage` for data already available more directly. This
+    is *not* a workaround for a known propagation gap the way the
+    Python version's equivalent read (`request.state`, not the
+    contextvar) was forced to be — the `AsyncLocalStorage` path itself
+    is proven separately by the concurrent test, which specifically
+    exercises `authService.refresh`'s call site, the one place that
+    genuinely has no `req` in scope.
+  - **One `res.on('finish', ...)` hook covers both the success and
+    error paths — not two.** Unlike `tenant.js`'s commit/rollback pair
+    (which needs exactly one of two *different* DB operations to run,
+    hence its `settled` guard), the access log is the same operation
+    regardless of outcome, and `'finish'` fires unconditionally once a
+    response has actually been sent — whether that response came from
+    a route handler completing normally or from `errorHandler.js`
+    eventually calling `res.status(500).json(...)`. Confirmed directly
+    in a live run: `tenant-middleware.test.js`'s existing
+    rollback-on-error case now also emits a `request_completed` line
+    with `status: 500`, from the same single hook.
+  - `authService.js`'s `refresh_token_reuse_detected` now goes through
+    `logWarn`; `tenant.js`'s commit-failure log and `errorHandler.js`'s
+    rollback-failure/unhandled-error logs now go through `logError`.
+  - **Tests** — `backend/tests/request-logging.test.js`, 7 cases: the
+    access log carries `requestId` and omits `collegeId` entirely (not
+    as `null`) when unresolved; carries `collegeId` when resolved;
+    `X-Request-ID` generated and echoed; an incoming `X-Request-ID`
+    header honored; five sequential requests get five distinct
+    `requestId`s; `authService.refresh`'s reuse-detection log — the one
+    real call site with no `req` in scope at all — picks up
+    `requestId`/`collegeId` automatically through a real
+    login → refresh → refresh(reuse) flow; and **the test that actually
+    matters**: two requests fired via `Promise.all` (not sequential —
+    sequential requests could pass even under a broken shared-global
+    implementation if Node happened to serialize them) against a
+    deliberately-delayed test-only route with a deeply-nested log call,
+    asserting each request's own `requestId` shows up on its own log
+    line, never the other's. All passing — 44/44 Node tests total.
 
-All 36 Node tests pass across the four test files.
+Known limitation carried forward from this slice: the ambient context
+doesn't track `userId`, unlike the deleted Python version — deliberate
+per the build brief's store shape, not an oversight. Revisit once a
+real consumer needs it (e.g. an audit-log-style feature wanting
+`userId` on every line automatically, not just the routes that already
+have `req.jwtClaims` in scope).
+
+All 44 Node tests pass across the five test files.
 
 Not built yet in Node (same order as the original build, separate
-follow-ups): request-scoped logging, the Super Admin Portal API,
-ConfigurationService, principal invitation. CI remains disabled
-pending a Node-specific workflow.
+follow-ups): the Super Admin Portal API, ConfigurationService,
+principal invitation. CI remains disabled pending a Node-specific
+workflow.
 
 ---
 
