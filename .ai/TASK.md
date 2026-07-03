@@ -1,160 +1,129 @@
 # TASK
 
 ## Objective
-Module 2 (Staff), second vertical slice: `StaffService` — business
-logic + validation on top of `staffRepository.js`. Still no API/UI.
+Module 2 (Staff), third vertical slice: API routes on top of
+`staffService.js`. Still no UI repoint.
 
 ## Files likely affected
-- `backend/src/services/staffService.js` (new)
-- `backend/tests/staff-service.test.js` (new)
+- `backend/src/routes/staff.js` (new)
+- `backend/src/tenantApp.js` (add one require + one `app.use()` line,
+  same as `createStudentsRouter`, no other change)
+- `backend/tests/staff.test.js` (new)
+- `backend/src/services/staffService.js` (bugfix, found while drafting
+  this slice — see below, not a route/API change)
 
 ## Context
-- `backend/src/repositories/staffRepository.js` already exists:
-  `create`, `findById`, `findByUserId`, `findByStaffCode`, `update`,
-  `remove`, `list`. It does zero validation beyond DB constraints
-  (CLAUDE.md rule 1: AI tools call Business Services, never
-  repositories directly — this slice is what makes that possible for
-  staff).
-- Follow `services/studentService.js` conventions exactly (already-
-  settled house style for this exact kind of slice, don't reinvent):
-  `'use strict'`, module-level comment stating scope, domain-specific
-  `Error` subclasses (never raw repository/pg errors surfacing),
-  every function takes `client` first, `collegeId` passed explicitly
-  to `createStaff` even though `client` is already tenant-scoped
-  (defense in depth, matches `authService.js`/`studentService.js`),
-  `updateStaff`/`removeStaff`/`getStaff` don't take `collegeId` (id is
-  globally unique, same convention as `studentService.js`).
-- Reuses `.ai/TASK.md`'s Module 2 first-slice scope boundary
-  unchanged: `staff` models an already-provisioned account
-  (`user_id NOT NULL`, FK -> `users(id)`). This slice does not build
-  any part of the HOD/Principal approval chain or credential
-  generation (`generatedCreds` in `HodDashboard.jsx`/
-  `PrincipalDashboard.jsx`) — that's account creation, a
-  `users`-table concern for a future Module-0-adjacent or
-  `WorkflowService` (Module 8) slice, not this one. `createStaff`
-  here assumes a `userId` for an already-existing `users` row is
-  handed in, same as `studentService.createStudent` assumes a valid
-  `collegeId` is handed in rather than creating a college itself.
+- `backend/src/services/staffService.js` already exists: `createStaff`,
+  `getStaff`, `updateStaff`, `removeStaff`, `listStaff`, plus
+  `StaffValidationError`, `StaffUserConflictError`,
+  `StaffCodeConflictError`, `StaffUserNotFoundError`.
+- Follow `routes/students.js` exactly (closest precedent — same
+  shape, one module ahead in the build order): factory function
+  `createStaffRouter()` returning an `express.Router()`, routes
+  registered relative to the eventual `/api/v1` mount, `asyncHandler`
+  wrapping every handler, `requireResolvedTenant(req, res)` guard
+  copied the same way, `client` = `req.dbClient`, `collegeId` =
+  `req.collegeId`.
+
+## Pre-existing bugfix found while drafting this slice
+`staffService.createStaff`'s signature (`{ collegeId, userId, fullName,
+...rest }`, single options object) makes `userId` do double duty: it's
+both the new staff row's own account link (`staff.user_id` — required,
+FK'd) **and** the only candidate for who the `audit_log` entry
+attributes the action to. Those are two different people in the real
+flow this module is grounded against — a principal/HOD adds a profile
+*for* an already-provisioned staff member (`HodDashboard.jsx`/
+`PrincipalDashboard.jsx`'s Add Staff modal); the actor is whoever is
+authenticated on the request, the subject is the staff member named in
+the request body. `studentService.createStudent` never had this
+problem because `students` has no `user_id` column at all — its
+`userId` param only ever meant "the actor." `staffService.createStaff`
+needs both concepts and only had room for one.
+
+Fixed in `staffService.js`: `createStaff` now takes a third parameter,
+`{ actorUserId }`, used only for the audit entry; the existing `userId`
+in the first object keeps meaning "the staff row's own account" only.
+`updateStaff`/`removeStaff` are unaffected — their `{ userId }` already
+meant "the actor" only, since neither touches `staff.user_id` (excluded
+from `ALLOWED_FIELDS`). One new unit test added to
+`staff-service.test.js` proving the audit entry is attributed to
+`actorUserId`, not the subject's `userId`. This is out of this route
+slice's original file list, same as `studentRepository.js`'s create-NULL
+fix was out of `studentService.js`'s slice — the route layer couldn't
+be wired correctly without it (a route has exactly one authenticated
+actor and needs to pass a *different* user_id for the profile being
+created).
 
 ## Exact changes
 
-**Validation** (`staff` schema's own `NOT NULL`s, same "what the DB
-already demands, checked before the query" scope as
-`studentService`'s `rollNo`/`fullName`):
-- `userId` and `fullName` are required — `staff.user_id` and
-  `staff.full_name` are both `NOT NULL` at the DB level. Missing
-  either throws a validation error before any repository call.
-- `staffCode` is explicitly **not** required — unlike `roll_no` on
-  `students` (`NOT NULL`), `staff.staff_code` is nullable (see Module
-  2 first slice's `.ai/TASK.md`: it's a freeform HR/biometric code,
-  not every staff-creation path necessarily has one at creation time).
-  Flagging this contrast so it isn't copy-pasted from
-  `studentService`'s required-field pair without checking.
-- No Aadhaar field accepted anywhere in the service's input shape
-  (CLAUDE.md rule 8) — an `ALLOWED_FIELDS` whitelist (mirrors, but
-  deliberately duplicates rather than imports, `staffRepository.js`'s
-  `COLUMNS` list) silently drops it, same drop-not-reject treatment
-  and same reasoning `studentService.js` already settled on: aadhaar
-  gets no special-cased rejection beyond what any other
-  unrecognized/typo'd field already gets. `collegeId` and `userId`
-  are excluded from the whitelist used by `updateStaff` — a staff
-  profile's tenant and account linkage are set once at creation and
-  never move via update, same as `studentService`'s exclusion of
-  `collegeId`.
+**Endpoints**:
+- `POST /staff` — `createStaff`. 201 on success.
+- `GET /staff/:id` — `getStaff`. 404 if `null`.
+- `GET /staff` — `listStaff`. `?limit=&offset=` passed through as-is.
+- `PUT /staff/:id` — `updateStaff`. 404 if `null`.
+- `DELETE /staff/:id` — `removeStaff`. 404 if `null`, else 204.
 
-**Conflict handling — two distinct unique constraints, not one**
-(`staff` has `UNIQUE(user_id)` *and* `UNIQUE(college_id, staff_code)`,
-unlike `students`' single `UNIQUE(college_id, roll_no)`): live-
-verified against the real Docker Postgres this session that
-node-postgres's error object exposes `err.constraint` with the exact
-constraint name on a `23505`, so the two cases are distinguished by
-`err.constraint`, not by re-parsing `err.message`:
-  - `err.constraint === 'staff_user_id_key'` -> `StaffUserConflictError`
-    (this `userId` already has a staff profile).
-  - `err.constraint === 'staff_college_id_staff_code_key'` ->
-    `StaffCodeConflictError` (this `staffCode` is already taken in
-    this college).
-  This is a deliberate departure from `platformService.js`'s
-  `DuplicateCollegeError`, which intentionally does *not* distinguish
-  `colleges`' two `UNIQUE` constraints (its comment: "no need to
-  distinguish which for the caller"). Colleges' two constraints
-  (`college_id`, `subdomain`) both mean the same thing to a caller —
-  "this college already exists" — and that bundling was inherited
-  from the prior Python version. Staff's two constraints mean
-  genuinely different things with different remedies ("this person
-  already has a staff profile — did you mean to edit it?" vs. "that
-  staff code is taken — pick another"), so collapsing them the same
-  way would lose information a future route/UI layer will want.
-  Flagged as a considered deviation, not an inconsistency.
-- `staffRepository.create`'s `userId` also carries a real FK
-  (`staff_user_id_fkey` -> `users(id)`) — a `userId` for a
-  non-existent user raises `23503` (foreign_key_violation), live-
-  verified this session. Maps to `StaffUserNotFoundError`, following
-  `platformService.js`'s existing `CollegeNotFoundError` precedent for
-  mapping a `23503` on a single, unambiguous FK straight to a named
-  error (staff has exactly one FK a caller could violate via
-  `createStaff`'s inputs — `college_id` comes from the tenant-scoped
-  request context, not caller-supplied free text, so only `user_id`
-  is realistically wrong here).
+**Request/response body shape — snake_case, not camelCase**, same
+reasoning as `students.js` (no `StaffEditorModal.jsx` exists to ground
+against directly, but the HOD/Principal `staffForm` in
+`HodDashboard.jsx`/`PrincipalDashboard.jsx` and the DB columns
+themselves are both already snake_case-shaped). A `STAFF_BODY_FIELDS`
+map, same pattern as `STUDENT_BODY_FIELDS`, translates the request
+body to the camelCase `staffService` expects. `user_id` **is** in this
+map (unlike `students.js`, where no such mapping exists because
+students have no `user_id` column) — it's how the route learns which
+already-provisioned account this profile belongs to; `college_id` is
+not in the map, same as `students.js` (always `req.collegeId`, never
+caller-supplied). Response bodies: repository's native snake_case row
+shape, unchanged, same choice `students.js` made and same reasoning
+(strictly less code, nothing downstream expects camelCase yet).
 
-**Functions**:
-- `createStaff(client, { collegeId, userId, fullName, ...rest })` —
-  validates, calls `staffRepository.create`, catches `23505`
-  (branching on `err.constraint` as above) and `23503`
-  (`staff_user_id_fkey` -> `StaffUserNotFoundError`), writes an
-  `audit_log` entry via `auditLogRepository.createAuditLogEntry`
-  (`action: 'staff_created'`, `entity: 'staff'`, `entityId` = new
-  staff row's id) — same house convention `studentService`/
-  `configurationService` use. Flagged the same way `studentService`'s
-  `TASK.md` flagged it: an assumption carried forward from that
-  precedent, not a restated BusinessRules.md mandate.
-- `getStaff(client, id)` — passthrough to `findById`. `null` is not
-  an error (matches `studentService.getStudent`'s stance) — 404 is a
-  route-layer concern that doesn't exist yet.
-- `updateStaff(client, id, fields, { userId })` — passthrough to
-  `update` (same `ALLOWED_FIELDS`-filtered patch as create, minus
-  `collegeId`/`userId`), catches `23505` on `staff_code` conflicts the
-  same way create does (a `staffCode` change can collide with another
-  row in the same college), audit entry (`action: 'staff_updated'`)
-  only if a row was actually changed — same `hasChanges && result !==
-  null` guard as `studentService.updateStudent`.
-- `removeStaff(client, id, { userId })` — looks the row up first (to
-  get `collegeId` for the audit entry and to skip logging a removal
-  for an id that never existed, same as `studentService.removeStudent`),
-  passthrough to `remove`, audit entry (`action: 'staff_removed'`).
-  Still a hard delete — no soft-delete column exists yet, same
-  unresolved open question carried forward from the first slice.
-- `listStaff(client, { limit, offset })` — passthrough to `list`.
+**Error mapping**:
+- `StaffValidationError` -> 400
+- `StaffUserConflictError` -> 409
+- `StaffCodeConflictError` -> 409
+- `StaffUserNotFoundError` -> 404 — follows `platformService.js`'s
+  `CollegeNotFoundError` -> 404 precedent (`routes/platform.js`): the
+  referenced resource (the `user_id` named in the body) doesn't exist,
+  same shape of failure, same status code chosen for it elsewhere in
+  this codebase.
+- Service returning `null` (not thrown) -> 404, per endpoint as listed
+  above.
 
-**Explicitly out of scope for this slice** (don't build these — flag
-if tempted):
-- The HOD/Principal approval chain and credential-generation step
-  (`FacultyRegister.jsx` -> HOD approve -> Principal approve -> staff
-  ID + credentials emailed) — this is `WorkflowService` (Module 8) +
-  a `users`-row-creation step neither of which exists yet. Carried
-  forward unchanged from the first slice's scope decision.
-- "Only HOD/Principal may add staff" is an authorization rule, not
-  business logic — left to the future route/RBAC layer, same
-  reasoning `studentService.js` used for "only the class tutor may
-  edit."
-- No `WorkflowService` calls.
-- No route, no API, no UI.
+**RBAC — same conservative placeholder as `students.js`, not a final
+decision**: BusinessRules.md's actual Staff registration chain (Faculty
+submits -> HOD approves -> Principal approves -> WorkflowService) can't
+be enforced today — no WorkflowService (Module 8), and this slice's
+`staffService` doesn't model a pending/approval state at all (see
+Module 2 first slice's scope boundary). `requireRole('principal')`
+gates writes, `requireAuth` gates reads — identical to `students.js`,
+not `requireRole('principal', 'hod')`: both registration chains
+(Staff and HOD) end with *Principal* giving final approval, so
+Principal is the one existing role that's actually the final authority
+in every real chain BusinessRules.md describes; gating on HOD alone
+would let through an action the real business rule treats as only
+provisional. Must be revisited once WorkflowService exists.
+
+**`tenantApp.js`**: add `const createStaffRouter = require('./routes/staff');`
+and `app.use(createStaffRouter());` in the same block as
+`createStudentsRouter()`.
 
 ## Acceptance criteria
-- `createStaff` rejects a missing `userId` or `fullName` without
-  touching the DB.
-- `createStaff` on a duplicate `user_id` raises `StaffUserConflictError`
-  (not a raw pg error) — prove against the real Docker Postgres, not
-  a hand-thrown `err.code`.
-- `createStaff` on a duplicate `(college_id, staff_code)` raises
-  `StaffCodeConflictError` — prove the same way, and prove it's
-  distinguishable from the `user_id` conflict above (different error
-  classes for different `err.constraint` values).
-- `createStaff` with a `userId` that doesn't exist in `users` raises
-  `StaffUserNotFoundError`, not a raw FK violation.
-- No Aadhaar field accepted or passed through.
-- Service calls only `staffRepository` and `auditLogRepository` — no
-  other repository, no Storage, no `WorkflowService`.
-- No service function does anything a route/RBAC layer should own
-  (see "explicitly out of scope" above).
-- No route, API, or UI code touched in this slice.
+- All 5 endpoints wired, thin translation layer only.
+- `StaffValidationError` -> 400, `StaffUserConflictError` -> 409,
+  `StaffCodeConflictError` -> 409, `StaffUserNotFoundError` -> 404,
+  not-found -> 404 — verified against the actual service hitting real
+  DB constraints (real `23505`/`23503`), not hand-thrown errors, same
+  rigor as `students.test.js`.
+- The `actorUserId`/`userId` split (see bugfix above) is exercised
+  live: a `staff_created` audit_log row attributed to the
+  authenticated caller (e.g. `principaluser`'s own id), not to the
+  `user_id` named in the request body.
+- Writes require `principal` role; reads require any authenticated
+  tenant user.
+- Cross-tenant isolation: the same `staff_code` is independently usable
+  across two tenants; a staff row from one tenant 404s when fetched
+  through another tenant's token.
+- No other repository, no Storage, no `WorkflowService` reached from
+  this file — only `staffService.js`.
+- No UI code touched in this slice.

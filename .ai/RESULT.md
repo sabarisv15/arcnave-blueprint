@@ -1,119 +1,127 @@
 # RESULT
 
 ## Files changed
-- backend/src/services/staffService.js (new)
-- backend/tests/staff-service.test.js (new)
+- backend/src/routes/staff.js (new)
+- backend/src/tenantApp.js (2 lines: require + app.use, same block as
+  createStudentsRouter)
+- backend/tests/staff.test.js (new)
+- backend/src/services/staffService.js (bugfix, out of this slice's
+  original file list — see below)
+- backend/tests/staff-service.test.js (1 new unit test covering the
+  bugfix)
 
 ## What changed, per file
-- `staffService.js`: `createStaff`, `getStaff`, `updateStaff`,
-  `removeStaff`, `listStaff`. Four domain errors —
-  `StaffValidationError` (missing `userId`/`fullName`),
-  `StaffUserConflictError` (`23505` on `staff_user_id_key`),
-  `StaffCodeConflictError` (`23505` on
-  `staff_college_id_staff_code_key`), `StaffUserNotFoundError` (`23503`
-  on `staff_user_id_fkey`) — no raw pg error ever reaches the caller.
-  The two `23505` cases are distinguished via `err.constraint`, not
-  `err.message` parsing (see `.ai/TASK.md` for why this deliberately
-  departs from `platformService.js`'s single `DuplicateCollegeError`
-  for `colleges`' two constraints — staff's two constraints mean
-  different things to a caller). `ALLOWED_FIELDS` whitelist mirrors
-  but deliberately duplicates `staffRepository.js`'s column list
-  (same as `studentService.js`'s `ALLOWED_FIELDS`); `collegeId`/
-  `userId` excluded from what `updateStaff` accepts (set once at
-  creation, never moved via update). `staffCode` is not a required
-  field on create (unlike `students.roll_no`) — `staff.staff_code` is
-  nullable. Calls only `staffRepository` and `auditLogRepository` — no
-  other repository, no Storage, no `WorkflowService`. No RBAC/
-  authorization logic (left to the future route/RBAC layer, per the
-  task).
-- `staff-service.test.js`: 15 unit tests (14 subtests + 1 wrapper) for
-  every path that needs no DB — missing-`userId`/missing-`fullName`
-  validation, aadhaar-drop, `staffCode`-not-required, all three
-  hand-thrown `err.code`+`err.constraint` -> domain-error mappings
-  (`staff_user_id_key` -> `StaffUserConflictError`,
-  `staff_college_id_staff_code_key` -> `StaffCodeConflictError`,
-  `staff_user_id_fkey` -> `StaffUserNotFoundError`), a non-conflict
-  error passing through unchanged, the "audit entry only if a row
-  actually changed" logic for `updateStaff`/`removeStaff` (including
-  a `staff_code` conflict surfacing correctly from the update path
-  too), and `removeStaff`'s found/not-found audit behavior.
-  `staffRepository`/`auditLogRepository` stubbed via `node:test`'s
-  built-in `t.mock.method`, same pattern as `student-service.test.js`.
+- `staff.js`: `createStaffRouter()` factory, mirrors `routes/students.js`
+  exactly. Five endpoints (`POST/GET/GET-list/PUT/DELETE /staff`), a
+  `STAFF_BODY_FIELDS` snake_case<->camelCase map (includes `user_id`,
+  unlike `students.js`'s map — see Context below), `mapStaffServiceError`
+  translating all four `staffService` domain errors to HTTP status
+  (`StaffValidationError`->400, `StaffUserConflictError`->409,
+  `StaffCodeConflictError`->409, `StaffUserNotFoundError`->404,
+  following `platformService.js`'s `CollegeNotFoundError`->404
+  precedent), `requireRole('principal')` on writes /
+  `requireAuth` on reads (same conservative placeholder `students.js`
+  uses, documented in-file). Response bodies are the repository's
+  native snake_case row shape, untranslated — same choice/reasoning as
+  `students.js`.
+- `tenantApp.js`: added `const createStaffRouter = require('./routes/staff');`
+  and `app.use(createStaffRouter());` in the same block as
+  `createStudentsRouter()`. No other change.
+- `staff.test.js`: 21 integration subtests over real HTTP against a
+  live server + live Postgres — CRUD mechanics, all four error->status
+  mappings proven against genuine DB constraint violations (not
+  hand-thrown), RBAC (write requires principal, read requires any
+  auth), cross-tenant isolation (same `staff_code` independently usable
+  across two tenants; a tenant-A row 404s through tenant B's token),
+  and one test proving the `actorUserId` fix (see below) end-to-end:
+  the `staff_created` audit row is attributed to the authenticated
+  caller, not the `user_id` named in the request body.
+- `staffService.js` (bugfix): `createStaff`'s signature was
+  `(client, { collegeId, userId, fullName, ...rest })` — a single
+  `userId` doing double duty as both the new staff row's own account
+  link (`staff.user_id`, required, FK'd) *and* the only candidate for
+  who the `audit_log` entry attributes the action to. Those are
+  different people in the real flow this module is grounded against
+  (a principal adds a profile *for* an already-provisioned staff
+  member). Fixed by adding a third parameter, `{ actorUserId } = {}`,
+  used only for the audit entry; `userId` in the first object now only
+  ever means "the staff row's own account." `updateStaff`/`removeStaff`
+  were already correct (their `{ userId }` always meant "the actor" —
+  neither touches `staff.user_id`, which is excluded from
+  `ALLOWED_FIELDS`) and are unchanged.
+- `staff-service.test.js`: added
+  `'createStaff attributes the audit entry to actorUserId, not the new
+  staff row's own userId'`, proving the fix at the unit level (stubbed
+  repos) in addition to `staff.test.js`'s live-DB proof.
 
 ## Tests
 1. **Unit (no DB)** — `node --test tests/staff-service.test.js`:
-   15/15 pass (`# pass 15`, `# fail 0`).
-2. **Live, against the real docker-compose Postgres** (not
-   embedded-postgres — Docker is available in this environment; the
-   `db` service from `docker-compose.yml` was brought up directly with
-   `docker compose up -d db`, real `postgres:16`, port 5432). Wrote a
-   throwaway script that called `staffService.js` itself (not a copy,
-   not a stub) through the real `arcnave_app` role with
-   `set_config('app.current_tenant', ...)` set per transaction — the
-   same tenant-context pattern Tenant Middleware uses on a real
-   request. Seeded three spare `users` rows for this via the
-   `arcnave_admin` superuser role (bypasses RLS), ran every path, then
-   deleted every row this script touched (`audit_log` first, then
-   `staff`, then `users`, respecting FK order) — confirmed empty
-   afterward via direct count queries. Script itself removed after
-   (not committed).
-   - `createStaff` missing `userId` -> `StaffValidationError` — PASS.
-   - `createStaff` happy path, `staffCode` omitted -> inserted with
-     `staff_code = NULL` (Postgres default handling, not a NOT NULL
-     violation) — PASS.
-   - `staff_created` audit_log row present after create — PASS.
-   - `createStaff` on a real duplicate `user_id` -> genuine Postgres
-     `23505` on `staff_user_id_key` -> `StaffUserConflictError` — PASS.
-   - `createStaff` on a real duplicate `(college_id, staff_code)` ->
-     genuine `23505` on `staff_college_id_staff_code_key` ->
-     `StaffCodeConflictError` — PASS, and distinguishable from the
-     `user_id` conflict above (different error class, same code path).
-   - `createStaff` with a `userId` that doesn't exist in `users` ->
-     genuine `23503` on `staff_user_id_fkey` ->
-     `StaffUserNotFoundError` — PASS.
-   - `updateStaff` changing `staffCode` to one already taken in the
-     same college -> genuine `23505` on
-     `staff_college_id_staff_code_key` -> `StaffCodeConflictError` on
-     the update path too — PASS (confirms the mapping isn't only
-     wired for create).
-   - `updateStaff` with a recognized field -> row updated, exactly one
-     `staff_updated` audit_log row — PASS.
-   - `removeStaff` on an existing row -> deleted, `getStaff` returns
-     `null` afterward, exactly one `staff_removed` audit_log row —
-     PASS.
-   - `removeStaff` on an already-removed id -> no-op, no second
-     `remove`/audit call — PASS.
-3. `node --check` on both new files — PASS, no syntax errors.
+   16/16 pass (15 prior + 1 new for the `actorUserId` fix).
+2. **Live integration, against the real docker-compose Postgres**
+   (`docker compose up -d db`, real `postgres:16`, already running
+   from the prior slice's verification, reused here) —
+   `node --test tests/staff.test.js`: **21/21 pass.** Real HTTP server
+   (`app.listen(0)`), real login flow issuing real JWTs, real
+   `arcnave_app` connections hitting real RLS-scoped Postgres.
+   Notable specific proofs, not just "endpoint returns 2xx":
+   - `StaffUserConflictError` -> 409 from a genuine duplicate `user_id`
+     insert (real `23505` on `staff_user_id_key`).
+   - `StaffCodeConflictError` -> 409 from a genuine duplicate
+     `(college_id, staff_code)` insert, both on create and on update.
+   - `StaffUserNotFoundError` -> 404 from a genuine FK violation
+     (`user_id` that doesn't exist in `users`).
+   - `update` cannot move `staff.user_id` — sending a different
+     `user_id` in a `PUT` body is silently ignored (`ALLOWED_FIELDS`
+     excludes it), the row's `user_id` is unchanged afterward —
+     verified by reading the response body's `user_id` post-update,
+     not just that the call didn't error.
+   - The `actorUserId` fix, live: created a staff profile for a
+     freshly-seeded `subject` account while authenticated as
+     `principaluser`, then read the resulting `audit_log` row directly
+     via the admin connection and asserted `user_id` equals
+     `principaluser`'s id, not the subject's id.
+   - Cross-tenant: identical `staff_code` value accepted in two
+     different tenants; a row created in tenant A returns 404 when
+     fetched through tenant B's token.
+   - RBAC: write as `staffuser` (role `staff`) -> 403; write with no
+     token -> 401; read as `staffuser` -> 200 (reads are role-agnostic,
+     only auth-gated).
+3. **Full existing suite regression check** — `node --test tests/`
+   (all files, not just the new ones, unlike the Module 2 first
+   slice's flagged gap): **143/143 pass**, 0 fail. Confirms the
+   `staffService.js` signature change didn't break anything else
+   calling it (nothing else does yet) and that wiring a new router
+   into `tenantApp.js` didn't disturb any other route's behavior.
+4. **DB left clean** — verified via direct count queries after the
+   full suite run: 0 rows in `staff`, 0 `colleges` matching this
+   session's `stf%` test-tenant prefix, 0 leftover `users` from any
+   test-created account. Every test's own cleanup (`cleanupTenant` in
+   `staff.test.js`, deleting `audit_log` -> `staff` -> `refresh_tokens`
+   -> `users` -> `colleges` in FK-safe order) ran successfully.
+5. `node --check` on all 4 changed/new backend files — PASS.
 
 ## Flags / open questions
-- **Conflict-type split (`StaffUserConflictError` vs.
-  `StaffCodeConflictError`) is a deliberate deviation from
-  `platformService.js`'s precedent** of bundling `colleges`' two
-  `UNIQUE` constraints into one `DuplicateCollegeError` — reasoning
-  captured in `.ai/TASK.md`. Flagging again here in case the project
-  would rather stay consistent with the bundling precedent even though
-  the two staff failures mean different things to a caller.
-- **`err.constraint` reliance** — this slice's constraint-name
-  branching depends on node-postgres continuing to populate
-  `err.constraint` on `23505`/`23503` (live-verified this session, not
-  assumed from docs). If a future `pg` upgrade ever stopped populating
-  it, the `if` branches would silently fall through to the generic
-  `throw err` rather than mis-mapping to the wrong domain error — a
-  safe failure mode, not a silent one, but noting the dependency
-  explicitly.
-- **Audit-logging on writes is still an assumption, not a confirmed
-  requirement** — same carried-forward flag as `studentService.js`'s
-  `RESULT.md`: BusinessRules.md doesn't explicitly mandate an audit
-  entry for staff create/update/remove; this follows the existing
-  house convention, not a stated rule.
-- **`staffCode` intentionally not required** — contrast with
-  `students.roll_no` flagged in `.ai/TASK.md` and re-flagged here
-  since it's the one place this slice's validation genuinely differs
-  in shape from its template, not just in naming.
-- **Soft delete still unresolved** — `removeStaff` is still a hard
-  `DELETE` (via `staffRepository.remove`), unchanged open question
-  carried forward from the first slice.
-- **The pending self-registration state is still nowhere** — unchanged
-  from the first slice's flag: `FacultyRegister.jsx`'s "submit, wait
-  for HOD/Principal approval" flow has no backing table or service
-  path yet. Not decided here on purpose.
+- **The `actorUserId` bugfix is out of this slice's original file
+  list** (`staffService.js` wasn't supposed to change for a "just add
+  routes" slice) — same situation `studentRepository.js`'s create-NULL
+  fix was in during the Module 1 service slice: the route layer
+  genuinely could not be wired correctly without it, since a route has
+  exactly one authenticated actor (`req.jwtClaims.sub`) and needed to
+  pass a *different* `user_id` for the profile being created. Flagging
+  again in case this should've been its own separate commit.
+- **RBAC is still the same conservative placeholder as `students.js`**
+  — `requireRole('principal')` for writes, not the real Staff/HOD
+  registration chain (Faculty submits -> HOD approves -> Principal
+  approves -> WorkflowService), which can't be enforced today (no
+  WorkflowService, no pending-approval state in `staffService`).
+  Considered `requireRole('principal', 'hod')` and rejected it — both
+  real registration chains end with Principal's final approval, so
+  gating on HOD alone would let through an action BusinessRules.md
+  treats as only provisional. Must be revisited once WorkflowService
+  (Module 8) exists.
+- **No route/API for the self-registration / pending-approval state**
+  — unchanged flag carried forward from both prior slices:
+  `FacultyRegister.jsx`'s "submit, wait for HOD/Principal approval"
+  flow still has no backing table, service path, or route.
+- **Soft delete still unresolved** — `DELETE /staff/:id` is still a
+  hard delete, unchanged open question carried forward twice now.

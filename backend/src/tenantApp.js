@@ -11,6 +11,7 @@ const createAuthRouter = require('./routes/auth');
 const createConfigurationsRouter = require('./routes/configurations');
 const createInvitationsRouter = require('./routes/invitations');
 const createStudentsRouter = require('./routes/students');
+const createStaffRouter = require('./routes/staff');
 
 // The tenant-facing API — a genuinely separate Express app from
 // platformApp.js, mounted at /api/v1 in app.js. Owns the full tenant
@@ -92,6 +93,7 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   app.use(createAuthRouter());
   app.use(createConfigurationsRouter());
   app.use(createStudentsRouter());
+  app.use(createStaffRouter());
 
   if (typeof registerExtraRoutes === 'function') {
     registerExtraRoutes(app);

@@ -82,6 +82,26 @@ test('StaffService validation and audit logging (no DB)', async (t) => {
       staffService.createStaff({}, { collegeId: 'c1', userId: 'u1', fullName: 'Alice' }));
   });
 
+  await t.test('createStaff attributes the audit entry to actorUserId, not the new staff row\'s own userId', async () => {
+    const createMock = t.mock.method(staffRepository, 'create', async (client, fields) => ({
+      id: 'new-id',
+      college_id: fields.collegeId,
+    }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      createMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    await staffService.createStaff(
+      {},
+      { collegeId: 'c1', userId: 'subject-user', fullName: 'Alice' },
+      { actorUserId: 'actor-user' },
+    );
+
+    assert.equal(auditMock.mock.calls[0].arguments[1].userId, 'actor-user');
+  });
+
   await t.test('createStaff maps a staff_user_id_key violation to StaffUserConflictError', async () => {
     const createMock = t.mock.method(staffRepository, 'create', async () => {
       const err = new Error('duplicate key value violates unique constraint "staff_user_id_key"');

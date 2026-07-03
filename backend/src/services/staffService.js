@@ -89,7 +89,22 @@ function pickStaffFields(source) {
   return result;
 }
 
-async function createStaff(client, { collegeId, userId, fullName, ...rest }) {
+// `userId` here is the staff row's OWN account link (staff.user_id —
+// the profile being created), not necessarily who is performing the
+// create. Those are genuinely different people in the real flow this
+// slice is grounded against (a principal/HOD adds a profile for an
+// already-provisioned staff member — see HodDashboard.jsx/
+// PrincipalDashboard.jsx's Add Staff modal): the actor is whoever is
+// authenticated on the request, the subject is the staff member named
+// in the body. `actorUserId` is who the audit_log entry attributes
+// the action to; it's optional (falls back to `undefined`, which
+// audit_log.user_id accepts — it's a nullable column) rather than
+// required, since a future caller invoking this outside an
+// authenticated route (a script, a future bulk-import path) may have
+// no separate actor to name. This is a correction to this slice's own
+// prior signature, found while wiring the route layer for it — see
+// .ai/RESULT.md.
+async function createStaff(client, { collegeId, userId, fullName, ...rest }, { actorUserId } = {}) {
   if (!userId || !fullName) {
     throw new StaffValidationError('userId and fullName are required');
   }
@@ -117,7 +132,7 @@ async function createStaff(client, { collegeId, userId, fullName, ...rest }) {
 
   await auditLogRepository.createAuditLogEntry(client, {
     collegeId,
-    userId,
+    userId: actorUserId,
     action: 'staff_created',
     entity: 'staff',
     entityId: staff.id,
