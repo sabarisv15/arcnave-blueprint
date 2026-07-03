@@ -262,7 +262,7 @@ const getWorkloadFromPending = (selectedTimetable) => {
 
 export default function HodDashboard() {
   const navigate = useNavigate();
-  const { logout, user } = useAuth();
+  const { logout, user, accessToken } = useAuth();
   const { showToast } = useToast();
   
   // Loading & Data States
@@ -633,9 +633,64 @@ export default function HodDashboard() {
     e.preventDefault();
     setReviewLoading(true);
     try {
-      const body = { 
-        ...staffForm, 
-        username: editingStaff ? editingStaff.username : undefined 
+      // Edit goes through the real staff API (routes/staff.js) — a
+      // PUT against an already-provisioned profile's id. Create stays
+      // on the old /api/hod/staff endpoint below: it doesn't exist in
+      // the Node backend at all (no account-creation path exists yet
+      // — see .ai/TASK.md), so it's left exactly as-is rather than
+      // half-repointed to something that can't actually work.
+      if (editingStaff) {
+        const staffId = editingStaff._id || editingStaff.id || editingStaff.staff_id;
+        const res = await fetch(`/api/v1/staff/${staffId}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            full_name: staffForm.name,
+            staff_code: staffForm.staff_id,
+            joined_year: staffForm.joined_year,
+            aicte_id: staffForm.aicte_id,
+            phone: staffForm.phone_number,
+          })
+        });
+
+        if (handleAuthError(res)) return;
+
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.detail || 'Failed to save staff profile');
+        }
+
+        // If a linked semester is selected, update that mapping as well.
+        // Still keyed off editingStaff.username — the real API never
+        // returns one (username lives on `users`, not `staff`).
+        if (staffForm.linked_semester && staffForm.linked_semester !== 'None') {
+          const linkRes = await fetch('/api/hod/link-tutor', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              semester: staffForm.linked_semester,
+              staff_username: editingStaff.username
+            })
+          });
+          if (handleAuthError(linkRes)) return;
+          if (!linkRes.ok) {
+            const errData = await linkRes.json();
+            throw new Error(errData.error || 'Staff profile saved, but tutor linking failed');
+          }
+        }
+
+        showToast('Staff profile updated!', 'success');
+        setStaffModalOpen(false);
+        loadData();
+        return;
+      }
+
+      const body = {
+        ...staffForm,
+        username: undefined
       };
 
       const res = await fetch('/api/hod/staff', {
@@ -670,17 +725,10 @@ export default function HodDashboard() {
         }
       }
 
-      showToast(editingStaff ? 'Staff profile updated!' : 'Staff profile created successfully!', 'success');
-      
-      if (!editingStaff && data.credentials) {
+      showToast('Staff profile created successfully!', 'success');
+
+      if (data.credentials) {
         setGeneratedCreds(data.credentials);
-        loadData();
-      } else if (editingStaff) {
-        // Show current credentials on edit success so the HOD can view/pass them on
-        setGeneratedCreds({
-          username: editingStaff.username,
-          password: editingStaff.password || 'staff123'
-        });
         loadData();
       } else {
         setStaffModalOpen(false);

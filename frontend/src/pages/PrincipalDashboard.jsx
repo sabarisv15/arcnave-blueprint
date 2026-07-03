@@ -147,7 +147,7 @@ const getWorkloadFromPending = (selectedTimetable) => {
 };
 
 export default function PrincipalDashboard() {
-  const { user } = useAuth();
+  const { user, accessToken } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
   
@@ -311,10 +311,42 @@ export default function PrincipalDashboard() {
     }
   };
 
-  // Staff onboarding creation/edit handler
+  // Staff onboarding creation/edit handler. Edit goes through the real
+  // staff API (routes/staff.js) — a PUT against an already-provisioned
+  // profile's id. Create stays on the old /api/hod/staff endpoint: it
+  // doesn't exist in the Node backend at all (no account-creation path
+  // exists yet — see .ai/TASK.md), so it's left exactly as-is rather
+  // than half-repointed to something that can't actually work.
   const handleStaffFormSubmit = async (e) => {
     e.preventDefault();
     try {
+      if (editingStaff) {
+        const staffId = editingStaff._id || editingStaff.id || editingStaff.staff_id;
+        const res = await fetch(`/api/v1/staff/${staffId}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            full_name: staffForm.name,
+            staff_code: staffForm.staff_id,
+            aicte_id: staffForm.aicte_id,
+            joined_year: staffForm.joined_year,
+            phone: staffForm.phone_number,
+            department: staffForm.department,
+          })
+        });
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.detail || 'Failed to submit staff details');
+        }
+        showToast('Staff profile updated!', 'success');
+        setShowStaffModal(false);
+        loadData();
+        return;
+      }
+
       const res = await fetch('/api/hod/staff', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

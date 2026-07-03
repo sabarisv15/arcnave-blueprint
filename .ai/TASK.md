@@ -1,129 +1,131 @@
 # TASK
 
 ## Objective
-Module 2 (Staff), third vertical slice: API routes on top of
-`staffService.js`. Still no UI repoint.
+Module 2 (Staff), fourth vertical slice: repoint `HodDashboard.jsx`'s
+and `PrincipalDashboard.jsx`'s Add/Edit Staff modal (`staffForm`,
+currently POSTing to `/api/hod/staff`) to the real `/api/v1/staff`
+routes from `routes/staff.js`. Same process as `c9b6248`
+(StudentEditorModal repoint).
+
+## Grounding: this is not a pure field-rename job
+Checked `backend/src/` before assuming anything: **no `/api/hod/*`
+route exists anywhere in the Node backend.** `grep -rn "hod/staff"
+backend/src/` returns nothing. This isn't "old backend, new backend,
+pick the new one" — it's dead code today. Every request `staffForm`'s
+submit handler currently makes (`GET /api/hod/staff`,
+`POST /api/hod/staff`) already 404s against the real Express app
+(Express's default HTML 404, not even a JSON body `err.error` could
+parse). So this slice is a real fix, not a like-for-like swap.
+
+## The deeper gap this task's framing undersells
+The task description points at field-name mismatches (`phone` vs
+`phone_number`, `staff_code` vs `staff_id`) — real, and listed below —
+but there's a bigger one underneath: the prototype's `staffForm`
+submit is a **single one-step flow that both creates a login account
+and a staff profile**, returning generated credentials
+(`generatedCreds`/`generatedCredentials`) immediately. The real
+`POST /api/v1/staff` (via `staffService.createStaff`) does **not**
+create accounts — it requires an already-existing `user_id` (Module
+2's first-slice `.ai/TASK.md` scope decision, restated in every slice
+since: "staff models an already-provisioned staff member... does not
+build any part of the HOD/Principal approval chain or credential
+generation"). There is no account-creation endpoint anywhere in this
+codebase reachable from a staff-onboarding flow yet — building one is
+Module 0/Module 8 territory, not a UI repoint.
+
+**Decision: only the EDIT path is repointed to the real API. CREATE
+stays on `/api/hod/staff`, unchanged, still broken exactly as it is
+today** — not a regression, since it's already 404ing; not silently
+patched over either. This is the same "leave what's out of scope
+alone" call `c9b6248` made for `TutorClass.jsx` ("roster still won't
+show newly-created students — expected... different backend/data
+store entirely until a future module's slice repoints it"). Inventing
+a `user_id` input field on this form, or building an account-creation
+endpoint, would both be structure nobody asked for yet (CLAUDE.md
+discipline) — flagged as the real, open, larger gap, not solved here.
+
+A consequence of only repointing EDIT: `staffList` (loaded via the
+still-un-repointed `GET /api/hod/staff`) will keep 404ing/returning
+empty in the running app, so the "Edit" button per row never actually
+renders against live data today — this repoint is only exercisable
+once a future slice repoints that GET loader too. Same situation
+`c9b6248` was already in for `TutorClass.jsx`; verification here uses
+the same workaround (reproduce the exact fetch call against a live
+stack directly, not by clicking through the actual dashboard, since
+the click-path is unreachable regardless of this change).
 
 ## Files likely affected
-- `backend/src/routes/staff.js` (new)
-- `backend/src/tenantApp.js` (add one require + one `app.use()` line,
-  same as `createStudentsRouter`, no other change)
-- `backend/tests/staff.test.js` (new)
-- `backend/src/services/staffService.js` (bugfix, found while drafting
-  this slice — see below, not a route/API change)
-
-## Context
-- `backend/src/services/staffService.js` already exists: `createStaff`,
-  `getStaff`, `updateStaff`, `removeStaff`, `listStaff`, plus
-  `StaffValidationError`, `StaffUserConflictError`,
-  `StaffCodeConflictError`, `StaffUserNotFoundError`.
-- Follow `routes/students.js` exactly (closest precedent — same
-  shape, one module ahead in the build order): factory function
-  `createStaffRouter()` returning an `express.Router()`, routes
-  registered relative to the eventual `/api/v1` mount, `asyncHandler`
-  wrapping every handler, `requireResolvedTenant(req, res)` guard
-  copied the same way, `client` = `req.dbClient`, `collegeId` =
-  `req.collegeId`.
-
-## Pre-existing bugfix found while drafting this slice
-`staffService.createStaff`'s signature (`{ collegeId, userId, fullName,
-...rest }`, single options object) makes `userId` do double duty: it's
-both the new staff row's own account link (`staff.user_id` — required,
-FK'd) **and** the only candidate for who the `audit_log` entry
-attributes the action to. Those are two different people in the real
-flow this module is grounded against — a principal/HOD adds a profile
-*for* an already-provisioned staff member (`HodDashboard.jsx`/
-`PrincipalDashboard.jsx`'s Add Staff modal); the actor is whoever is
-authenticated on the request, the subject is the staff member named in
-the request body. `studentService.createStudent` never had this
-problem because `students` has no `user_id` column at all — its
-`userId` param only ever meant "the actor." `staffService.createStaff`
-needs both concepts and only had room for one.
-
-Fixed in `staffService.js`: `createStaff` now takes a third parameter,
-`{ actorUserId }`, used only for the audit entry; the existing `userId`
-in the first object keeps meaning "the staff row's own account" only.
-`updateStaff`/`removeStaff` are unaffected — their `{ userId }` already
-meant "the actor" only, since neither touches `staff.user_id` (excluded
-from `ALLOWED_FIELDS`). One new unit test added to
-`staff-service.test.js` proving the audit entry is attributed to
-`actorUserId`, not the subject's `userId`. This is out of this route
-slice's original file list, same as `studentRepository.js`'s create-NULL
-fix was out of `studentService.js`'s slice — the route layer couldn't
-be wired correctly without it (a route has exactly one authenticated
-actor and needs to pass a *different* user_id for the profile being
-created).
+- `frontend/src/pages/HodDashboard.jsx`
+- `frontend/src/pages/PrincipalDashboard.jsx`
 
 ## Exact changes
 
-**Endpoints**:
-- `POST /staff` — `createStaff`. 201 on success.
-- `GET /staff/:id` — `getStaff`. 404 if `null`.
-- `GET /staff` — `listStaff`. `?limit=&offset=` passed through as-is.
-- `PUT /staff/:id` — `updateStaff`. 404 if `null`.
-- `DELETE /staff/:id` — `removeStaff`. 404 if `null`, else 204.
+**Both files**: add `accessToken` to the existing `useAuth()`
+destructure (both already import `useAuth` from `'../App'` and use it
+for other fields — `logout, user` in `HodDashboard.jsx`, `user` in
+`PrincipalDashboard.jsx` — just missing `accessToken`, same as
+`StudentEditorModal.jsx` needed).
 
-**Request/response body shape — snake_case, not camelCase**, same
-reasoning as `students.js` (no `StaffEditorModal.jsx` exists to ground
-against directly, but the HOD/Principal `staffForm` in
-`HodDashboard.jsx`/`PrincipalDashboard.jsx` and the DB columns
-themselves are both already snake_case-shaped). A `STAFF_BODY_FIELDS`
-map, same pattern as `STUDENT_BODY_FIELDS`, translates the request
-body to the camelCase `staffService` expects. `user_id` **is** in this
-map (unlike `students.js`, where no such mapping exists because
-students have no `user_id` column) — it's how the route learns which
-already-provisioned account this profile belongs to; `college_id` is
-not in the map, same as `students.js` (always `req.collegeId`, never
-caller-supplied). Response bodies: repository's native snake_case row
-shape, unchanged, same choice `students.js` made and same reasoning
-(strictly less code, nothing downstream expects camelCase yet).
+**Field mapping, `staffForm` (camelish/prototype names) -> real API
+snake_case body** (only what's sent for the EDIT/PUT path; CREATE's
+body is untouched):
+| `staffForm` field | real API field | notes |
+|---|---|---|
+| `name` | `full_name` | |
+| `staff_id` | `staff_code` | Module 2's first-slice `.ai/TASK.md` already renamed this column deliberately — this is where that rename surfaces at the UI boundary. |
+| `phone_number` | `phone` | |
+| `aicte_id` | `aicte_id` | unchanged |
+| `joined_year` | `joined_year` | unchanged |
+| `department` (Principal only — Hod's form has no department field) | `department` | unchanged |
+| `linked_semester` | *(none)* | drives a separate `/api/hod/link-tutor` call, untouched — Class Tutor assignment is Module 3 (Academic/timetable) territory per BusinessRules.md's already-resolved Module 2 decision, not a `staff` column. |
 
-**Error mapping**:
-- `StaffValidationError` -> 400
-- `StaffUserConflictError` -> 409
-- `StaffCodeConflictError` -> 409
-- `StaffUserNotFoundError` -> 404 — follows `platformService.js`'s
-  `CollegeNotFoundError` -> 404 precedent (`routes/platform.js`): the
-  referenced resource (the `user_id` named in the body) doesn't exist,
-  same shape of failure, same status code chosen for it elsewhere in
-  this codebase.
-- Service returning `null` (not thrown) -> 404, per endpoint as listed
-  above.
+`user_id`/`college_id` are never in this mapping — a profile's account
+link and tenant are set once at creation (which this slice doesn't
+touch) and excluded from `staffService.updateStaff`'s
+`ALLOWED_FIELDS` regardless.
 
-**RBAC — same conservative placeholder as `students.js`, not a final
-decision**: BusinessRules.md's actual Staff registration chain (Faculty
-submits -> HOD approves -> Principal approves -> WorkflowService) can't
-be enforced today — no WorkflowService (Module 8), and this slice's
-`staffService` doesn't model a pending/approval state at all (see
-Module 2 first slice's scope boundary). `requireRole('principal')`
-gates writes, `requireAuth` gates reads — identical to `students.js`,
-not `requireRole('principal', 'hod')`: both registration chains
-(Staff and HOD) end with *Principal* giving final approval, so
-Principal is the one existing role that's actually the final authority
-in every real chain BusinessRules.md describes; gating on HOD alone
-would let through an action the real business rule treats as only
-provisional. Must be revisited once WorkflowService exists.
+**`HodDashboard.jsx`'s `handleStaffFormSubmit`**: branch on
+`editingStaff`.
+- Edit branch (new): `PUT /api/v1/staff/${editingStaff._id ||
+  editingStaff.id || editingStaff.staff_id}` (same `_id || id ||
+  <natural-key>` fallback convention `StudentEditorModal.jsx` used),
+  `Authorization: Bearer <accessToken>` header, mapped body per table
+  above. Error: `err.detail` (real API's error field, not `err.error`).
+  Success: toast, close the modal, `loadData()` — **do not** set
+  `generatedCreds`: the real `PUT` response is the repository's native
+  staff row (no `username`/`password` — those live on `users`, which
+  `staffService` never joins in). The existing JSX
+  `{generatedCreds && (...)}` block and `{generatedCreds ? 'Close' :
+  'Cancel'}` button label both need no change — they already do the
+  right thing when `generatedCreds` is simply never set. The
+  `linked_semester` -> `/api/hod/link-tutor` follow-up call is
+  untouched, still keyed off `editingStaff.username` (the only place a
+  username exists in this flow, since `staffService` doesn't return
+  one).
+- Create branch: **byte-identical to current code**, still POSTing to
+  `/api/hod/staff`, still setting `generatedCreds` from
+  `data.credentials`.
 
-**`tenantApp.js`**: add `const createStaffRouter = require('./routes/staff');`
-and `app.use(createStaffRouter());` in the same block as
-`createStudentsRouter()`.
+**`PrincipalDashboard.jsx`'s `handleStaffFormSubmit`**: same shape of
+branch on `editingStaff`.
+- Edit branch (new): `PUT /api/v1/staff/${editingStaff._id ||
+  editingStaff.id || editingStaff.staff_id}`, `Authorization` header,
+  mapped body (includes `department`, unlike Hod's). Error:
+  `err.detail`. Success: toast, `setShowStaffModal(false)`,
+  `loadData()` — do not set `generatedCredentials`.
+- Create branch: byte-identical to current code.
 
 ## Acceptance criteria
-- All 5 endpoints wired, thin translation layer only.
-- `StaffValidationError` -> 400, `StaffUserConflictError` -> 409,
-  `StaffCodeConflictError` -> 409, `StaffUserNotFoundError` -> 404,
-  not-found -> 404 — verified against the actual service hitting real
-  DB constraints (real `23505`/`23503`), not hand-thrown errors, same
-  rigor as `students.test.js`.
-- The `actorUserId`/`userId` split (see bugfix above) is exercised
-  live: a `staff_created` audit_log row attributed to the
-  authenticated caller (e.g. `principaluser`'s own id), not to the
-  `user_id` named in the request body.
-- Writes require `principal` role; reads require any authenticated
-  tenant user.
-- Cross-tenant isolation: the same `staff_code` is independently usable
-  across two tenants; a staff row from one tenant 404s when fetched
-  through another tenant's token.
-- No other repository, no Storage, no `WorkflowService` reached from
-  this file — only `staffService.js`.
-- No UI code touched in this slice.
+- Both files' edit-path `fetch` calls reproduced byte-for-byte
+  (URL, method, headers, body) against a live Express + real Docker
+  Postgres stack: a real `staff` row updated via `PUT
+  /api/v1/staff/:id`, response is the updated row, no 500/404 from a
+  field-shape mismatch.
+- `err.detail` (not `err.error`) is what reaches `showToast` on a
+  real 400/404/409 from the edit path.
+- CREATE path in both files is unmodified — confirmed via `git diff`
+  showing zero changes to those lines.
+- No other file touched (`TutorClass.jsx`, `/api/hod/link-tutor`,
+  `/api/hod/classes` all untouched — genuinely out of scope, same as
+  `c9b6248`'s treatment of `TutorClass.jsx`).
+- No Aadhaar field anywhere (there never was one in this form).
