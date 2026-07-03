@@ -8,6 +8,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
+const { requireAuth } = require('../middleware/rbac');
 const authService = require('../services/authService');
 
 function createAuthRouter() {
@@ -70,6 +71,24 @@ function createAuthRouter() {
       res.status(501).json({ detail: 'Password reset is not implemented yet' });
     }
   }));
+
+  // First real RBAC-gated route — same role Module 0's Python version
+  // gave it (see git history). Uses requireAuth, not
+  // requireRole('staff', 'hod', 'principal'): "return my own identity"
+  // isn't a role-gated capability, it holds for any authenticated
+  // tenant user regardless of which roles currently exist —
+  // deliberately not hardcoding the tenant role list at this call
+  // site either, consistent with middleware/rbac.js not hardcoding it
+  // in the middleware itself. No DB lookup needed — returns the
+  // identity straight from the JWT's already-verified claims.
+  router.get('/auth/me', requireAuth, (req, res) => {
+    const claims = req.jwtClaims;
+    res.json({
+      user_id: claims.sub,
+      college_id: claims.college_id,
+      role: claims.role,
+    });
+  });
 
   return router;
 }

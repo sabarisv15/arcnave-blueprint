@@ -110,7 +110,7 @@ version was originally built:
     `NotificationService`.
 - **AuthMiddleware** (`backend/src/middleware/auth.js`) — decodes a
   bearer token if present and sets `req.jwtClaims`; non-enforcing,
-  never rejects a missing/invalid token (that's RBAC, the next slice).
+  never rejects a missing/invalid token itself (RBAC does that, below).
   Registered *before* `tenantMiddleware` in `app.js`. Worth noting as a
   genuine simplification over the Python port, not a direct
   translation: Express runs `app.use()` in literal registration order
@@ -129,10 +129,50 @@ version was originally built:
   from a JWT claim alone, agrees with a matching subdomain (not a
   false-positive conflict), and a JWT claiming one tenant plus a
   subdomain resolving to a different one `400`s, never silently
-  picking either. All 25 Node tests pass across the three test files.
+  picking either.
+- **RBAC** (`backend/src/middleware/rbac.js`) — `requireRole(...allowedRoles)`
+  and a bare `requireAuth`, tenant-side only. Neither hardcodes a role
+  list: `requireRole` takes whatever role strings a route passes it
+  (BusinessRules.md still leaves the tenant role model — "College
+  Admin," whether "Class Tutor" becomes a role — an open question,
+  resolved during Module 2, not guessed at here). No `requirePlatformAdmin`
+  in this file, deliberately — BusinessRules.md and ADR-010 treat
+  Platform operations as structurally outside the tenant RBAC model
+  entirely, not a role within it; that belongs to the Platform API's
+  own, not-yet-rebuilt auth.
+  - Two distinct failure modes: `req.jwtClaims` null (or wrong `type`,
+    same belt-and-suspenders check as the deleted Python version, in
+    case `jwtSecretKey`/a future platform secret ever collided) → `401`.
+    Claims present but `role` not in the allowed set → `403`.
+  - `GET /api/v1/auth/me` is the first real protected route, same as
+    the Python original — but gated by `requireAuth`, not
+    `requireRole('staff', 'hod', 'principal')`: "return my own
+    identity" isn't a role-gated capability, and spelling out every
+    known role at this one call site would silently under-cover a
+    future new role nobody remembered to add here. A deliberate,
+    explained deviation from the Python precedent, not an oversight.
+  - No real business route yet needs a role *subset* restriction
+    (ConfigurationService's write route was the first one to need this
+    in Python — not rebuilt in Node yet). Proving `requireRole`'s
+    403 path honestly needed the same solution the Python version
+    used for the identical reason: a test-only `/restricted` route,
+    registered via `createApp()`'s `registerExtraRoutes` hook (not a
+    permanent route on the real app) and driven through a real HTTP
+    request against the real `AuthMiddleware`/`requireRole` wiring —
+    not the middleware function called directly.
+  - **Tests** — `backend/tests/rbac.test.js`, 10 cases: `/me` returns
+    `401` with no token, a malformed token, and an expired token
+    (constructed with an explicit past `exp`, not relying on
+    `jsonwebtoken`'s `expiresIn` accepting a negative duration); `200`
+    for each of staff/hod/principal, response body checked against the
+    token's actual claims. `requireRole`'s subset restriction: `401`
+    with no token, `403` for `staff` (outside the `hod`/`principal`
+    allowed set), `200` for `hod`/`principal`.
+
+All 36 Node tests pass across the four test files.
 
 Not built yet in Node (same order as the original build, separate
-follow-ups): RBAC, request-scoped logging, the Super Admin Portal API,
+follow-ups): request-scoped logging, the Super Admin Portal API,
 ConfigurationService, principal invitation. CI remains disabled
 pending a Node-specific workflow.
 
