@@ -89,13 +89,15 @@ function expiredBearer() {
 
 test('rbac', async (t) => {
   const app = createApp({
-    registerExtraRoutes(testApp) {
+    registerTenantExtraRoutes(testApp) {
       // Real HTTP request through the real middleware stack, same
       // reasoning as the Python throwaway app — this route's only
       // purpose is proving requireRole's allowed-set restriction, not
       // a real feature; unlike /me, there's no real business route in
-      // Module 0 to hang this on honestly.
-      testApp.get('/api/v1/_test_only/restricted', requireRole('hod', 'principal'), (req, res) => {
+      // Module 0 to hang this on honestly. Relative path — registered
+      // on tenantApp, mounted at /api/v1 externally; the actual
+      // request below still hits /api/v1/_test_only/restricted.
+      testApp.get('/_test_only/restricted', requireRole('hod', 'principal'), (req, res) => {
         res.json({ role: req.jwtClaims.role });
       });
     },

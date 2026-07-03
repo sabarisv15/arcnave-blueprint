@@ -94,15 +94,18 @@ function hostFor(subdomain) {
 
 test('tenant middleware', async (t) => {
   const app = createApp({
-    registerExtraRoutes(testApp) {
+    registerTenantExtraRoutes(testApp) {
       // Test-only route, registered before errorHandler is attached
-      // (see app.js's factory docstring for why registration order
-      // matters here) — proves the rollback path with a route that
-      // does a real partial write to a real tenant table, then
+      // (see tenantApp.js's factory docstring for why registration
+      // order matters here) — proves the rollback path with a route
+      // that does a real partial write to a real tenant table, then
       // throws, on the exact same TenantMiddleware/errorHandler
-      // wiring production traffic uses.
+      // wiring production traffic uses. Relative path — this route is
+      // registered on tenantApp, which app.js mounts at /api/v1
+      // externally, so the actual HTTP request below still hits
+      // /api/v1/_test_only/partial-write-then-throw.
       testApp.post(
-        '/api/v1/_test_only/partial-write-then-throw',
+        '/_test_only/partial-write-then-throw',
         asyncHandler(async (req) => {
           await req.dbClient.query(
             "INSERT INTO configurations (college_id, category, configuration) " +

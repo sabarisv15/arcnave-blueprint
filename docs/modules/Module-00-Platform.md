@@ -252,13 +252,116 @@ per the build brief's store shape, not an oversight. Revisit once a
 real consumer needs it (e.g. an audit-log-style feature wanting
 `userId` on every line automatically, not just the routes that already
 have `req.jwtClaims` in scope).
+- **Super Admin Portal API** (`backend/src/tenantApp.js`,
+  `backend/src/platformApp.js`, `backend/src/app.js`, plus
+  `security.js`/`config.js`/`db/pool.js` additions) — platform-admin
+  login and college creation only, this pass, matching the deleted
+  Python version's own original scope before principal invitation was
+  added later (that slice still isn't built here either).
+  - **This is the one where the Python build hit a real, documented
+    bug worth re-reading before touching this slice.** Its first
+    attempt mounted platform routes as a sub-app under a single
+    top-level app that carried `TenantMiddleware`/`AuthMiddleware`
+    directly; an isolation test caught `request.state.college_id`/
+    `jwt_claims` leaking onto platform-mounted requests, because
+    Starlette's middleware wraps the entire ASGI callable before any
+    routing/mounting decision happens. The fix was two genuinely
+    separate peer sub-apps under a middleware-free top-level app.
+  - **Express's `app.use(prefix, subApp)` was not assumed to be
+    automatically as isolated as Starlette's `Mount` was wrongly
+    assumed to be** — that exact assumption is what failed last time,
+    and assuming the Express equivalent "just works" would have been
+    the same mistake in a different dialect. The port mirrors the
+    Python fix's shape for a documented, Express-specific reason:
+    `backend/src/tenantApp.js` and `backend/src/platformApp.js` are
+    each their own `express()` instance with their own complete
+    middleware stack (each app's stack is independent; mounting a
+    sub-app via `app.use(prefix, subApp)` does not retroactively make
+    it inherit an ancestor's middleware *unless* the ancestor has
+    middleware of its own registered ahead of the mount point — which
+    is exactly why `app.js` has none). Chose path-prefix mounting on
+    a middleware-free outer app over two separate `listen()` calls
+    (the other option that would achieve equivalent isolation):
+    it keeps the single-port, single-process external surface the
+    Python version had and docker-compose.yml/the frontend already
+    assume, rather than introducing a second port this slice doesn't
+    actually need. Mount order matters, same reasoning as the Python
+    version: `/api/v1/platform` is registered before `/api/v1`, since
+    path-prefix matching stops at the first match.
+  - **This was verified empirically against the real mounted
+    structure, not inferred from the code looking separated** —
+    `backend/tests/platform.test.js`'s isolation test is the direct
+    Node equivalent of the Python test that caught the original bug,
+    using the same technique (a probe route injected into the actual
+    `platformApp` instance `app.js` mounts, via the new
+    `registerPlatformExtraRoutes` hook, checking `'jwtClaims' in req`/
+    `'collegeId' in req`/`'dbClient' in req` — those are set *only* by
+    `authMiddleware`/`tenantMiddleware`, nowhere else in this
+    codebase). It passed on the real structure with no leak found.
+  - One real bug surfaced and was fixed during this slice, not before
+    it: `requestContextMiddleware`'s access log used `req.path`, which
+    is mount-relative inside a sub-app (Express strips the mount
+    prefix, same as Starlette's `Mount`) — so it silently started
+    logging `/health` instead of `/api/v1/health` once tenantApp
+    became a mounted sub-app instead of the top-level app. Caught by
+    the existing `request-logging.test.js` suite failing, not
+    predicted in advance. Fixed by switching to `req.originalUrl`
+    (stripped of any query string), which is unaffected by mounting.
+  - **A second, structurally separate JWT** — `PLATFORM_JWT_SECRET_KEY`
+    (own env var, required, no fallback to `JWT_SECRET_KEY`),
+    `createPlatformAccessToken`/`decodePlatformAccessToken` in
+    `security.js`, claim shape `{sub, type: 'platform_access'}` —
+    deliberately no `college_id`/`role` fields at all, so no code path
+    could confuse a platform token for a tenant one even by accident.
+  - **Platform DB access exclusively through `platformPool`**
+    (`db/pool.js`, wired since the JWT-auth slice but unused until
+    now) — `arcnave_platform`, which per the ported migrations has
+    zero grants on any tenant table. `platformRepository.js`/
+    `platformService.js` touch only `platform_admins`/`colleges`.
+  - **No per-request transaction middleware for platform routes,
+    unlike tenant routes — a deliberate simplification, not a gap.**
+    Every operation this pass is a single statement (one `SELECT` for
+    login, one `INSERT` for college creation); Postgres autocommits a
+    standalone statement, so there's no cross-statement atomicity
+    requirement to protect the way tenant routes genuinely have one
+    (`set_config(...)` and the query it scopes *must* share one
+    transaction, or RLS fails closed on the next statement). Routes
+    call `platformService` functions with `platformPool` directly, not
+    a checked-out client.
+  - `login` — enumeration-safe, same `PlatformAuthError`-for-every-
+    failure-mode pattern as tenant login. **No refresh-token rotation**
+    — checked against the deleted Python version rather than assumed
+    Module 0's scope called for parity with tenant auth: it didn't
+    build this either (see Known Limitations). Platform admins simply
+    re-authenticate when their access token expires.
+  - `createCollege` — the platform admin's actual job, an `INSERT`
+    into `colleges`. `409` on a duplicate `college_id`/`subdomain` via
+    Postgres's `23505` (`unique_violation`) SQLSTATE, not a raw
+    constraint-violation `500`.
+  - `requirePlatformAdmin` (`middleware/platformAuth.js`) — decodes
+    the bearer token itself, unlike `requireRole`/`requireAuth`: the
+    platform app never runs `authMiddleware`, so there's no upstream
+    middleware that already did this. Structurally separate from
+    `middleware/rbac.js`, not a shared/unified dependency — same
+    reasoning as the deleted Python version's `require_platform_admin`
+    docstring: a single "check role, maybe check type" middleware
+    shared between both token kinds would be one `if`-branch away from
+    accidentally accepting the wrong type.
+  - **Tests** — `backend/tests/platform.test.js`, 10 cases: platform
+    login success (no `refresh_token` key at all in the response) /
+    wrong password / unknown username; college creation success /
+    duplicate `college_id` / duplicate `subdomain` / no-token `401`;
+    cross-boundary — a platform token against a tenant `requireAuth`-
+    gated route `401`s, a tenant token against `requirePlatformAdmin`
+    `401`s, both failing at signature verification (different
+    secrets), not a role/type check that could be a weaker guarantee;
+    and the isolation proof described above.
 
-All 44 Node tests pass across the five test files.
+All 55 Node tests pass across the six test files.
 
 Not built yet in Node (same order as the original build, separate
-follow-ups): the Super Admin Portal API, ConfigurationService,
-principal invitation. CI remains disabled pending a Node-specific
-workflow.
+follow-ups): ConfigurationService, principal invitation. CI remains
+disabled pending a Node-specific workflow.
 
 ---
 

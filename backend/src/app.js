@@ -1,80 +1,59 @@
 'use strict';
 
 const express = require('express');
-const { appPool } = require('./db/pool');
-const asyncHandler = require('./middleware/asyncHandler');
-const { requestContextMiddleware } = require('./middleware/requestContext');
-const { authMiddleware } = require('./middleware/auth');
-const { tenantMiddleware } = require('./middleware/tenant');
-const errorHandler = require('./middleware/errorHandler');
-const createAuthRouter = require('./routes/auth');
+const createTenantApp = require('./tenantApp');
+const createPlatformApp = require('./platformApp');
 
-// A factory, not a pre-built singleton — Express's error-handling
-// middleware only catches errors from routes registered *before* it
-// in the stack (Express walks the middleware array forward-only when
-// searching for the next matching layer after next(err), never
-// backward). A test that needs to add its own route and still have
-// errors from it reach the real error handler has to be able to
-// insert that route before errorHandler is attached, not after — see
-// tests/tenant-middleware.test.js's rollback-on-error test, which is
-// exactly why `registerExtraRoutes` exists. index.js calls this with
-// no arguments for the real app.
-function createApp({ registerExtraRoutes } = {}) {
+// Top-level Express application. Deliberately thin: no business
+// middleware lives directly on this app — that is not a style
+// preference, it's the fix for a real bug the deleted Python version
+// hit once already (recoverable via git history).
+//
+// The Python version's first attempt added TenantMiddleware/
+// AuthMiddleware/RequestContextMiddleware straight to its single
+// top-level app, with the platform routes mounted alongside as a
+// second sub-app. That looked like isolation but wasn't: Starlette's
+// middleware wraps the *entire* ASGI callable before any
+// routing/mounting decision ever happens, so middleware on an outer
+// app ran for every request regardless of which mount ultimately
+// served it. An isolation test caught request.state.college_id/
+// jwt_claims existing on platform-routed requests before the fix —
+// tenant_app/platform_app were split into two genuinely independent
+// sub-apps, each owning its own middleware stack, with nothing of
+// substance on the app mounting them.
+//
+// Express's app.use(prefix, subApp) is not assumed to be automatically
+// as isolated as Starlette's Mount was assumed to be — that exact
+// assumption is what failed last time, just in a different framework.
+// The structural fix is the same shape here for a documented reason:
+// each Express app instance owns its own middleware stack, and
+// mounting a sub-app via app.use(prefix, subApp) does not retroactively
+// make that sub-app inherit an ancestor's middleware UNLESS the
+// ancestor has middleware of its own registered ahead of the mount —
+// which is exactly why this file has none. That reasoning was verified
+// empirically, not taken on faith: tests/platform.test.js's isolation
+// test is the direct Node equivalent of the Python test that caught
+// the original bug, run against this real mounted structure.
+//
+// Chose path-prefix mounting on this middleware-free outer app over
+// two separate listen() calls (the other option that would achieve
+// equivalent isolation): it keeps the same single-port, single-process
+// external API surface the Python version had (and docker-compose.yml
+// / the frontend already assume), rather than introducing a second
+// port and reverse-proxy concern that nothing about this slice
+// actually requires.
+//
+// Mount order matters and is easy to get backwards: /api/v1/platform
+// must be registered before /api/v1, since Express's path-prefix
+// matching (like Starlette's Mount) stops at the first matching
+// prefix in registration order. If /api/v1 were registered first,
+// every /api/v1/platform/* request would match it (a prefix match)
+// before ever reaching the more specific /api/v1/platform entry.
+function createApp({ registerTenantExtraRoutes, registerPlatformExtraRoutes } = {}) {
   const app = express();
 
-  // Outermost middleware — registered first so every other middleware
-  // and route, including /health below, runs inside the request-
-  // scoped AsyncLocalStorage context it opens, and so its own access-
-  // log line covers every request regardless of what else happens.
-  app.use(requestContextMiddleware);
-
-  app.use(express.json());
-
-  // Minimal liveness + DB connectivity check — same purpose as the
-  // original Python scaffold's /api/v1/health. Registered before
-  // authMiddleware/tenantMiddleware on purpose: a liveness probe
-  // shouldn't require a resolved tenant (or even a transaction) to
-  // succeed, same as the Python version's /health not needing one.
-  app.get('/api/v1/health', asyncHandler(async (req, res) => {
-    await appPool.query('SELECT 1');
-    res.json({ status: 'ok' });
-  }));
-
-  // AuthMiddleware before TenantMiddleware — resolveTenant reads
-  // req.jwtClaims, which AuthMiddleware sets. Express runs app.use()
-  // in the literal order it's called, so this is simply declaring
-  // them in the order they must run; no inversion needed (see
-  // middleware/auth.js's docstring for the contrast with the
-  // Python/Starlette port).
-  app.use(authMiddleware);
-  app.use(asyncHandler(tenantMiddleware));
-
-  // Proves the whole resolve -> set_tenant_context -> route-handler
-  // pipeline actually reaches Postgres: reads current_setting() back
-  // from the database itself, not any in-memory value TenantMiddleware
-  // computed. A passing response is only possible if every step
-  // actually ran, not just that the middleware thinks it did.
-  app.get('/api/v1/whoami', asyncHandler(async (req, res) => {
-    const result = await req.dbClient.query(
-      "SELECT current_setting('app.current_tenant', true) AS college_id",
-    );
-    const collegeId = result.rows[0] ? result.rows[0].college_id : null;
-    if (!collegeId) {
-      res.status(400).json({ detail: 'No tenant could be resolved for this request' });
-      return;
-    }
-    res.json({ college_id: collegeId });
-  }));
-
-  // Ordinary tenant-scoped routes, registered after tenantMiddleware
-  // like whoami above — not to be confused with AuthMiddleware.
-  app.use('/api/v1', createAuthRouter());
-
-  if (typeof registerExtraRoutes === 'function') {
-    registerExtraRoutes(app);
-  }
-
-  app.use(errorHandler);
+  app.use('/api/v1/platform', createPlatformApp({ registerExtraRoutes: registerPlatformExtraRoutes }));
+  app.use('/api/v1', createTenantApp({ registerExtraRoutes: registerTenantExtraRoutes }));
 
   return app;
 }

@@ -61,6 +61,31 @@ function decodeAccessToken(token) {
   }
 }
 
+// Platform-admin token. Signed with platformJwtSecretKey — a
+// different key from createAccessToken's jwtSecretKey — and carries
+// no college_id or role claim at all, only type: 'platform_access'.
+// Structurally, not just by convention, this can't be confused with a
+// tenant access token: even reading the claims of a successfully-
+// decoded platform token gives you nothing that looks like a tenant
+// claim shape. See middleware/platformAuth.js (requirePlatformAdmin)
+// and middleware/rbac.js (requireRole/requireAuth) — kept
+// deliberately separate rather than unified.
+function createPlatformAccessToken({ adminId }) {
+  return jwt.sign(
+    { sub: adminId, type: 'platform_access' },
+    config.platformJwtSecretKey,
+    { algorithm: config.jwtAlgorithm, expiresIn: `${config.accessTokenExpireMinutes}m` },
+  );
+}
+
+function decodePlatformAccessToken(token) {
+  try {
+    return jwt.verify(token, config.platformJwtSecretKey, { algorithms: [config.jwtAlgorithm] });
+  } catch (err) {
+    throw new TokenError(err.message);
+  }
+}
+
 function generateRefreshToken() {
   // 32 bytes of server-generated randomness, base64url-encoded (no
   // padding) — same shape as the deleted Python version's
@@ -89,6 +114,8 @@ module.exports = {
   needsRehash,
   createAccessToken,
   decodeAccessToken,
+  createPlatformAccessToken,
+  decodePlatformAccessToken,
   generateRefreshToken,
   hashRefreshToken,
 };

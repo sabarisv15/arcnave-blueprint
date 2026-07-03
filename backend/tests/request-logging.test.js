@@ -128,15 +128,17 @@ async function cleanupTenant(adminPool, college) {
 
 test('request-scoped structured logging', async (t) => {
   const app = createApp({
-    registerExtraRoutes(testApp) {
+    registerTenantExtraRoutes(testApp) {
       // Deliberately delayed so two concurrent requests are
       // genuinely in flight simultaneously, forcing a real yield to
       // the event loop rather than relying on incidental DB-query
       // latency to create interleaving opportunities — a more
       // reliable forcing function than hoping real I/O happens to be
       // slow enough. logInfo here has no `req` in scope at all,
-      // matching authService.refresh's real shape.
-      testApp.get('/api/v1/_test_only/delayed-log', asyncHandler(async (req, res) => {
+      // matching authService.refresh's real shape. Relative path —
+      // registered on tenantApp, mounted at /api/v1 externally; the
+      // actual request below still hits /api/v1/_test_only/delayed-log.
+      testApp.get('/_test_only/delayed-log', asyncHandler(async (req, res) => {
         await new Promise((resolve) => setTimeout(resolve, 50));
         logInfo('delayed_log_test_marker', {});
         res.json({ ok: true });

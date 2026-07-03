@@ -51,4 +51,12 @@ module.exports = {
   // Refresh tokens are opaque, stored server-side as token_hash only
   // (never the raw token) — see src/security.js.
   refreshTokenExpireDays: Number(process.env.REFRESH_TOKEN_EXPIRE_DAYS) || 30,
+
+  // Signs/verifies platform-admin access JWTs. Deliberately a
+  // DIFFERENT secret from jwtSecretKey, required, no fallback to it:
+  // a platform token and a tenant token must never verify against the
+  // same key, or a leaked tenant token plus a signature bug could be
+  // mistaken for platform access. See security.js's
+  // createPlatformAccessToken/decodePlatformAccessToken.
+  platformJwtSecretKey: required('PLATFORM_JWT_SECRET_KEY'),
 };

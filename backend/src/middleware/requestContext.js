@@ -43,6 +43,19 @@ function requestContextMiddleware(req, res, next) {
   req.requestId = requestId;
   res.setHeader('X-Request-ID', requestId);
 
+  // req.originalUrl, not req.path: this middleware is registered on
+  // both tenantApp and platformApp, each of which is mounted at a
+  // path prefix (/api/v1, /api/v1/platform) by the thin outer app
+  // (app.js) — Express strips that prefix from req.path/req.url
+  // inside a mounted sub-app (same as Starlette's Mount did), so
+  // req.path here would only ever show the internal, mount-relative
+  // path (e.g. '/health', not '/api/v1/health'). req.originalUrl is
+  // unaffected by mounting and always reflects what the client
+  // actually requested — caught by this file's own test suite, not
+  // assumed: the Super Admin Portal API slice's two-app split changed
+  // req.path's meaning, and the access log needed to account for it.
+  const path = req.originalUrl.split('?')[0];
+
   const startedAt = process.hrtime.bigint();
   res.on('finish', () => {
     const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
@@ -50,7 +63,7 @@ function requestContextMiddleware(req, res, next) {
       requestId: req.requestId,
       collegeId: req.collegeId,
       method: req.method,
-      path: req.path,
+      path,
       status: res.statusCode,
       durationMs: Math.round(durationMs * 100) / 100,
     });

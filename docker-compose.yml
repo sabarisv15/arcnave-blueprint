@@ -39,14 +39,18 @@ services:
       MIGRATION_DATABASE_URL: postgresql://${POSTGRES_USER:-arcnave_admin}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-arcnave}
       # Platform role — least privilege, granted only on
       # platform_admins/colleges/principal_invitations. See
-      # docker/postgres/init/02-platform-role.sh. Not wired into any
-      # route yet — the Platform API is rebuilt in a later pass, same
-      # as the rest of Module 0's slices.
+      # docker/postgres/init/02-platform-role.sh and ADR-015.
       PLATFORM_DATABASE_URL: postgresql://arcnave_platform:${ARCNAVE_PLATFORM_PASSWORD}@db:5432/${POSTGRES_DB:-arcnave}
       # Signs/verifies tenant access JWTs (HS256). Back in the app's
       # env now that JWT auth is rebuilt (ADR-016) — was removed for
       # the schema/RLS-only scaffolding pass since nothing used it yet.
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY in .env}
+      # Signs/verifies platform-admin access JWTs. Deliberately a
+      # DIFFERENT value from JWT_SECRET_KEY — never reuse that one
+      # here, or a tenant and a platform token become indistinguishable
+      # by signature alone. Back in the app's env now that the Super
+      # Admin Portal API is rebuilt (ADR-016).
+      PLATFORM_JWT_SECRET_KEY: ${PLATFORM_JWT_SECRET_KEY:?set PLATFORM_JWT_SECRET_KEY in .env}
     ports:
       - "8000:8000"
     volumes:
