@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useToast } from '../App';
+import { useToast, useAuth } from '../App';
 import { X, Check, ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 
 const STEPS = [
@@ -12,6 +12,7 @@ const STEPS = [
 export default function StudentEditorModal({ onClose, student, onSave }) {
 
   const { showToast } = useToast();
+  const { accessToken } = useAuth();
   const isEditMode = !!student;
   const [currentStep, setCurrentStep] = useState(0);
 
@@ -214,24 +215,29 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
     };
 
     try {
+      const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      };
+
       let res;
       if (isEditMode) {
-        res = await fetch(`/api/tutor-students/${student._id || student.id || student.roll_no}/update`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+        res = await fetch(`/api/v1/students/${student._id || student.id || student.roll_no}`, {
+          method: 'PUT',
+          headers,
           body: JSON.stringify(payload)
         });
       } else {
-        res = await fetch('/api/tutor-students', {
+        res = await fetch('/api/v1/students', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify(payload)
         });
       }
 
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.error || 'Failed to save student profile');
+        throw new Error(err.detail || 'Failed to save student profile');
       }
 
       showToast(`Student profile ${isEditMode ? 'updated' : 'created'} successfully!`, 'success');
