@@ -1,0 +1,307 @@
+'use strict';
+
+// Unit tests for AcademicService's pure business-logic paths — these
+// need no live Postgres at all: classRepository and
+// auditLogRepository are stubbed via node:test's built-in mock (works
+// here because academicService always calls e.g.
+// `classRepository.create(...)` as a fresh property lookup on the
+// shared module object, never a destructured local reference, so
+// replacing the export before the call takes effect). Same technique
+// as staff-service.test.js.
+//
+// What's deliberately NOT here: an actual
+// classes_college_id_class_name_key / classes_tutor_user_id_key /
+// classes_tutor_user_id_fkey violation reaching its domain error
+// end-to-end. That needs a real Postgres 23505/23503 from the live
+// constraints, not a hand-thrown err.code + err.constraint — the
+// Module 3 first slice already live-verified those exact constraint
+// names against a real database (see .ai/RESULT.md), so this file
+// trusts that grounding rather than re-verifying it without a DB.
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const classRepository = require('../src/repositories/classRepository');
+const auditLogRepository = require('../src/repositories/auditLogRepository');
+const academicService = require('../src/services/academicService');
+
+test('AcademicService validation and audit logging (no DB)', async (t) => {
+  await t.test('createClass rejects a missing className without touching the DB', async () => {
+    const createMock = t.mock.method(classRepository, 'create');
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.createClass({}, { collegeId: 'c1', className: undefined }),
+      academicService.ClassValidationError,
+    );
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('createClass rejects an unknown timetableStatus without touching the DB', async () => {
+    const createMock = t.mock.method(classRepository, 'create');
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.createClass({}, {
+        collegeId: 'c1',
+        className: '3rd Sem · CS-A',
+        timetableStatus: 'On Hold',
+      }),
+      academicService.ClassTimetableStatusError,
+    );
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('createClass accepts each known timetableStatus literal', async () => {
+    const createMock = t.mock.method(classRepository, 'create', async (client, fields) => ({
+      id: 'new-id',
+      college_id: fields.collegeId,
+    }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      createMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const knownStatuses = ['No Tutor', 'Pending HOD', 'Pending Principal', 'Approved', 'Rejected'];
+    for (const timetableStatus of knownStatuses) {
+      await assert.doesNotReject(() => academicService.createClass({}, {
+        collegeId: 'c1',
+        className: '3rd Sem · CS-A',
+        timetableStatus,
+      }));
+    }
+  });
+
+  await t.test('createClass does not require department, semester, or tutorUserId', async () => {
+    const createMock = t.mock.method(classRepository, 'create', async (client, fields) => ({
+      id: 'new-id',
+      college_id: fields.collegeId,
+    }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      createMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    await assert.doesNotReject(() =>
+      academicService.createClass({}, { collegeId: 'c1', className: '3rd Sem · CS-A' }));
+  });
+
+  await t.test('createClass drops an unrecognized field instead of passing it through', async () => {
+    const createMock = t.mock.method(classRepository, 'create', async (client, fields) => ({
+      id: 'new-id',
+      college_id: fields.collegeId,
+    }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      createMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    await academicService.createClass({}, {
+      collegeId: 'c1',
+      className: '3rd Sem · CS-A',
+      aadhaarNumber: '1234-5678-9012',
+    });
+
+    const passedFields = createMock.mock.calls[0].arguments[1];
+    assert.equal('aadhaarNumber' in passedFields, false);
+  });
+
+  await t.test('createClass attributes the audit entry to actorUserId', async () => {
+    const createMock = t.mock.method(classRepository, 'create', async (client, fields) => ({
+      id: 'new-id',
+      college_id: fields.collegeId,
+    }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      createMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    await academicService.createClass(
+      {},
+      { collegeId: 'c1', className: '3rd Sem · CS-A' },
+      { actorUserId: 'actor-user' },
+    );
+
+    assert.equal(auditMock.mock.calls[0].arguments[1].userId, 'actor-user');
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'class_created');
+    assert.equal(auditMock.mock.calls[0].arguments[1].entity, 'classes');
+  });
+
+  await t.test('createClass maps a classes_college_id_class_name_key violation to ClassNameConflictError', async () => {
+    const createMock = t.mock.method(classRepository, 'create', async () => {
+      const err = new Error('duplicate key value violates unique constraint "classes_college_id_class_name_key"');
+      err.code = '23505';
+      err.constraint = 'classes_college_id_class_name_key';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.createClass({}, { collegeId: 'c1', className: '3rd Sem · CS-A' }),
+      academicService.ClassNameConflictError,
+    );
+  });
+
+  await t.test('createClass maps a classes_tutor_user_id_key violation to ClassTutorConflictError', async () => {
+    const createMock = t.mock.method(classRepository, 'create', async () => {
+      const err = new Error('duplicate key value violates unique constraint "classes_tutor_user_id_key"');
+      err.code = '23505';
+      err.constraint = 'classes_tutor_user_id_key';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.createClass({}, { collegeId: 'c1', className: '3rd Sem · CS-A', tutorUserId: 'u1' }),
+      academicService.ClassTutorConflictError,
+    );
+  });
+
+  await t.test('createClass maps a classes_tutor_user_id_fkey violation to ClassTutorNotFoundError', async () => {
+    const createMock = t.mock.method(classRepository, 'create', async () => {
+      const err = new Error('insert or update on table "classes" violates foreign key constraint "classes_tutor_user_id_fkey"');
+      err.code = '23503';
+      err.constraint = 'classes_tutor_user_id_fkey';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.createClass({}, { collegeId: 'c1', className: '3rd Sem · CS-A', tutorUserId: 'missing-user' }),
+      academicService.ClassTutorNotFoundError,
+    );
+  });
+
+  await t.test('createClass lets a non-conflict repository error pass through unchanged', async () => {
+    const boom = new Error('connection lost');
+    const createMock = t.mock.method(classRepository, 'create', async () => {
+      throw boom;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.createClass({}, { collegeId: 'c1', className: '3rd Sem · CS-A' }),
+      (err) => err === boom,
+    );
+  });
+
+  await t.test('updateClass rejects an unknown timetableStatus without touching the DB', async () => {
+    const updateMock = t.mock.method(classRepository, 'update');
+    t.after(() => updateMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.updateClass({}, 'class-id', { timetableStatus: 'On Hold' }, { userId: 'u1' }),
+      academicService.ClassTimetableStatusError,
+    );
+    assert.equal(updateMock.mock.callCount(), 0);
+  });
+
+  await t.test('updateClass with no recognized fields does not write an audit entry', async () => {
+    const updateMock = t.mock.method(classRepository, 'update', async (client, id) => ({ id, college_id: 'c1' }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      updateMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    await academicService.updateClass({}, 'class-id', { aadhaarNumber: 'x' }, { userId: 'u1' });
+
+    assert.equal(auditMock.mock.callCount(), 0);
+  });
+
+  await t.test('updateClass with a recognized field writes an audit entry', async () => {
+    const updateMock = t.mock.method(classRepository, 'update', async (client, id) => ({ id, college_id: 'c1' }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      updateMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    await academicService.updateClass({}, 'class-id', { timetableStatus: 'Pending HOD' }, { userId: 'u1' });
+
+    assert.equal(auditMock.mock.callCount(), 1);
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'class_updated');
+  });
+
+  await t.test('updateClass against a nonexistent id does not write an audit entry', async () => {
+    const updateMock = t.mock.method(classRepository, 'update', async () => null);
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      updateMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await academicService.updateClass({}, 'missing-id', { semester: '4th Sem' }, { userId: 'u1' });
+
+    assert.equal(result, null);
+    assert.equal(auditMock.mock.callCount(), 0);
+  });
+
+  await t.test('updateClass maps a class name conflict on update to ClassNameConflictError', async () => {
+    const updateMock = t.mock.method(classRepository, 'update', async () => {
+      const err = new Error('duplicate key value violates unique constraint "classes_college_id_class_name_key"');
+      err.code = '23505';
+      err.constraint = 'classes_college_id_class_name_key';
+      throw err;
+    });
+    t.after(() => updateMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.updateClass({}, 'class-id', { className: '3rd Sem · CS-B' }, { userId: 'u1' }),
+      academicService.ClassNameConflictError,
+    );
+  });
+
+  await t.test('updateClass maps a tutor conflict on update to ClassTutorConflictError', async () => {
+    const updateMock = t.mock.method(classRepository, 'update', async () => {
+      const err = new Error('duplicate key value violates unique constraint "classes_tutor_user_id_key"');
+      err.code = '23505';
+      err.constraint = 'classes_tutor_user_id_key';
+      throw err;
+    });
+    t.after(() => updateMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.updateClass({}, 'class-id', { tutorUserId: 'already-tutoring' }, { userId: 'u1' }),
+      academicService.ClassTutorConflictError,
+    );
+  });
+
+  await t.test('removeClass on a nonexistent id is a no-op, no audit entry', async () => {
+    const findMock = t.mock.method(classRepository, 'findById', async () => null);
+    const removeMock = t.mock.method(classRepository, 'remove', async () => {});
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      removeMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await academicService.removeClass({}, 'missing-id', { userId: 'u1' });
+
+    assert.equal(result, null);
+    assert.equal(removeMock.mock.callCount(), 0);
+    assert.equal(auditMock.mock.callCount(), 0);
+  });
+
+  await t.test('removeClass on an existing id deletes and writes an audit entry', async () => {
+    const findMock = t.mock.method(classRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const removeMock = t.mock.method(classRepository, 'remove', async () => {});
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      removeMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await academicService.removeClass({}, 'class-id', { userId: 'u1' });
+
+    assert.deepEqual(result, { id: 'class-id', college_id: 'c1' });
+    assert.equal(removeMock.mock.callCount(), 1);
+    assert.equal(auditMock.mock.callCount(), 1);
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'class_removed');
+  });
+});
