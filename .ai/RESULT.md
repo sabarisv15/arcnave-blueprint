@@ -1,65 +1,82 @@
 # RESULT
 
 ## Files changed
-- backend/migrations/1751700000000_module-1-student-schema.js (new)
-- backend/src/repositories/studentRepository.js (new)
+- backend/src/services/studentService.js (new)
+- backend/tests/student-service.test.js (new)
+- backend/src/repositories/studentRepository.js (bug fix, found while testing this slice)
 
 ## What changed, per file
-- `1751700000000_module-1-student-schema.js`: creates `students` with every
-  ERD column from `.ai/TASK.md` (no Aadhaar column). RLS enabled + forced with
-  a `tenant_isolation` policy on `college_id`, matching Module 0's
-  `current_setting('app.current_tenant', true)` pattern exactly.
-  `UNIQUE (college_id, roll_no)`. `down` drops the table.
-- `studentRepository.js`: `create`, `findById`, `findByRollNo`, `update`
-  (partial), `remove`, `list` (paginated). Raw SQL confined to this file, no
-  calls to other repositories, no business logic/validation beyond what
-  Postgres itself enforces (per StudentService owning that, not this slice).
+- `studentService.js`: `createStudent`, `getStudent`, `updateStudent`,
+  `removeStudent`, `listStudents`. `StudentValidationError` (missing
+  `rollNo`/`fullName`) and `StudentRollNoConflictError` (Postgres `23505` on
+  `students_college_id_roll_no_key`, caught and rethrown as a domain error —
+  no raw pg error ever reaches the caller). Every function takes `client`
+  first; `createStudent` takes `collegeId` explicitly (defense in depth,
+  matching `authService.js`); `updateStudent`/`removeStudent`/`getStudent`
+  don't (id is globally unique, same convention as `authRepository.js`'s
+  id-keyed lookups). A module-level `ALLOWED_FIELDS` whitelist (mirrors, but
+  deliberately duplicates rather than imports, `studentRepository.js`'s
+  column list) is the thing that actually keeps an aadhaar-shaped field from
+  ever reaching the DB — picked over throwing on unknown fields since aadhaar
+  gets no special treatment beyond what any other unrecognized/typo'd field
+  already gets. Calls only `studentRepository` and `auditLogRepository` — no
+  other repository, no Storage, no WorkflowService. No RBAC/authorization
+  logic (left to the future route/RBAC layer, per the task).
+- `student-service.test.js`: unit tests for every path that needs no DB —
+  missing-field validation, aadhaar-drop, 23505→domain-error mapping,
+  non-23505 passthrough, and the "audit entry only if a row actually
+  changed" logic for update/remove. `studentRepository`/`auditLogRepository`
+  are stubbed via `node:test`'s built-in `t.mock.method`.
+- `studentRepository.js`: fixed a bug this slice's testing surfaced —
+  `create` was inserting an explicit `NULL` for every field the caller
+  omitted, which violated `phone_verified`/`parent_phone_verified`'s
+  `NOT NULL DEFAULT false` the moment a caller didn't pass them (i.e. every
+  normal `createStudent` call). Now filters to only the provided columns
+  before building the `INSERT`, same pattern `update()` already used, so
+  Postgres applies its own `DEFAULT` for anything omitted. Out of this
+  task's stated file list, but the vertical slice didn't actually work
+  without it.
 
 ## Tests
-Ran against a throwaway `postgres:16` Docker container (`arcnave_admin`/
-`arcnave_app`/`arcnave_platform` roles created manually, matching
-`docker/postgres/init/`), migrated through `1751500000000` and
-`1751600000000` first via `node-pg-migrate`. Container removed after.
-
-1. **`up`** — PASS. `students` created; `psql \d students` confirms
-   `relrowsecurity`/`relforcerowsecurity` both `t`; `pg_policy` shows
-   `tenant_isolation` with
-   `(college_id = current_setting('app.current_tenant', true))`;
-   `UNIQUE (college_id, roll_no)` confirmed live — inserting a duplicate
-   `(col1, R001)` raised `duplicate key value violates unique constraint
-   "students_college_id_roll_no_key"`, while `(col2, R001)` (different
-   college, same roll_no) inserted fine.
-2. **`down`** — PASS. `to_regclass('public.students')` → null,
-   `pg_policies` has zero rows for `students`, `\dt` shows Module 0 /
-   principal_invitations tables untouched, `pgmigrations` back to just
-   those two rows.
-3. **`node --check backend/src/repositories/studentRepository.js`** — PASS
-   (re-ran after the `pool`→`client` edit; the earlier stale-mount issue
-   is gone).
-4. **Aadhaar column** — PASS. `information_schema.columns` for `students`
-   lists all 28 expected columns, no `aadhaar*` anywhere.
-
-## Review pass (second look against authRepository.js/configurationRepository.js conventions)
-- `create`'s first param renamed `pool` → `client`: students is a plain
-  RLS-scoped tenant table (like `users`), not a platform-side table, so it
-  should always be called with the request's tenant-scoped connection, same
-  as `authRepository.js`'s `createUser`. `pool` implied the wrong connection
-  type.
-- `findByRollNo` now takes `collegeId` and filters `WHERE college_id = $1
-  AND roll_no = $2`, not just `roll_no`. `roll_no` is only unique per
-  `(college_id, roll_no)`, not globally — same situation as
-  `authRepository.js`'s `getUserByUsername`, which filters on `collegeId`
-  explicitly for the same reason. RLS would still have scoped the result
-  correctly, but the explicit filter matches house convention for
-  non-globally-unique lookups and documents the real key.
+1. **Unit (no DB)** — `node --test tests/student-service.test.js`: 11/11
+   pass. Covers missing `rollNo`, missing `fullName`, aadhaar-field drop,
+   `23505` → `StudentRollNoConflictError`, a non-`23505` error passing
+   through unchanged, update-with-no-recognized-fields skipping the audit
+   entry, update-against-a-nonexistent-id skipping it, and remove's
+   found/not-found audit behavior.
+2. **Duplicate-roll-no path (live DB)** — spun up a throwaway `postgres:16`
+   container, created the `arcnave_app`/`arcnave_platform` roles, ran all
+   three migrations, then called `studentService.createStudent` twice
+   through a real `arcnave_app` connection with `SET app.current_tenant`
+   set, same `(collegeId, rollNo)` both times. First call succeeded; second
+   raised `StudentRollNoConflictError` from a genuine Postgres `23505`
+   (not a simulated one); confirmed exactly one `student_created` audit row
+   exists (the failed second attempt never reached the audit-log call).
+   Container removed after.
+3. `node --check` on both `studentService.js` and `studentRepository.js` —
+   clean.
 
 ## Flags / open questions
-- **File name**: used `studentRepository.js` (camelCase) instead of the
-  task's `StudentRepository.js` — every existing repository in
-  `backend/src/repositories/` is camelCase; matched that convention.
-- **Uniqueness field**: used `roll_no` for `(college_id, roll_no)`, per the
-  task's own flagged assumption — `register_no`/`admission_no` aren't in the
-  documented field list.
-- **Soft delete**: no soft-delete column exists in the given ERD, so
-  `remove()` is a hard `DELETE`. Same placeholder-grant treatment
-  `configurations` got in the Module 0 migration.
+- **Repository bug fix was out of scope for this task's file list** —
+  `studentRepository.js` wasn't supposed to change this slice, but
+  `createStudent` couldn't actually create a student without it (see
+  above). Flagging in case this should've been a separate fix/commit
+  instead of bundled in.
+- **Audit-logging on writes is still an assumption, not a confirmed
+  requirement** — carried forward from the task itself: BusinessRules.md
+  doesn't explicitly mandate an audit entry for student create/update/
+  remove; this follows `configurationService.setConfiguration`'s existing
+  house convention, not a stated rule.
+- **Aadhaar handling: silent drop, not rejection** — a caller sending an
+  aadhaar-shaped field gets no error; the field is simply absent from what
+  reaches `studentRepository`. Picked because every other unrecognized
+  field gets the same treatment; happy to switch to a loud rejection
+  specifically for aadhaar-named keys if that's preferred.
+- **Soft delete still unresolved** — `removeStudent` is still a hard
+  `DELETE` (via `studentRepository.remove`), unchanged from the first
+  slice's open question.
+- **`removeStudent` looks up the row before deleting** — not explicitly
+  asked for, but needed to get `collegeId` for the audit entry (the task's
+  given signature takes no `collegeId`) and to avoid writing a
+  `student_removed` audit entry for an id that never existed. Flagging as
+  a small addition beyond a literal passthrough.

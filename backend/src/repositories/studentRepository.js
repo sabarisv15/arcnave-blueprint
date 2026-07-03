@@ -45,9 +45,15 @@ const COLUMNS = [
 ];
 
 async function create(client, fields) {
-  const columnNames = COLUMNS.map(([, column]) => column);
-  const values = COLUMNS.map(([key]) => (fields[key] === undefined ? null : fields[key]));
-  const placeholders = COLUMNS.map((_, i) => `$${i + 1}`);
+  // Only the columns the caller actually provided go into the INSERT
+  // — an omitted key must let Postgres apply its own DEFAULT (e.g.
+  // phone_verified/parent_phone_verified default to false), not
+  // receive an explicit NULL, which would violate their NOT NULL
+  // constraint. Same entries-filtering approach as update() below.
+  const entries = COLUMNS.filter(([key]) => fields[key] !== undefined);
+  const columnNames = entries.map(([, column]) => column);
+  const values = entries.map(([key]) => fields[key]);
+  const placeholders = entries.map((_, i) => `$${i + 1}`);
 
   const result = await client.query(
     `INSERT INTO students (${columnNames.join(', ')})
