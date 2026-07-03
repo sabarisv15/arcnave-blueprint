@@ -1,156 +1,256 @@
 # TASK
 
 ## Objective
-Module 3 (Academic), fourth vertical slice: repoint the real, working
-frontend's class/timetable *reads* to the real API
-(`GET /api/v1/classes`, added in `235aa8b`). Same discipline as Module
-2's fourth slice (`49c2c36`, staff edit-only repoint) and Module 1's UI
-slice (`c9b6248`): ground against what's actually rendered today,
-repoint only what the current API surface genuinely supports, and
-flag — not silently skip — everything still blocked on missing
-pieces.
+Module 4 (Attendance), first vertical slice: ERD + migration +
+repository only for an `attendance_sessions` table — no service/API/UI
+yet. Same discipline as Module 1/2/3's first slices (`fbfd1c9`,
+`31f5a8b`, `ef0a76c`): model exactly what's grounded in the real,
+working frontend, flag what's deferred, don't invent structure nobody
+asked for yet.
 
-## Grounding (read before assuming any repoint is safe)
-- `.ai/RESULT.md` (third slice) for `routes/classes.js`'s exact
-  response shape: `GET /api/v1/classes` returns a **bare array**
-  (`res.json(classes)`, not `{ classes: [...] }`), each row carrying
-  `tutor_user_id` (a real `users.id` UUID, nullable) — not the
-  prototype's `tutor_id` (a username string). This mismatch is the
-  crux of this slice; see the design decision below.
-- `frontend/src/pages/HodDashboard.jsx` — `classesList` (was
-  `GET /api/hod/classes`, confirmed via grep to not exist anywhere in
-  the Node backend, so this call always 404'd and `classesList` stayed
-  `[]`). Consumed in exactly five places: the "Class Tutor
-  Assignments" panel display, the staff-directory's per-staff matched-
-  class badge, `openEditStaff`'s linked-semester lookup, the
-  `selectedTimetableTutor`/`selectedDashboardTutor` default-selection
-  effect, and a plain length count.
-- `frontend/src/pages/PrincipalDashboard.jsx` — an identical
-  `classesList`/`GET /api/hod/classes` pair, consumed in the "Class
-  Tutor Assignments" (Assign Tutor) panel and `handleLinkTutor`'s
-  `targetCls` lookup.
-- `frontend/src/pages/TutorClass.jsx` — a `deptClasses` state, HOD-only,
-  also from `GET /api/hod/classes`, feeding the "Department Classes"
-  `<optgroup>` in the class-switcher dropdown.
-- `frontend/src/pages/TutorClassMonitor.jsx` — fetches
-  `/api/monitor/tutor-classes`, a **composite** endpoint (class +
-  full student roster + `present_today`/`present_this_hour`
-  attendance figures joined together) that has no real-API analogue
-  at all: no student-roster-per-class join exists in
-  `academicService`/`classRepository`, and the attendance figures
-  belong to Module 5 (Attendance), not built yet. Confirmed via grep:
-  `/api/monitor/tutor-classes` does not exist in the Node backend
-  either — this file's fetch already 404s today, exactly like
-  `classesList` did.
-- `docs/architecture/BusinessRules.md` Academic/Timetable and Staff
-  sections, `CLAUDE.md` rule 3 (`WorkflowService` is the sole approval
-  gate) and rule 7 (Academic before Attendance).
+## Known open gap carried in from Module 3, restated here (not solved)
+Module 3's fourth slice (`dbe8380`) flagged that nothing can set
+`classes.timetable_status` to `'Approved'` via any real API yet — HOD/
+Principal approval actions require `WorkflowService` (Module 8), which
+doesn't exist. CLAUDE.md rule 7 / BusinessRules.md Academic/Timetable:
+"A class's attendance cannot be marked until its timetable status is
+`Approved`." This means **no attendance session built in this module
+can be end-to-end gated for real yet** — the only way to get a
+`classes` row into `'Approved'` state today is a raw
+`UPDATE classes SET timetable_status = 'Approved'` run directly
+against Postgres (bypassing the API entirely), which is exactly what
+this slice's own live verification had to do to seed test data. This
+is restated deliberately, not silently worked around: Roadmap.md locks
+Module 4 after Module 3 regardless, and CLAUDE.md rule 1 (only
+Business Services touch data) makes the *service-layer enforcement* of
+this lock the real requirement — this slice is the ERD layer, which
+has no gate to enforce yet at all. The service-layer gate (checking
+`classes.timetable_status === 'Approved'` before allowing a mark) is
+explicitly deferred to Attendance's second slice, and the
+`WorkflowService`-shaped gap that makes `'Approved'` unreachable via
+any real API stays exactly as open as Module 3 left it.
 
-## Key design decision: tutor_id (username) -> tutor_user_id (UUID) breaks the existing username-matching, and that's left as-is, not patched over
-The prototype UI's entire "which staff member tutors this class" model
-is a client-side string match: `staffList.find(s => s.username ===
-cls.tutor_id)`, everywhere it appears. `staffList` itself comes from
-`GET /api/hod/staff` — also nonexistent in the Node backend (confirmed
-via grep, same as `classesList`'s old endpoint), so `staffList` stays
-`[]` regardless of this slice. Repointing `classesList` to the real
-`tutor_user_id` (a UUID) does not make this match start working — it
-already didn't work (404 kept `staffList` empty), and it still doesn't
-after this slice (empty `staffList` still matches nothing, now for a
-type-mismatch reason as well as an empty-list reason). This is
-deliberately **not** fixed by also repointing `staffList`'s `GET` to
-the real `GET /api/v1/staff`: doing so would be new scope this slice
-wasn't asked for, and even if done, `staffService`/`staffRepository`
-never expose a `username` field (username lives on `users`, not
-`staff` — already documented in `49c2c36`'s commit message), so the
-match would need `staff.user_id === cls.tutor_user_id` instead — a
-real, correctly-typed join, but building it is left to whichever
-future slice actually repoints `staffList`'s reads, not invented here.
-Every rename in this slice (`.tutor_id` -> `.tutor_user_id`,
-`.className` -> `.class_name`) is scoped to making `classesList`
-itself display real data correctly; it does not attempt to fix the
-now-permanently-mismatched staff-name lookups downstream of it.
+## Grounding (read before assuming any field list)
+- `docs/architecture/BusinessRules.md` Attendance section: "Attendance
+  is marked hour-wise, within a defined attendance window,"
+  "Attendance cannot be modified after it is locked," "Only the staff
+  member scheduled for that period, the class tutor, or an HOD
+  (force-mark) may mark attendance for a given hour."
+- `docs/architecture/Architecture.md` 2.5: `AttendanceService` "owns
+  hour-wise attendance, attendance windows, lock; reads (does not own)
+  timetable/approval state from AcademicService."
+- `docs/architecture/BusinessRules.md` AI section: "The AI is never
+  given a hard-delete capability on attendance, fees, or marks
+  records, even with approval — only soft-delete (a flag/timestamp)."
+  Names this table by domain, explicitly — unlike students/staff/
+  classes (all left soft-delete an open question), this is a resolved
+  rule for attendance specifically. Resolved at the ERD level in this
+  slice, not deferred again.
+- `frontend/src/pages/StaffDashboard.jsx` — the real, working
+  per-student attendance-marking screen (grounded ahead of
+  `TutorClass.jsx`'s attendance widget, which only ever POSTs an
+  aggregate `present_today`/`present_this_hour` count to
+  `/api/tutor/live-attendance`, never individual students — see the
+  design decision below for why `StaffDashboard.jsx` is the real shape
+  to build against, not `TutorClass.jsx`):
+  - `GET /api/staff/my-schedule` returns `schedule`: one entry per
+    period, each carrying `hour`, `time`, `hour_index`, `class_name`,
+    `subject`, `staffDisplay`, `tutor_id`, `already_marked`, and — only
+    once marked — `period_record: { absent_rolls, present, total }`.
+  - `POST /api/staff/mark-period-attendance` body:
+    `{ tutor_id, hour_index, absent_rolls, date_key }` — marks (or
+    re-marks) exactly one period for one class on one date, submitting
+    the list of absent students' roll numbers, present is implied
+    (roster minus absent).
+  - The "Mark Attendance" panel operates per-student (a checklist of
+    `selectedPeriod.students`, toggling each into/out of
+    `absentRolls`), but the wire payload is period-level: one absence
+    list per (class, date, hour), not one row submitted per student.
+- `frontend/src/pages/TutorClass.jsx`'s attendance-marking UI: the
+  `isMarkingWindowOpen` gate (window open only within the first 15
+  minutes of a period's start, per its timetable-parsed
+  `getCurrentPeriod`), `isUserAllowedToMark`/`isScheduledStaff` (staff
+  scheduled for that period, matched by parsing the timetable cell
+  text), and `settings.timetable_status !== 'Approved'` blocking
+  marking entirely — this is where the "attendance window" and
+  "timetable must be Approved" rules are visibly enforced client-side
+  today (not persisted, but confirms these are real, exercised
+  concepts, not just BusinessRules.md prose).
 
-## Key design decision: fixed a pre-existing className/class_name typo, found in the exact code path being touched
-`HodDashboard.jsx` line ~2079 (now the "Class Tutor Assignments" panel)
-read `cls.className` while every other reference to the same
-`classesList` entries in both dashboards reads `cls.class_name` (snake
-case) — a pre-existing bug, not introduced by this slice (confirmed by
-checking `git log -p` on the surrounding lines predates this session).
-`PrincipalDashboard.jsx`'s equivalent panel had the identical bug.
-Both fixed to `.class_name` as part of this slice, since it sits
-directly in the render path of the exact data being repointed here
-(leaving it would mean the class name silently renders as `undefined`
-for the very panel meant to prove the repoint works) — not a
-speculative unrelated cleanup.
+## Key design decision: one row per (class, date, hour), not one row per student
+`attendance_sessions`, not a normalized `attendance_records`
+per-student join table. Grounded directly in
+`POST /api/staff/mark-period-attendance`'s actual wire shape — one
+call marks one period, carrying the full absence list for that period
+in a single request — and in `period_record`'s read shape, which is
+always read back as one object per period, never as N per-student
+rows. Same reasoning Module 3's first slice used to reject normalizing
+subjects/periods/faculty_allocation out of `classes.timetable_data`:
+nothing in the real, working frontend queries "every attendance row
+for student X across all sessions" as a structured filter today —
+every real screen (`StaffDashboard.jsx`'s schedule,
+`TutorClass.jsx`'s current-period display) operates per-period, not
+per-student. A future Reports/Analytics module (7, 10 — much later in
+Roadmap.md) will likely want per-student attendance percentages, but
+building a normalized join table now, for a consumer that doesn't
+exist yet, is exactly the "structure nobody has asked for yet"
+Module 3's own `.ai/TASK.md` already ruled out for the identical
+reason. Revisit only once a real screen needs that query shape.
 
-## Key design decision: what's out of scope, and why it can't be closed here
-- **`TutorClass.jsx`'s main timetable panel** (`settings.timetable_status`/
-  `timetable_data`/`timetable_remarks`, currently from
-  `GET /api/tutor/class-settings?tutor_id=`) — **not repointed**. There
-  is no "find the class row for the currently authenticated tutor"
-  endpoint: `classRepository.findByTutorUserId` was deliberately left
-  unwrapped by `academicService` (second slice) and never exposed by
-  `routes/classes.js` (third slice) — a caller would need to already
-  know the class `id` to `GET /api/v1/classes/:id`, and nothing today
-  maps "the logged-in user" to "their own class row." Wiring that up
-  is new API surface, not a frontend rename — explicitly out of scope
-  per this task's own instructions.
-- **`TutorClassMonitor.jsx`** — **not touched at all**. Its
-  `/api/monitor/tutor-classes` composite (class + roster + attendance)
-  has no real-API equivalent to repoint to; building one would mean
-  inventing a student-roster-per-class join that doesn't exist and
-  attendance fields that belong to a module (5) not yet built.
-- **Tutor-linking writes** (`HodDashboard.jsx`'s
-  `POST /api/hod/link-tutor` inside `handleStaffFormSubmit`,
-  `PrincipalDashboard.jsx`'s `handleLinkTutor`) — **not repointed**.
-  Tutor assignment already works at the DB/API level via generic
-  `PUT /api/v1/classes/:id` with `tutor_user_id` (third slice), but
-  the UI's linking flow is keyed on `staff_username`, which has no
-  real-API equivalent to resolve to a `user_id` without also
-  repointing `staffList` — same reasoning as the design decision
-  above. Left exactly as-is, still writing to a dead endpoint.
-- **Timetable review actions** (`handleTimetableReview` in both
-  dashboards, `POST /api/hod/timetable-review` /
-  `/api/principal/timetable-review`) — **not repointed**. This is real
-  HOD/Principal approval-chain logic; CLAUDE.md rule 3 makes
-  `WorkflowService` (Module 8) the sole approval gate, and it doesn't
-  exist yet — same boundary the second and third Module 3 slices
-  already drew and documented.
-- **`pendingTimetables`** (`GET /api/timetable/pending`) and
-  **`monitorData`** (`GET /api/monitor/tutor-classes`) in both
-  dashboards — **not touched**. Neither has a real-API replacement
-  today for the same reasons as `TutorClassMonitor.jsx` above.
+## Key design decision: TutorClass.jsx's aggregate counter is not the grounding source
+`TutorClass.jsx`'s "Live Attendance" widget
+(`handleSaveLiveAttendance` -> `POST /api/tutor/live-attendance`,
+body `{ tutor_id, present_today, present_this_hour }`) never names
+individual students at all — it's a manually-typed aggregate counter,
+not a real roll-call. `markedAbsentees` (the roll numbers the tutor
+actually checks off in that same screen) is computed into a count and
+then thrown away — never sent to the backend. This is a materially
+weaker, dead-end shape compared to `StaffDashboard.jsx`'s real
+`mark-period-attendance` flow, which does carry real per-student
+identity (`absent_rolls`) end-to-end. `StaffDashboard.jsx` is treated
+as the authoritative shape for this ERD; `TutorClass.jsx`'s aggregate
+counter is grounding only for the *window/lock/scheduled-staff gating
+rules* (see above), not for the attendance record's own shape.
+
+## Key design decision: class_id (real FK), not tutor_id (prototype username)
+The prototype identifies a period by `tutor_id` (a username string) in
+both `my-schedule` and `mark-period-attendance`, because in the old
+model a tutor uniquely identified "their" class. The real `classes`
+table (Module 3) is the actual class identity now — `class_id UUID`
+FK to `classes(id)` replaces `tutor_id`, the same `tutor_id` ->
+`tutor_user_id` shift Module 3's fourth slice already made on the read
+side. Resolving "which class is this staff member's scheduled period
+for" from a `class_id` is Service-layer work, not modeled here.
+
+## Key design decision: absent_student_ids stores real students.id UUIDs, not roll numbers
+The wire shape (`absent_rolls`) is human-facing roll-number strings —
+that's what a prototype with no auth-resolved identity behind it sends
+today. Storing roll numbers directly in the ERD would duplicate free
+text as if it were identity, the same trap CLAUDE.md rule 8 /
+BusinessRules.md's Students section already warns against for Aadhaar
+(never trust free-text as identity). `absent_student_ids` is JSONB, an
+array of `students.id` UUIDs — the resolved form a real
+`AttendanceService` would produce after translating `roll_no` ->
+`student_id`, same layering `staffService.createStaff` already
+established (takes an already-resolved `userId`, never a raw
+username). No FK-level enforcement on the JSONB array elements (same
+trade-off `classes.timetable_data`'s free-text subject/staff cells
+already accepted) — that's a Service-layer validation job, not a DB
+one, for this slice.
+
+## Key design decision: locked_at is added now, even though no real code enforces the lock yet
+BusinessRules.md states "Attendance cannot be modified after it is
+locked" as a flat rule — but `StaffDashboard.jsx`'s own "Update
+Attendance" button re-marks an already-marked period indefinitely,
+with no lock check anywhere in the real, working frontend. CLAUDE.md's
+"prototype validated scope only, not the foundation" framing makes
+BusinessRules.md authoritative over what the prototype currently does
+here, not the other way around — same reasoning Module 3 added
+`timetable_status`'s known value set to its ERD before any real
+transition logic enforced those values. `locked_at TIMESTAMPTZ`
+(nullable, unset by this slice) makes the state representable; the
+actual lock transition (who locks a session, and when) is real
+business logic, explicitly deferred to a later Attendance slice.
+
+## Key design decision: deleted_at (soft-delete) resolved now, not left open like students/staff/classes
+Every prior module's first slice left soft-delete "an open question"
+(no column, `DELETE` granted as a placeholder). This slice does not
+repeat that: BusinessRules.md's AI section is a resolved rule naming
+attendance by domain — "never given a hard-delete capability on
+attendance ... only soft-delete." `deleted_at TIMESTAMPTZ` resolves it
+at the ERD level. The `GRANT` deliberately **omits** `DELETE` to
+`arcnave_app` — defense in depth beyond just
+`attendanceRepository.js` never issuing a `DELETE` statement: even a
+buggy or compromised service call is structurally unable to hard-
+delete this table, verified live (see Acceptance criteria).
+
+## Key design decision: a partial UNIQUE index, not a plain UNIQUE constraint
+`UNIQUE (class_id, session_date, hour_index) WHERE deleted_at IS NULL`
+— a plain `UNIQUE` constraint would permanently block ever re-marking
+a period whose session row was soft-deleted. No other table in this
+schema needed this (none of them have `deleted_at` yet), so this
+pattern is new here, not copied from a prior migration.
 
 ## Files likely affected
-- `frontend/src/pages/HodDashboard.jsx`
-- `frontend/src/pages/PrincipalDashboard.jsx`
-- `frontend/src/pages/TutorClass.jsx`
+- `backend/migrations/1752100000000_module-4-attendance-schema.js` (new
+  — next timestamp after `1752000000000_module-3-academic-schema.js`)
+- `backend/src/repositories/attendanceRepository.js` (new)
 
 ## Exact changes
-In all three files: the `classesList`/`deptClasses` fetch URL changes
-from `/api/hod/classes` to `/api/v1/classes`, gains an
-`Authorization: Bearer ${accessToken}` header (`GET /classes` is
-`requireAuth`-gated — none of these fetches sent one before, since the
-old endpoint never checked auth at all, having never existed), and its
-response handling changes from `data.classes` (old envelope) to
-`data`/`classData` directly (`routes/classes.js` returns a bare
-array). Every downstream read of a `classesList`/`deptClasses` entry's
-`.tutor_id` becomes `.tutor_user_id`; the two `.className` typos
-become `.class_name`. `TutorClass.jsx` additionally destructures
-`accessToken` from `useAuth()` (wasn't pulled in before).
+
+**ERD — `attendance_sessions` table** (tenant-scoped, RLS per
+BusinessRules Multi-tenancy, same pattern as `classes`/`students`/
+`staff`):
+- `id` UUID PK, default gen
+- `college_id` TEXT NOT NULL, FK -> `colleges(college_id)`
+- `class_id` UUID NOT NULL, FK -> `classes(id)`
+- `session_date` DATE NOT NULL
+- `hour_index` INT NOT NULL — 1-based column position into
+  `classes.timetable_data`'s grid, no CHECK constraint (matches house
+  convention: known real values/ranges documented in comments only)
+- `marked_by_user_id` UUID NOT NULL, FK -> `users(id)` — a row only
+  exists once marked; there is no "pending/unmarked" row state
+- `absent_student_ids` JSONB NOT NULL DEFAULT `'[]'`
+- `total_students` INT NOT NULL — roster-size snapshot at mark time
+- `locked_at` TIMESTAMPTZ, nullable
+- `deleted_at` TIMESTAMPTZ, nullable (soft-delete)
+- `created_at`, `updated_at` TIMESTAMPTZ
+
+No Aadhaar column (CLAUDE.md rule 8). No per-student
+`attendance_records` join table (see design decision above).
+
+**Migration** (`node-pg-migrate`, reversible per CLAUDE.md rule 6):
+- `up`: create `attendance_sessions` as above, a partial unique index
+  `attendance_sessions_class_date_hour_key` on
+  `(class_id, session_date, hour_index) WHERE deleted_at IS NULL`,
+  enable + force RLS, `tenant_isolation` policy on `college_id`
+  (identical pattern to Module 1/2/3). `GRANT SELECT, INSERT, UPDATE`
+  only — no `DELETE` — to `arcnave_app`.
+- `down`: drop table.
+
+**Repository** (`attendanceRepository.js`, mirrors `classRepository.js`'s
+shape — query mechanics only, no business logic, never calls another
+repository per CLAUDE.md rule 4):
+- `create(client, fields)`
+- `findById(client, id)` — filters `deleted_at IS NULL`
+- `findByClassSessionAndHour(client, classId, sessionDate, hourIndex)`
+  — the "already marked?" lookup `StaffDashboard.jsx`'s real schedule
+  screen needs
+- `findByClassAndDate(client, classId, sessionDate)` — a class's
+  marked periods for one day, ordered by `hour_index`
+- `update(client, id, fields)` (partial, same entries-filter pattern
+  as `classRepository.update`)
+- `softDelete(client, id)` — sets `deleted_at`, not a `DELETE`
+  statement; idempotent against an already-deleted or missing id.
+  There is **no** hard-delete function in this repository at all.
+- `list(client, { limit, offset })` — filters `deleted_at IS NULL`
 
 ## Acceptance criteria
-- `npm run build` (frontend) succeeds with no errors.
-- Live, end-to-end proof (not just static review) that the new
-  request shape matches: seeded a real tenant + principal user + two
-  real `classes` rows (one with a `tutor_user_id`, one without) in the
-  live Docker Postgres, logged in through the real `/api/v1/auth/login`,
-  and called `GET /api/v1/classes` with that token exactly as the
-  frontend now does — confirms a bare array, `class_name`,
-  `tutor_user_id` (UUID or `null`), `semester`, `department`, and that
-  the same call without an `Authorization` header gets a real 401 (not
-  silently wrong data).
-- Vite serves all three edited files with 200 (no transform/syntax
-  errors) and the served source reflects the new field names.
-- No backend files touched — this slice is UI-only, matching Module
-  2's fourth slice's own scope.
+- Migration runs `up` and `down` cleanly against a DB that already has
+  Module 0-3 applied.
+- RLS enabled + forced, `tenant_isolation` policy present, matches the
+  `classes`/`students`/`staff` pattern exactly.
+- `arcnave_app` has no `DELETE` privilege on `attendance_sessions` —
+  proven with a real `DELETE` statement rejected by Postgres itself
+  (`42501`), not just by inspecting the GRANT.
+- The partial unique index rejects a duplicate live
+  `(class_id, session_date, hour_index)`, but allows re-inserting the
+  same key after the conflicting row is soft-deleted — proven with
+  real inserts, not just read from the DDL.
+- `softDelete` hides a row from every read function immediately, and
+  is idempotent against a second call.
+- FK violations on both `class_id` and `marked_by_user_id` are
+  real, from genuine Postgres constraints.
+- Cross-tenant RLS isolation proven through the repository (not raw
+  SQL as superuser): a session created under tenant A is invisible to
+  tenant B via both `findById` and `list`.
+- No Aadhaar column anywhere. No per-student join table (this slice's
+  scope boundary, see design decision above).
+- Repository has zero references to Storage, other repositories, or
+  business-service logic.
+- No service, API route, UI, or `docs/modules/` file touched in this
+  slice — matches every prior module's first-slice scope exactly.
+- Full backend test suite (186 tests) still passes — this slice adds
+  no test file of its own (no service/API exists yet to test; the
+  live verification proving the schema and repository work is
+  recorded in `.ai/RESULT.md`, same as Module 3's first slice).
