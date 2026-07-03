@@ -38,6 +38,31 @@ request. It is never the same as `colleges.id` (internal UUID) —
 keep them distinct so the tenant key can stay human-readable and
 stable even if internal IDs ever need to change.
 
+```sql
+CREATE TABLE principal_invitations (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    college_id      TEXT NOT NULL REFERENCES colleges(college_id),
+    email           TEXT NOT NULL,
+    token_hash      TEXT NOT NULL,          -- never store the raw token
+    created_by      UUID REFERENCES platform_admins(id),
+    expires_at      TIMESTAMPTZ NOT NULL,
+    accepted_at     TIMESTAMPTZ,            -- null = pending
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+`principal_invitations` has a `college_id` column but, like
+`platform_admins`/`colleges`, deliberately **no RLS policy** — it must
+be look-up-able by an opaque bearer token before the requester has
+been resolved to any tenant at all (that's the entire point of an
+invitation link). An RLS policy keyed on `app.current_tenant` would
+fail closed on every lookup here, since nothing has set that context
+yet. See `backend/alembic/versions/0002_principal_invitations.py` for
+the full reasoning and the directional `arcnave_platform`
+(SELECT/INSERT/UPDATE) vs. `arcnave_app` (SELECT/UPDATE, no INSERT)
+grants that make "the platform creates, the tenant only ever
+consumes" a DB-enforced fact.
+
 ## Tenant schema (RLS on every table)
 
 ```sql

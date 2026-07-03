@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # create_platform_access_token / decode_platform_access_token.
     platform_jwt_secret_key: str
 
+    # How long a principal-invitation token (app/services/platform_service.py
+    # invite_principal) stays acceptable. A safe default, not a
+    # business rule yet — nothing in BusinessRules.md specifies this.
+    principal_invitation_expire_hours: int = 72
+
     @property
     def resolved_alembic_database_url(self) -> str:
         return self.alembic_database_url or self.database_url

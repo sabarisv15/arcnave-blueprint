@@ -1,8 +1,10 @@
 # Module 0 — Platform Foundation
 
-Status: **In progress**. This document is live and will be updated as
-the module is built; it freezes (except bug fixes) once Module 0
-ships per `Roadmap.md`.
+Status: **Complete.** Every item on this module's build list is done
+and tested (see Features below). This document now freezes except bug
+fixes, per `Roadmap.md` — Module 1 (Student) starts fresh, on top of
+this. Remaining gaps are deliberate, deferred scope, not unfinished
+Module 0 work — see Known Limitations.
 
 ## Purpose
 
@@ -291,14 +293,100 @@ Planned for Module 0, in build order:
     also accepted by GitHub's runner, which still needs a real push to
     confirm — see Known Limitations.
 
+- [x] Principal invitation — **Option B** (invite-record-now,
+      create-user-later), the decision from Known Limitations'
+      two-option writeup, now built. Keeps `arcnave_platform`'s
+      zero-grants-on-any-tenant-table property genuinely zero: the
+      platform role creates an invitation row and nothing more; the
+      principal's `users` row is created through the ordinary
+      RLS-protected tenant write path, not a platform-side exception.
+  - `backend/alembic/versions/0002_principal_invitations.py` — **the
+    first genuinely new migration file since 0001.** Real git history
+    now exists, so the "amend 0001" habit (justified only by "nothing
+    has shipped yet") stops here; a new table is a new revision,
+    chained via `down_revision`. `principal_invitations`: `id`,
+    `college_id` (FK → `colleges`), `email`, `token_hash`, `created_by`
+    (FK → `platform_admins`), `expires_at`, `accepted_at` (nullable —
+    null means pending), `created_at`.
+  - **No RLS on this table — deliberate, same structural reason
+    `colleges` has none.** The entire point is being look-up-able by
+    an opaque bearer token *before* any tenant context can possibly be
+    known — the person accepting hasn't been resolved to a tenant by
+    anything yet (no subdomain/JWT/account). An RLS policy keyed on
+    `current_setting('app.current_tenant')` would fail closed to zero
+    rows on every lookup, breaking the feature outright rather than
+    securing it.
+  - **Grants are directional, not symmetric** — `arcnave_platform` gets
+    `SELECT, INSERT, UPDATE` (creates invitations; `UPDATE` reserved
+    for a future revoke/resend, not built this pass); `arcnave_app`
+    gets `SELECT, UPDATE` only, **no `INSERT`** — the tenant side only
+    ever consumes an invitation (looks it up, marks it accepted), never
+    creates one. That's enforced at the GRANT level, not just by which
+    routes exist: even a bug in tenant-side code could not forge a new
+    invitation row.
+  - `POST /api/v1/platform/colleges/{college_id}/invite-principal`
+    (`require_platform_admin`) — `{email}` → creates the invitation,
+    returns the **raw token directly in the response body**, a
+    temporary stand-in for actually emailing an accept-link
+    (NotificationService doesn't exist yet — same pattern as
+    password-reset's `501` stub, flagged in Known Limitations, not a
+    real delivery mechanism). `404` if `college_id` doesn't exist
+    (caught via the FK's `IntegrityError`, same pattern as
+    `create_college`'s `DuplicateCollegeError`).
+  - `POST /api/v1/invitations/accept` — **deliberately unauthenticated,
+    the only tenant-side route in this codebase with no `require_role`
+    dependency.** The caller has no `users` row yet; the invitation
+    token itself is the one-time credential. `request.state.college_id`
+    is `None` for essentially every real call here (no
+    subdomain/JWT/explicit-code signal from someone who's never had an
+    account) — expected, not an error; this route never reads it.
+  - **The one deliberate, narrow bypass of `TenantMiddleware`'s normal
+    resolution anywhere in this codebase.**
+    `principal_invitation_service.accept_invitation` calls
+    `set_tenant_context(db, invitation.college_id)` directly, using the
+    `college_id` read off the (already token-authenticated) invitation
+    row — not `request.state.college_id`. Documented explicitly, at
+    length, in that function's docstring, precisely because it's the
+    only place a route decides its own tenant scope rather than
+    trusting what `TenantMiddleware` resolved.
+  - Expired and already-accepted tokens are both rejected with the
+    same generic `401` (`InvitationError`) — same
+    don't-let-the-error-message-be-an-oracle reasoning as `AuthError`.
+    Reuse of an already-*accepted* token additionally logs
+    `principal_invitation_reuse_detected`, consistent with
+    `auth_service.refresh`'s `refresh_token_reuse_detected` — a
+    one-time credential being presented again after it's already been
+    consumed is a signal worth recording, not just a routine reject.
+    A merely-expired-but-never-accepted token does not log — same
+    asymmetry `auth_service.refresh` already has between stale and
+    reused refresh tokens.
+  - On success: `role='principal'`, `is_active=true` immediately (the
+    invitation itself *is* the activation — no separate approval step
+    for the very first user of a college, since there's no one else to
+    approve them yet), via a new `auth_repository.create_user` (a
+    plain, generic INSERT — reusable by any future flow that needs to
+    create a tenant user, not principal-invitation-specific).
+  - Token generation/hashing reuses `app/core/security.py`'s existing
+    `secrets.token_urlsafe(32)` + `hash_refresh_token` (SHA-256)
+    pattern verbatim rather than duplicating it — an invitation token
+    has the same threat-model shape as a refresh token (server-
+    generated high-entropy randomness), so the same reasoning for
+    SHA-256 over argon2 applies unchanged.
+  - `docs/architecture/ERD.md` updated — `principal_invitations` is
+    now the source-of-truth schema, not just the migration.
+
 Repositories and services now exist for the auth slice
 (`auth_repository.py`, `auth_service.py`), the platform slice
-(`platform_repository.py`, `platform_service.py`), and the
-configuration slice (`configuration_repository.py`,
-`configuration_service.py`, `audit_log_repository.py`). Every other
-tenant domain (Student, Staff, Academic, ...) still has neither — those
-start with their own module. What's left on Module 0's list is
-principal invitation, blocked on a decision — see Known Limitations.
+(`platform_repository.py`, `platform_service.py`,
+`principal_invitation_repository.py`), and the configuration slice
+(`configuration_repository.py`, `configuration_service.py`,
+`audit_log_repository.py`), plus the tenant-side
+`principal_invitation_service.py`. Every other tenant domain (Student,
+Staff, Academic, ...) still has neither — those start with their own
+module. **Every item on Module 0's build list is now done** — see
+Known Limitations for deliberately deferred scope (NotificationService,
+platform-admin bootstrap, MFA, etc.), none of which block Module 1
+from starting.
 
 ## Business Rules
 
@@ -350,6 +438,7 @@ See `docs/architecture/ERD.md` (source of truth) and
 |---|---|---|
 | `platform_admins` | Platform | No |
 | `colleges` | Platform | No |
+| `principal_invitations` | Platform-created, tenant-consumed | No — deliberate, see Features |
 | `users` | Tenant | Yes |
 | `refresh_tokens` | Tenant | Yes |
 | `audit_log` | Tenant | Yes |
@@ -368,6 +457,7 @@ See `docs/architecture/ERD.md` (source of truth) and
 | GET | `/api/v1/auth/me` | Requires a valid access token for any of staff/hod/principal (`require_role`); returns `{user_id, college_id, role}` from the token's claims |
 | GET | `/api/v1/configurations/{category}` | Any authenticated tenant user. `404` if `category` has never been configured for this tenant |
 | PUT | `/api/v1/configurations/{category}` | `principal` only. `{configuration, expected_version}` → `200` with the stored row, `409` on a version conflict |
+| POST | `/api/v1/invitations/accept` | **Deliberately unauthenticated** — no `require_role`. `{token, username, password}` → `201` with `{user_id, college_id, username, role}`. `401` for an invalid/expired/already-accepted token, `409` if `username` is already taken within that tenant |
 
 **Platform API** (`app/platform_app.py`, mounted at `/api/v1/platform`
 — a separate ASGI app, not part of the tenant router above):
@@ -376,9 +466,10 @@ See `docs/architecture/ERD.md` (source of truth) and
 |---|---|---|
 | POST | `/api/v1/platform/auth/login` | `{username, password}` → `{access_token, token_type}` (no refresh token — see Known Limitations) |
 | POST | `/api/v1/platform/colleges` | Requires a valid platform token (`require_platform_admin`). `{college_id, name, subdomain}` → `201` with the created college (`subscription_status: "trial"`), or `409` on a duplicate `college_id`/`subdomain` |
+| POST | `/api/v1/platform/colleges/{college_id}/invite-principal` | Requires a valid platform token. `{email}` → `200` with `{college_id, email, token, expires_at}` — the raw token, not an emailed link (see Known Limitations). `404` if `college_id` doesn't exist |
 
-Principal invitation, college-code generation policy, and licensing/
-subscription management are not built — see Known Limitations.
+College-code generation policy and licensing/subscription management
+are not built — see Known Limitations.
 
 ## UI Screens
 
@@ -397,8 +488,16 @@ not a permission matrix:
   `require_role`: decodes the token itself (the platform sub-app runs
   no `AuthMiddleware` to have already done it), checks
   `type == "platform_access"`, and is the only thing gating
-  `POST /api/v1/platform/colleges`. There is exactly one platform
-  "role" — no permission matrix here either.
+  `POST /api/v1/platform/colleges` and
+  `POST /api/v1/platform/colleges/{college_id}/invite-principal`.
+  There is exactly one platform "role" — no permission matrix here
+  either.
+- `POST /api/v1/invitations/accept` — **the one route in this codebase
+  with no auth dependency at all, on purpose.** The caller has no
+  account yet; the invitation token in the request body is the
+  credential, checked entirely inside
+  `principal_invitation_service.accept_invitation`, not via any
+  `require_*` dependency. Not an oversight — see Features.
 - `staff` / `hod` / `principal` — tenant-scoped roles on `users.role`,
   carried into the access JWT's `role` claim at login. Enforced via
   `require_role(*roles)` (`app/api/deps.py`): a route lists which of
@@ -560,6 +659,35 @@ not a permission matrix:
 - [ ] Unit/integration tests for every other repository/service layer
   (Student, Staff, Academic, ...) — pending, not started until those
   modules exist.
+- [x] **Principal invitation tests** —
+  `backend/tests/integration/test_principal_invitation.py`, 8 cases
+  against a live Postgres container:
+  - Invitation creation requires a platform-admin token (`401`
+    without one); succeeds and returns `{college_id, email, token,
+    expires_at}`; `404` for an unknown `college_id`.
+  - Accepting a valid invitation creates a user, and the tenant scope
+    is verified **through RLS itself** — a second engine connecting as
+    `arcnave_app`, explicitly `set_config`'d to each college in turn
+    (same technique as `test_rls_tenant_isolation.py`), confirms the
+    new user is visible under the invited college and invisible under
+    an unrelated one, not just trusted from the response body. The
+    created account is then proven to actually work by logging in
+    through the ordinary `/api/v1/auth/login` path.
+  - An expired token (seeded directly via the migration-owner
+    connection, since the API always uses the configured default
+    expiry) is rejected `401`.
+  - Reusing an already-accepted token is rejected `401` **and**
+    asserted via `caplog` to emit `principal_invitation_reuse_detected`
+    — same proof technique as `test_auth.py`'s refresh-token-reuse
+    test.
+  - An unknown/garbage token is rejected `401`.
+  - **Cross-tenant proof**: two colleges, two invitations, the *same*
+    requested username — if either invitation's `college_id` ever
+    leaked into the other's accept flow, the second accept would
+    either `409` on the shared `(college_id, username)` constraint or,
+    worse, silently create the row under the wrong college. Both
+    succeed independently, and an RLS-scoped query per college
+    confirms each landed under its own `college_id`, never the other's.
 - [x] **CI pipeline verification** — not run via GitHub Actions itself
   (no remote exists yet), but the exact sequence
   `.github/workflows/ci.yml` runs was executed manually against a
@@ -600,49 +728,25 @@ not a permission matrix:
   deployment has zero platform admins and no way to create the first
   one except a direct DB insert. Needs a decision (a seed script? a
   one-time bootstrap endpoint disabled after first use? a CLI command?)
-  — not designed yet, flagging so it isn't forgotten.
-- **Principal invitation is not built — genuinely harder than it
-  looks, needs a decision before building.** Creating the very first
-  `users` row for a newly-created college means writing into an
-  RLS-protected tenant table *from the platform path*. Two real
-  options, not silently picked between:
-  - **Option A — scoped `set_config` exception.** The platform
-    connection (`arcnave_platform`) temporarily sets
-    `app.current_tenant` to the one `college_id` being provisioned,
-    for the single `INSERT INTO users ...` this requires, then clears
-    it. Requires: (1) granting `arcnave_platform` `INSERT` on `users`
-    (currently zero grants on any tenant table — a real, narrow
-    widening of its permissions, not free), and (2) the RLS policy's
-    `USING` clause admitting an INSERT scoped to a tenant the
-    connection doesn't otherwise operate as. Pro: one round trip,
-    principal can log in immediately after invitation. Con: it's a
-    documented, narrow exception to "the platform role never touches
-    tenant tables" — the exact property this pass otherwise made
-    airtight by construction (zero grants) rather than by convention;
-    every future reader of the grants list has to know this one
-    `INSERT` is deliberate, not a leftover.
-  - **Option B — invite-record-now, create-user-later.** Platform
-    records the invitation (a new platform-side table, e.g.
-    `college_invitations`: college_id, principal_email, an invitation
-    token, status) and emails a signup link. The principal follows it
-    to a *tenant-side* endpoint (not built yet either) that creates
-    their own `users` row through the normal tenant path — same
-    RLS/tenant-resolution machinery every other tenant write already
-    uses, no exception needed anywhere. Pro: `arcnave_platform`'s
-    grants stay exactly as narrow as this pass already made them — zero
-    exceptions to document or audit later. Con: two steps instead of
-    one, needs NotificationService (not built — same blocker as
-    password reset) to actually send the invitation email, and a new
-    tenant-side "accept invitation" endpoint that doesn't exist yet.
-  - **Recommendation: Option B.** It keeps the isolation property this
-    pass just spent real effort making airtight (zero grants, not
-    narrow grants) actually airtight, rather than immediately adding
-    the first documented exception to it. The cost is real (needs
-    NotificationService first) but principal invitation was never
-    going to ship before NotificationService exists anyway — Option A
-    doesn't actually avoid that dependency, it just adds a permanent
-    RLS exception on top of still needing email eventually for the
-    "here's your account" notification either way.
+  — not designed yet, flagging so it isn't forgotten. Principal
+  invitation (below) doesn't help here: inviting a principal itself
+  requires an already-authenticated platform admin.
+- **Principal invitation is built (Option B — invite-record-now,
+  create-user-later), but two things it depends on are still stubs:**
+  - **No NotificationService.** `POST
+    /api/v1/platform/colleges/{college_id}/invite-principal` returns
+    the raw invitation token directly in the response body instead of
+    emailing an accept-link — the same "flagged as a temporary stand-
+    in" pattern already used for password-reset's `501`. Whoever calls
+    this endpoint today has to relay the token to the principal
+    out-of-band themselves.
+  - **No revoke/resend flow.** `arcnave_platform`'s `UPDATE` grant on
+    `principal_invitations` was added anticipating this, but nothing
+    uses it yet — an invitation can't currently be cancelled or
+    re-issued before it expires or is accepted.
+  - Neither blocks Module 0 from being complete — both are the same
+    kind of deliberate, documented scope cut as password reset's
+    NotificationService dependency, not unfinished work.
 - No college-code generation policy (`create_college` requires the
   caller to supply `college_id` directly; no uniqueness-friendly
   short-code generation, no format validation beyond the DB's `UNIQUE`
@@ -711,10 +815,15 @@ not a permission matrix:
 - MFA.
 - Log rotation and error alerting (see Known Limitations) — once a
   real deployment target and alerting destination exist.
-- Principal invitation (see Known Limitations for the two-option
-  writeup awaiting a decision), college-code generation policy,
-  licensing/subscription management, and a bootstrap flow for the
-  first `platform_admins` row.
+- College-code generation policy, licensing/subscription management,
+  and a bootstrap flow for the first `platform_admins` row (see Known
+  Limitations — principal invitation itself doesn't solve this, since
+  it requires an already-authenticated platform admin to call it).
+- Principal-invitation revoke/resend, once needed — `arcnave_platform`
+  already has the `UPDATE` grant on `principal_invitations` this would
+  use.
+- Emailing the principal-invitation accept-link instead of returning
+  the raw token in the API response, once NotificationService exists.
 - Refresh tokens for platform admins, if session length ever becomes
   a real usability problem — not built speculatively now.
 - Category-specific configuration validation (JSON schema per

@@ -11,6 +11,26 @@ from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session
 
 
+def create_user(
+    db: Session, *, college_id: str, username: str, email: str, password_hash: str, role: str, is_active: bool
+) -> Row:
+    return db.execute(
+        text(
+            "INSERT INTO users (college_id, username, email, password_hash, role, is_active) "
+            "VALUES (:college_id, :username, :email, :password_hash, :role, :is_active) "
+            "RETURNING id, college_id, username, email, role, is_active"
+        ),
+        {
+            "college_id": college_id,
+            "username": username,
+            "email": email,
+            "password_hash": password_hash,
+            "role": role,
+            "is_active": is_active,
+        },
+    ).first()
+
+
 def get_user_by_username(db: Session, college_id: str, username: str) -> Row | None:
     return db.execute(
         text(
