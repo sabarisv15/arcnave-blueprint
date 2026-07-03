@@ -1,112 +1,113 @@
 # TASK
 
 ## Objective
-Module 3 (Academic), second vertical slice: `AcademicService` —
-business logic over `classRepository.js`, no API route or UI yet.
-Same discipline as Module 2's second slice (`86fa63b`,
-`staffService.js`): domain errors instead of raw pg errors, an
-`ALLOWED_FIELDS` whitelist, audit-log entries on create/update/remove.
+Module 3 (Academic), third vertical slice: API routes for `classes` —
+`/api/v1/classes` — wired to `academicService.js`, no UI yet. Same
+discipline as Module 2's third slice (`8333dec`, `routes/staff.js`):
+snake_case<->camelCase body translation, domain-error-to-HTTP-status
+mapping, the same conservative `requireRole('principal')`-for-writes/
+`requireAuth`-for-reads placeholder pending `WorkflowService`.
 
-## Grounding (read before assuming any function list)
-- `.ai/RESULT.md` (prior slice) and the Module 3 migration
-  (`backend/migrations/1752000000000_module-3-academic-schema.js`)
-  itself: its own top-of-file comment already names this slice's job
-  precisely — `timetable_status` has no DB-level CHECK constraint,
-  "known real values, enforced at the service layer once
-  AcademicService exists, not the DB: `'No Tutor'` | `'Pending HOD'` |
-  `'Pending Principal'` | `'Approved'` | `'Rejected'`." This slice is
-  that enforcement — not invented fresh, it was flagged as this exact
-  slice's job by name.
-- `staffService.js` (the named pattern): error-class-per-constraint
-  style, `ALLOWED_FIELDS`/`pickXFields` whitelist, `{ actorUserId }`
-  on create vs. `{ userId }` on update/remove (a corrected asymmetry
-  `staffService.js` itself documents finding while wiring its route
-  layer — followed here rather than `studentService.js`'s older,
-  uncorrected signature).
-- `docs/architecture/BusinessRules.md` Academic/Timetable and Staff
-  sections: "Class Tutor is assigned only by HOD, for one class at a
-  time" (already enforced at the DB level by `UNIQUE
-  (tutor_user_id)` — this slice's job is to surface that constraint
-  as a domain error, not re-implement the rule); CLAUDE.md rule 3
-  (`WorkflowService` is the sole approval gate) and rule 7 (Academic
-  before Attendance, gated on `timetable_status == 'Approved'`).
+## Grounding (read before assuming any route shape)
+- `.ai/RESULT.md` (prior slice) for `academicService.js`'s exact
+  function signatures/error classes — this slice wires to those
+  verbatim, does not change them.
+- `routes/staff.js` (the named pattern) and `routes/students.js`: the
+  `requireResolvedTenant` guard, a `*_BODY_FIELDS` snake<->camel array
+  local to the route file (not a shared util), `mapXServiceError`
+  returning a boolean so the catch block can `throw err` for anything
+  unmapped, responses left in the repository's native snake_case (not
+  translated back), and the `{ actorUserId: req.jwtClaims.sub }` /
+  `{ userId: req.jwtClaims.sub }` split on create vs. update/remove
+  matching `academicService.js`'s own signatures.
+- `backend/src/tenantApp.js`: routes are registered relative to the
+  `/api/v1` mount point app.js supplies externally — `createClassesRouter()`
+  added to the same `app.use(...)` block as students/staff, after
+  `tenantMiddleware` like every other tenant-scoped route.
+- `backend/src/middleware/rbac.js`: `requireAuth`/`requireRole` take
+  no fixed role list — whatever role strings a route passes are
+  checked against `req.jwtClaims.role` (already verified by
+  `authMiddleware`). No DB lookup, no change needed here.
 
-## Key design decision: no HOD/Principal review-chain transition logic yet
-`HodDashboard.jsx`/`PrincipalDashboard.jsx`'s `handleTimetableReview`
-implies a real state machine (`'Pending HOD'` ->
-`'Approved'`/`'Pending Principal'`/`'Rejected'`, `'Pending Principal'`
--> `'Approved'`/`'Rejected'`). Not built in this slice: CLAUDE.md rule
-3 makes `WorkflowService` the sole approval gate for exactly this kind
-of transition, and it doesn't exist yet (Roadmap.md builds
-Workflow/Notifications after Attendance/Finance/Documents/Reports) —
-the same "out of scope here, not stubbed" reasoning
-`studentService.js` used for BusinessRules' HOD-override exception on
-student-profile edits. What this slice *does* do:
-`assertValidTimetableStatus` rejects any value outside the five known
-literals, so a typo or garbage value can never reach the DB — that
-much is plain input validation, not a workflow transition rule (it
-doesn't check *which* transitions are legal from the current state,
-only that the target value is a real one).
+## Key design decision: same RBAC placeholder as staff/students, not an HOD-scoped one
+BusinessRules.md's real rule is "Class Tutor is assigned only by HOD"
+and the HOD/Principal timetable review chain
+(`HodDashboard.jsx`/`PrincipalDashboard.jsx`'s `handleTimetableReview`).
+Not enforced precisely here, for the same reason `staff.js`/
+`students.js` already gave: no `WorkflowService` (Module 8) exists to
+express "HOD may act only within their own department," and
+`academicService.js` itself has no transition/approval logic yet (see
+the second slice's `.ai/TASK.md`). `requireRole('principal')` gates
+writes (`POST`/`PUT`/`DELETE`) — Principal is the one existing role
+that is genuinely the final authority in every real chain
+BusinessRules.md describes (staff/HOD registration both end with
+Principal's approval; Principal is also the final timetable-review
+gate per `PrincipalDashboard.jsx`); `requireAuth` gates reads. Flagged
+as a placeholder to revisit once `WorkflowService` exists, not treated
+as a final decision.
 
-## Key design decision: no wrapper for `findByTutorUserId`/`findByCollegeAndClassName`
-`staffService.js`'s own second slice left `staffRepository.findByUserId`
-and `findByStaffCode` unwrapped — not every repository export gets a
-same-named service function in this slice, only what create/read/
-update/remove needs internally. Followed identically here: `classRepository`'s
-two secondary lookups stay unwrapped, deferred to whichever future
-slice (the API layer) actually needs "find the class this logged-in
-tutor owns" or "look up a class by its human-facing name" as a
-standalone operation.
+## Key design decision: tutor_user_id is a body field on generic create/update, not a dedicated endpoint
+No `POST /classes/:id/assign-tutor`-style endpoint. `academicService.js`'s
+second slice already decided tutor assignment goes through generic
+`updateClass` (`tutorUserId` in `ALLOWED_FIELDS`), relying on the DB's
+`UNIQUE (tutor_user_id)` to enforce "one class at a time" — this slice
+just exposes that through the generic `PUT /classes/:id` body, same as
+`staff.js` has no dedicated endpoint beyond generic `PUT /staff/:id`
+either.
 
 ## Files likely affected
-- `backend/src/services/academicService.js` (new)
-- `backend/tests/academic-service.test.js` (new)
+- `backend/src/routes/classes.js` (new)
+- `backend/src/tenantApp.js` (add one `require` + one `app.use`)
+- `backend/tests/classes.test.js` (new)
 
 ## Exact changes
 
-**`academicService.js`** (mirrors `staffService.js`'s shape):
-- Error classes: `ClassValidationError` (missing `className`),
-  `ClassTimetableStatusError` (unknown `timetableStatus` literal),
-  `ClassNameConflictError` (`classes_college_id_class_name_key`,
-  23505), `ClassTutorConflictError` (`classes_tutor_user_id_key`,
-  23505 — this tutor already tutors another class),
-  `ClassTutorNotFoundError` (`classes_tutor_user_id_fkey`, 23503).
-- `ALLOWED_FIELDS`: `className`, `department`, `semester`,
-  `tutorUserId`, `timetableStatus`, `timetableData`,
-  `timetableRemarks`. `collegeId` excluded (tenant set once at
-  creation, matches `students`/`staff` precedent).
-- `createClass(client, { collegeId, className, ...rest }, { actorUserId } = {})`
-  — requires `className`, validates `timetableStatus` if supplied,
-  maps the three constraint violations above, writes a
-  `class_created` audit entry attributed to `actorUserId`.
-- `getClass(client, id)` — thin passthrough, `null` means not found
-  (not an error), same as `staffService.getStaff`.
-- `updateClass(client, id, fields, { userId })` — partial update via
-  `ALLOWED_FIELDS`, validates `timetableStatus` if supplied, maps
-  `ClassNameConflictError`/`ClassTutorConflictError`/
-  `ClassTutorNotFoundError` on conflict, audit entry only when
-  something recognized actually changed and the id existed.
-- `removeClass(client, id, { userId })` — looks the row up first (for
-  `collegeId` on the audit entry and to skip logging a no-op), hard
-  `DELETE`, audit entry only if a row existed.
-- `listClasses(client, { limit, offset } = {})` — thin passthrough.
+**`routes/classes.js`** (mirrors `routes/staff.js`'s shape):
+- `CLASS_BODY_FIELDS`: `class_name`/`department`/`semester`/
+  `tutor_user_id`/`timetable_status`/`timetable_data`/
+  `timetable_remarks` <-> their camelCase service-field names.
+  `college_id` absent — always `req.collegeId`, never the body.
+- `mapAcademicServiceError`: `ClassValidationError` -> 400,
+  `ClassTimetableStatusError` -> 400, `ClassNameConflictError` -> 409,
+  `ClassTutorConflictError` -> 409, `ClassTutorNotFoundError` -> 404.
+- `POST /classes` (`requireRole('principal')`) -> `createClass`,
+  `actorUserId: req.jwtClaims.sub`, 201.
+- `GET /classes/:id` (`requireAuth`) -> `getClass`, 404 if `null`.
+- `GET /classes` (`requireAuth`) -> `listClasses`, `limit`/`offset`
+  passed through as-is (service/repository already default 50/0).
+- `PUT /classes/:id` (`requireRole('principal')`) -> `updateClass`,
+  `userId: req.jwtClaims.sub`, 404 if `null`.
+- `DELETE /classes/:id` (`requireRole('principal')`) -> `removeClass`,
+  `userId: req.jwtClaims.sub`, 204, 404 if `null`.
+
+**`tenantApp.js`**: `require('./routes/classes')` +
+`app.use(createClassesRouter())`, same block/order as students/staff.
 
 ## Acceptance criteria
-- `createClass` rejects a missing `className` and an unknown
-  `timetableStatus` without calling the repository.
-- `createClass` accepts all five known `timetableStatus` literals.
-- Aadhaar-shaped/unrecognized fields are silently dropped, not passed
-  to the repository or rejected with an error (matches
-  `studentService.js`/`staffService.js`'s precedent).
-- All three constraint violations (`classes_college_id_class_name_key`,
-  `classes_tutor_user_id_key`, `classes_tutor_user_id_fkey`) map to
-  their named domain errors on both create and update (name-conflict
-  and tutor-conflict on update; FK-not-found only exercised on
-  create, per `staffService.js`'s own test coverage precedent for
-  update).
-- A non-conflict repository error passes through unchanged (no
-  swallowing).
-- `updateClass`/`removeClass` write an audit entry only when a row
-  actually changed/existed; no-op and not-found paths write nothing.
-- No API route, UI, or workflow-transition logic in this slice —
-  matches `staffService.js`'s own second-slice scope exactly.
+- All 5 endpoints reachable at `/api/v1/classes[...]` against a real
+  running server + live Postgres (not a mocked request/response pair).
+- `POST` validates `class_name` (400) and `timetable_status` (400)
+  before touching the DB, same as the service layer already does.
+- Real DB constraint violations surface as the correct HTTP status:
+  duplicate `class_name` in-tenant -> 409, tutor already assigned
+  elsewhere -> 409 (on both create and update), nonexistent
+  `tutor_user_id` -> 404 (on create) — proven with genuine Postgres
+  errors, not hand-thrown ones.
+- A class can be created/updated with no tutor at all, and two
+  tutor-less classes can coexist (proves the nullable-unique
+  NULL-coexistence behavior the first slice already verified at the
+  DB level is reachable through the route too).
+- Aadhaar-shaped/unrecognized body fields are silently dropped, never
+  stored or echoed back.
+- RBAC: writes 403 for a non-principal role, 401 unauthenticated;
+  reads 200 for a non-principal authenticated role (`staff`), 401
+  unauthenticated.
+- Cross-tenant isolation: the same `class_name` is independently
+  usable in two different tenants; a class from tenant A returns 404
+  when fetched under tenant B's context (RLS enforced through the
+  full route -> service -> repository -> DB path, not just the
+  repository layer the first slice already proved).
+- A create writes exactly one `audit_log` row with `action:
+  'class_created'`, `entity: 'classes'`, attributed to the
+  authenticated actor.
+- Full backend suite passes with no regressions.
