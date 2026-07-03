@@ -1,17 +1,31 @@
 name: CI
 
+# DISABLED — pending a Node/Express rebuild. See ADR-016.
+#
+# This workflow is the Python/FastAPI-era CI pipeline (pip install,
+# ruff, `alembic upgrade head`, pytest against backend/). The Python
+# backend/ tree it targeted has been deleted (ADR-016: Express/Node.js
+# replaces FastAPI/Python — a productivity call, not a correctness
+# one; full reasoning and consequences in the ADR). Every step below
+# would now fail immediately (no backend/requirements.txt, no
+# backend/tests/) — rather than leave that failing on every push, the
+# trigger is disabled outright until a Node backend with real tests
+# exists to build a genuine Node CI workflow around. Left in place
+# (not deleted) as a reference for the docker/postgres/init role-
+# creation-over-TCP pattern, which is still exactly right and will be
+# reused as-is: GitHub's bare `services:` Postgres container still
+# won't run docker-entrypoint-initdb.d, regardless of language.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch: {}
 
-# These are throwaway credentials for an ephemeral CI Postgres
-# container that is created and destroyed within a single job run —
-# there is no persistent database or deployment target they protect.
-# Treating them as GitHub Secrets would imply a confidentiality need
-# that doesn't exist here; real secrets (prod DB, prod JWT keys) never
-# appear in this file.
+# Original triggers, restore once a Node CI job replaces the steps
+# below:
+# on:
+#   push:
+#     branches: [main]
+#   pull_request:
+#     branches: [main]
+
 env:
   POSTGRES_USER: arcnave_admin
   POSTGRES_PASSWORD: ci_admin_password
@@ -20,13 +34,14 @@ env:
   ARCNAVE_PLATFORM_PASSWORD: ci_platform_password
   JWT_SECRET_KEY: ci_jwt_secret_key_not_for_prod_1234567890
   PLATFORM_JWT_SECRET_KEY: ci_platform_jwt_secret_key_not_for_prod_1234567890
-  DATABASE_URL: postgresql+psycopg://arcnave_app:ci_app_password@localhost:5432/arcnave
-  ALEMBIC_DATABASE_URL: postgresql+psycopg://arcnave_admin:ci_admin_password@localhost:5432/arcnave
-  PLATFORM_DATABASE_URL: postgresql+psycopg://arcnave_platform:ci_platform_password@localhost:5432/arcnave
+  DATABASE_URL: postgresql://arcnave_app:ci_app_password@localhost:5432/arcnave
+  ALEMBIC_DATABASE_URL: postgresql://arcnave_admin:ci_admin_password@localhost:5432/arcnave
+  PLATFORM_DATABASE_URL: postgresql://arcnave_platform:ci_platform_password@localhost:5432/arcnave
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    if: false # belt-and-suspenders: workflow_dispatch above already keeps this off push/PR, but this ensures even a manual run no-ops rather than failing on Python steps that no longer apply.
 
     services:
       postgres:
@@ -37,8 +52,6 @@ jobs:
           POSTGRES_DB: ${{ env.POSTGRES_DB }}
         ports:
           - 5432:5432
-        # GitHub Actions blocks job steps until this health check
-        # passes, so no separate "wait for postgres" step is needed.
         options: >-
           --health-cmd="pg_isready -U arcnave_admin -d arcnave"
           --health-interval=5s
@@ -64,7 +77,8 @@ jobs:
       # GitHub does not mount docker/postgres/init/*.sh as
       # docker-entrypoint-initdb.d the way docker-compose does. Those
       # scripts must be run explicitly, once the service is reachable,
-      # exactly as they'd run on first container boot locally.
+      # exactly as they'd run on first container boot locally. This
+      # part of the pattern carries over unchanged to the Node rebuild.
       - name: Create arcnave_app and arcnave_platform roles
         env:
           PGHOST: localhost

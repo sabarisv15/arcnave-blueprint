@@ -1,3 +1,4 @@
+
 # ARCNAVE — project context
 
 This file is auto-loaded by Claude Code at the start of every
@@ -17,9 +18,17 @@ each module ships.
 
 ## Stack (locked — see docs/adr/ for rationale)
 
-- Backend: FastAPI (Python), modular monolith — not microservices
+- Backend: Express (Node.js, plain JavaScript — not TypeScript),
+  modular monolith — not microservices. Replaces FastAPI (Python) as
+  of ADR-016 — a solo-maintainer productivity/comprehension call, not
+  a performance or correctness one. Module 0's Python application code
+  was deleted and is being rebuilt in Node, incrementally, in the same
+  order it was originally built; the database design underneath it did
+  not change.
 - Database: PostgreSQL only — no MongoDB, no second datastore.
-  SQLAlchemy ORM. pgvector for embeddings. JSONB for flexible config.
+  node-postgres (`pg`) client with raw parameterized SQL in
+  repositories — no ORM — and `node-pg-migrate` for migrations.
+  pgvector for embeddings. JSONB for flexible config.
 - Auth: JWT + RBAC + Tenant Middleware (not the old session-cookie
   auth)
 - Tenant isolation: PostgreSQL Row-Level Security is mandatory,
