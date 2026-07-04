@@ -108,6 +108,7 @@ import Login from './pages/Login';
 import StaffDashboard from './pages/StaffDashboard';
 import HodDashboard from './pages/HodDashboard';
 import PrincipalDashboard from './pages/PrincipalDashboard';
+import CollegeAdminDashboard from './pages/CollegeAdminDashboard';
 import TutorClass from './pages/TutorClass';
 import TutorClassMonitor from './pages/TutorClassMonitor';
 import Profile from './pages/Profile';
@@ -127,6 +128,8 @@ function IndexRedirect() {
     return <Navigate to="/dashboard/hod" replace />;
   } else if (user.role === 'principal') {
     return <Navigate to="/dashboard/principal" replace />;
+  } else if (user.role === 'college_admin') {
+    return <Navigate to="/dashboard/college-admin" replace />;
   }
   return <Navigate to="/login" replace />;
 }
@@ -304,6 +307,12 @@ export default function App() {
             <Route path="/dashboard/principal/tutor-class" element={
               <ProtectedRoute allowedRoles={['principal']}>
                 <TutorClassMonitor />
+              </ProtectedRoute>
+            } />
+
+            <Route path="/dashboard/college-admin" element={
+              <ProtectedRoute allowedRoles={['college_admin']}>
+                <CollegeAdminDashboard />
               </ProtectedRoute>
             } />
 

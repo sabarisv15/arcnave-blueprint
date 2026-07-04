@@ -1,41 +1,29 @@
 # TASK
 
-## Objective (Module 8 — final scope, closes it end to end)
-API + UI for the pending-approvals flow only — no new service logic.
-Routes: `POST /api/v1/workflow-requests/:id/approve`, `:id/reject`,
-`GET /api/v1/workflow-requests/pending`. UI: a "Pending Approvals"
-list + approve/reject action in `HodDashboard.jsx` and
-`PrincipalDashboard.jsx` (existing tab conventions, same pattern
-`PrincipalDashboard`'s Fee Structures tab already uses). Wire
-`StaffService.submitStaffRegistration` and
-`FinanceService.submitFeeStructureApproval` to real UI trigger points
-too (currently service-only, unreachable).
+## Objective (College Admin profile, next slice)
+Service + API + UI. `collegeProfileService` (get/update the 3
+`colleges` columns, CRUD on `departments`) — `college_admin` role only.
+Routes under `/api/v1/college-profile`, `/api/v1/departments`. UI: new
+"College Profile" tab, same dashboard conventions as Fee Structures.
 
-## Real design decision (not literally "workflowService only")
-`workflowService.approveRequest`/`rejectRequest` alone only flip the
-`workflow_requests` row. `staffService.approveStaffRegistration` and
-`financeService.approveFeeStructure`/`rejectFeeStructure` each do real
-work on top (fee structure status actually flipping; staff activation
-cascade) that a bare passthrough would silently skip — a real
-regression, not an acceptable simplification. Resolved (user's own
-call, asked directly): the approve/reject route resolves the pending
-request's `entity_type` first, then dispatches to the matching,
-already-existing entity-specific function, falling back to
-`workflowService` directly for anything else. No new service logic —
-only routing between functions that already existed.
+## Scope
+Built on the already-committed migration/repositories
+(`collegeProfileRepository.js`/`departmentRepository.js`,
+`1753000000000_college-admin-profile-schema.js`). No schema change.
+`college_admin` is a brand-new role with no existing dashboard — added
+one (`CollegeAdminDashboard.jsx`), routed at `/dashboard/college-admin`.
 
 ## Constraints
-- Architecture.md 2.4 (API layer), CLAUDE.md rule 3 (WorkflowService
-  is the sole approval gate).
-- Submit routes gated `requireAuth`, not `requireRole('principal')`:
-  gating to principal-only would deadlock the single-principal case
-  against ADR-005's self-approval rule.
+- BusinessRules.md's College Admin resolution, item 3: this is this
+  role's own ongoing duty, not shared with Principal.
+- `requireRole('college_admin')` on every route, both reads and
+  writes — unlike finance.js/staff.js's requireAuth-for-reads
+  placeholder, this whole resource belongs to one role.
 
 ## Verification
-Live: full backend suite + a real HTTP round-trip script (submit,
-wrong-actor 403, step advance, terminal cascade, self-approval 403,
-reject path) — then a real browser (headless Chrome via
-`playwright-core`, scratch-installed for this one pass, real Vite dev
-server + standalone backend) driven through the actual login flow and
-UI, which is how the create-route-RBAC / ADR-005 self-approval
-interaction was actually found.
+Live: full backend suite + an HTTP round-trip script (RBAC 403 for a
+non-college_admin role, GET/PUT profile, department create/conflict/
+validation/list/update/get/delete/404-after-delete) — then a real
+browser (headless Chrome via `playwright-core`, same scratch install
+as the prior slice) through the actual login flow, filling the
+profile form and adding a department.
