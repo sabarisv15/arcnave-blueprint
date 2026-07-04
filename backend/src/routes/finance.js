@@ -27,12 +27,16 @@ function requireResolvedTenant(req, res) {
 // util, same reasoning as classes.js's CLASS_BODY_FIELDS/attendance.js's
 // ATTENDANCE_BODY_FIELDS. college_id is deliberately absent from both
 // (always req.collegeId, never the request body).
+// No 'status' entry (unlike the first Finance slice): financeService
+// no longer accepts a caller-supplied status at all (Module 8 second
+// slice — see financeService.js's own header comment). A caller that
+// still sends one is simply ignored, same as any other unrecognized
+// field this map doesn't list.
 const FEE_STRUCTURE_BODY_FIELDS = [
   ['academic_year', 'academicYear'],
   ['class_id', 'classId'],
   ['fee_category', 'feeCategory'],
   ['amount', 'amount'],
-  ['status', 'status'],
   ['remarks', 'remarks'],
 ];
 
@@ -59,10 +63,6 @@ function bodyToFields(body, fieldMap) {
 
 function mapFinanceServiceError(err, res) {
   if (err instanceof financeService.FeeStructureValidationError) {
-    res.status(400).json({ detail: err.message });
-    return true;
-  }
-  if (err instanceof financeService.FeeStructureStatusError) {
     res.status(400).json({ detail: err.message });
     return true;
   }

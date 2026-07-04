@@ -19,18 +19,29 @@
 // re-running a live database for a service layer that adds no new SQL
 // of its own.
 //
-// Also deliberately NOT here: any test asserting a real WorkflowService
-// gate on fee_structures' status transitions. There is no such gate —
-// see financeService.js's own file-level comment for why (WorkflowService,
-// Module 8, doesn't exist yet). What IS tested is the one thing this
-// slice actually enforces: status must be one of the known literals,
-// same shape as academic-service.test.js's own timetableStatus coverage.
+// Module 8 second slice: financeService no longer accepts a caller-
+// supplied `status` at all on create/update (see financeService.js's
+// own header comment) — the two tests that used to assert
+// FeeStructureStatusError rejection/acceptance are replaced below with
+// tests asserting `status` is silently dropped, same as any other
+// unrecognized field (`aadhaarNumber`'s own existing test already
+// covers that mechanism; `status` gets its own test since it's the
+// specific field this slice deliberately locked down).
+//
+// submitFeeStructureApproval/approveFeeStructure/rejectFeeStructure
+// (this slice's new real WorkflowService gate) are tested here with
+// workflowService/staffService mocked the same way financeRepository
+// already is — not live-Postgres here (that's the one-off live script,
+// deleted after use, matching this task's own "verify live before
+// committing" instruction).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const financeRepository = require('../src/repositories/financeRepository');
 const feePaymentRepository = require('../src/repositories/feePaymentRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
+const workflowService = require('../src/services/workflowService');
+const staffService = require('../src/services/staffService');
 const financeService = require('../src/services/financeService');
 
 test('FinanceService fee_structures validation and audit logging (no DB)', async (t) => {
@@ -45,20 +56,7 @@ test('FinanceService fee_structures validation and audit logging (no DB)', async
     assert.equal(createMock.mock.callCount(), 0);
   });
 
-  await t.test('createFeeStructure rejects an unknown status without touching the DB', async () => {
-    const createMock = t.mock.method(financeRepository, 'create');
-    t.after(() => createMock.mock.restore());
-
-    await assert.rejects(
-      () => financeService.createFeeStructure({}, {
-        collegeId: 'c1', academicYear: '2025-2026', classId: 'class-1', feeCategory: 'Tuition', amount: '45000.00', status: 'On Hold',
-      }),
-      financeService.FeeStructureStatusError,
-    );
-    assert.equal(createMock.mock.callCount(), 0);
-  });
-
-  await t.test('createFeeStructure accepts each known status literal', async () => {
+  await t.test('createFeeStructure drops a caller-supplied status instead of passing it through', async () => {
     const createMock = t.mock.method(financeRepository, 'create', async (client, fields) => ({
       id: 'new-id',
       college_id: fields.collegeId,
@@ -69,12 +67,12 @@ test('FinanceService fee_structures validation and audit logging (no DB)', async
       auditMock.mock.restore();
     });
 
-    const knownStatuses = ['Pending Approval', 'Approved', 'Rejected'];
-    for (const status of knownStatuses) {
-      await assert.doesNotReject(() => financeService.createFeeStructure({}, {
-        collegeId: 'c1', academicYear: '2025-2026', classId: 'class-1', feeCategory: 'Tuition', amount: '45000.00', status,
-      }));
-    }
+    await financeService.createFeeStructure({}, {
+      collegeId: 'c1', academicYear: '2025-2026', classId: 'class-1', feeCategory: 'Tuition', amount: '45000.00', status: 'Approved',
+    });
+
+    const passedFields = createMock.mock.calls[0].arguments[1];
+    assert.equal('status' in passedFields, false);
   });
 
   await t.test('createFeeStructure does not require status', async () => {
@@ -190,15 +188,24 @@ test('FinanceService fee_structures validation and audit logging (no DB)', async
     assert.equal(result.id, 'fee-structure-9');
   });
 
-  await t.test('updateFeeStructure rejects an unknown status without touching the DB', async () => {
-    const updateMock = t.mock.method(financeRepository, 'update');
-    t.after(() => updateMock.mock.restore());
+  await t.test('updateFeeStructure drops a caller-supplied status instead of passing it through', async () => {
+    const updateMock = t.mock.method(financeRepository, 'update', async (client, id, fields) => ({ id, college_id: 'c1', ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      updateMock.mock.restore();
+      auditMock.mock.restore();
+    });
 
-    await assert.rejects(
-      () => financeService.updateFeeStructure({}, 'fee-structure-1', { status: 'On Hold' }, { userId: 'u1' }),
-      financeService.FeeStructureStatusError,
-    );
-    assert.equal(updateMock.mock.callCount(), 0);
+    await financeService.updateFeeStructure({}, 'fee-structure-1', { status: 'Approved' }, { userId: 'u1' });
+
+    // status alone recognizes nothing (pickFeeStructureFields drops
+    // it), so this is the same no-recognized-fields shape as
+    // 'updateFeeStructure with no recognized fields does not write an
+    // audit entry' below — no audit entry, and the patch passed to the
+    // repository never contains 'status'.
+    const passedPatch = updateMock.mock.calls[0].arguments[2];
+    assert.equal('status' in passedPatch, false);
+    assert.equal(auditMock.mock.callCount(), 0);
   });
 
   await t.test('updateFeeStructure with no recognized fields does not write an audit entry', async () => {
@@ -320,6 +327,125 @@ test('FinanceService fee_structures validation and audit logging (no DB)', async
 
     const result = await financeService.listFeeStructures({}, { limit: 10, offset: 0 });
     assert.deepEqual(result, [{ opts: { limit: 10, offset: 0 } }]);
+  });
+
+  await t.test('submitFeeStructureApproval resolves the real principal and submits a single-step chain', async () => {
+    const findMock = t.mock.method(financeRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const principalMock = t.mock.method(staffService, 'findPrincipal', async () => ({ user_id: 'principal-user-1' }));
+    const submitMock = t.mock.method(workflowService, 'submitRequest', async (client, fields) => ({ id: 'wf-1', ...fields }));
+    t.after(() => {
+      findMock.mock.restore();
+      principalMock.mock.restore();
+      submitMock.mock.restore();
+    });
+
+    const result = await financeService.submitFeeStructureApproval({}, 'fee-structure-1', { requestedByUserId: 'requester-1' });
+
+    assert.equal(result.id, 'wf-1');
+    const submitted = submitMock.mock.calls[0].arguments[1];
+    assert.equal(submitted.entityType, 'fee_structure');
+    assert.equal(submitted.entityId, 'fee-structure-1');
+    assert.equal(submitted.origin, 'human');
+    assert.deepEqual(submitted.approverChain, [{ step: 1, role: 'principal', user_id: 'principal-user-1' }]);
+  });
+
+  await t.test('submitFeeStructureApproval rejects a missing requestedByUserId without touching the DB', async () => {
+    const findMock = t.mock.method(financeRepository, 'findById');
+    t.after(() => findMock.mock.restore());
+
+    await assert.rejects(
+      () => financeService.submitFeeStructureApproval({}, 'fee-structure-1', {}),
+      financeService.FeeStructureValidationError,
+    );
+    assert.equal(findMock.mock.callCount(), 0);
+  });
+
+  await t.test('submitFeeStructureApproval throws FeeStructureNotFoundError for a nonexistent id', async () => {
+    const findMock = t.mock.method(financeRepository, 'findById', async () => null);
+    t.after(() => findMock.mock.restore());
+
+    await assert.rejects(
+      () => financeService.submitFeeStructureApproval({}, 'missing-id', { requestedByUserId: 'requester-1' }),
+      financeService.FeeStructureNotFoundError,
+    );
+  });
+
+  await t.test('approveFeeStructure calls workflowService.approveRequest then sets status to Approved', async () => {
+    const findMock = t.mock.method(financeRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Approved' }));
+    const updateMock = t.mock.method(financeRepository, 'update', async (client, id, fields) => ({ id, college_id: 'c1', ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await financeService.approveFeeStructure({}, 'fee-structure-1', { actorUserId: 'principal-user-1' });
+
+    assert.equal(result.status, 'Approved');
+    assert.equal(approveMock.mock.calls[0].arguments[1], 'wf-1');
+    assert.deepEqual(updateMock.mock.calls[0].arguments[2], { status: 'Approved' });
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'fee_structure_approved');
+  });
+
+  await t.test('approveFeeStructure throws FeeStructureNoPendingRequestError when nothing is pending', async () => {
+    const findMock = t.mock.method(financeRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => null);
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => financeService.approveFeeStructure({}, 'fee-structure-1', { actorUserId: 'principal-user-1' }),
+      financeService.FeeStructureNoPendingRequestError,
+    );
+  });
+
+  await t.test('approveFeeStructure lets workflowService.approveRequest errors (e.g. self-approval) pass through unchanged', async () => {
+    const findMock = t.mock.method(financeRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => {
+      throw new workflowService.WorkflowRequestSelfApprovalError('actor requested this workflow request');
+    });
+    const updateMock = t.mock.method(financeRepository, 'update');
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => financeService.approveFeeStructure({}, 'fee-structure-1', { actorUserId: 'requester-1' }),
+      workflowService.WorkflowRequestSelfApprovalError,
+    );
+    assert.equal(updateMock.mock.callCount(), 0);
+  });
+
+  await t.test('rejectFeeStructure calls workflowService.rejectRequest then sets status to Rejected', async () => {
+    const findMock = t.mock.method(financeRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const rejectMock = t.mock.method(workflowService, 'rejectRequest', async () => ({ id: 'wf-1', status: 'Rejected' }));
+    const updateMock = t.mock.method(financeRepository, 'update', async (client, id, fields) => ({ id, college_id: 'c1', ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      rejectMock.mock.restore();
+      updateMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await financeService.rejectFeeStructure({}, 'fee-structure-1', { actorUserId: 'principal-user-1', remarks: 'no' });
+
+    assert.equal(result.status, 'Rejected');
+    assert.deepEqual(updateMock.mock.calls[0].arguments[2], { status: 'Rejected' });
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'fee_structure_rejected');
   });
 });
 

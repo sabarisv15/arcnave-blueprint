@@ -1,47 +1,59 @@
 # RESULT
 
 ## Files changed
-- `backend/src/services/workflowService.js` (new)
+- `backend/src/repositories/staffRepository.js` (+`findByCollegeDepartmentAndRole`, `findByCollegeAndRole`)
+- `backend/src/services/staffService.js` (+registration-chain wiring)
+- `backend/src/services/financeService.js` (status lockdown + approval wiring)
+- `backend/src/services/workflowService.js` (+`findPendingForEntity`, a pure read)
+- `backend/src/routes/finance.js` (removed dead `FeeStructureStatusError` branch + `status` body mapping)
+- `backend/tests/finance-service.test.js`, `backend/tests/finance.test.js` (updated for the new contract)
 
 ## What was built
-`submitRequest` (validates required fields, `origin`, and
-`approverChain` shape; maps `23505 workflow_requests_entity_pending_key`
-/ `23503 ..._requested_by_user_id_fkey` to domain errors; audit-logs),
-`approveRequest`/`rejectRequest` (load-and-validate against
-`current_step`'s resolved approver, write to `approval_history` before
-updating `workflow_requests`, then audit-log), `listPendingForApprover`
-(thin wrapper over the already-live-proven repository call). Full
-reasoning in the file's own header comment.
+**FinanceService**: `status` is no longer a caller-settable field on
+`createFeeStructure`/`updateFeeStructure` at all — this is the actual
+close of 6957f02's own named gap ("no status control... the one thing
+that rule exists to prevent"). New `submitFeeStructureApproval`/
+`approveFeeStructure`/`rejectFeeStructure` route the real transition
+through `workflowService` (single-step chain, Principal only, resolved
+from real `staff`+`users` data via `staffService.findPrincipal`).
 
-ADR-005's open question resolved: `approveRequest` throws
-`WorkflowRequestSelfApprovalError` when `actorUserId === requested_by_user_id`
-— checked live with a case where the requester genuinely *is* the
-resolved step approver (single-step chain, requester = principal =
-approver), not just the trivially-already-blocked step-mismatch case.
-Scoped to approve only; `rejectRequest` allows a requester to withdraw
-their own request (verified live).
+**StaffService**: `findHodForDepartment`/`findPrincipal` resolve real
+approver identities (two new JOIN queries in `staffRepository`, since
+`staff` has no `role` column — it lives on `users`).
+`submitStaffRegistration`/`approveStaffRegistration`/
+`rejectStaffRegistration` build and drive a real 2-step
+Faculty→HOD→Principal chain through `workflowService`. Credential/
+activation generation on final approval stays an explicit, named,
+unbuilt gap — not invented here.
+
+**workflowService**: one addition, `findPendingForEntity` — a pure
+read (no new validation/state-machine rule) letting callers correlate
+their own entity id back to the governing `workflow_requests` row,
+since neither `staff` nor `fee_structures` gained a
+`workflow_request_id` column this slice.
 
 ## Verification
 Live against the real docker-compose Postgres (one-off script, deleted
-after use — no committed test file yet, same precedent as the first
-slice): 19 assertions — full HOD→Principal 2-step approve flow
-(wrong actor / requester rejected at each step, correct actor advances
-then closes), single-step reject closes immediately, self-withdrawal
-via reject allowed, ADR-005 self-approval rejected even when actor is
-the real resolved approver, already-resolved re-action rejected,
-malformed `approverChain`/bad `origin`/bogus FK all rejected with the
-right domain error class, a new request allowed once a prior one for
-the same entity resolves, `approval_history` + `audit_log` rows
-correct, cross-tenant isolation holds through the service layer (0
-rows visible to another tenant for the same `user_id`).
+after use): real HOD/Principal resolution (a department with no HOD
+correctly throws), full HOD→Principal registration chain (wrong actor
+and self-approval both rejected at the right step), fee-structure
+approval proving the actual point of this slice — the resolved
+Principal cannot approve their own submission
+(`WorkflowRequestSelfApprovalError`), a genuinely different Principal
+can and the status becomes `Approved`, `rejectFeeStructure` closes to
+`Rejected`, and a direct `status` write via `updateFeeStructure` is now
+silently ignored (the original bypass, closed). `audit_log` rows
+correct throughout.
 
-Full backend suite: 409/409 (one earlier run flaked at 408/409 with no
-captured failing test name — reran clean twice after; not reproducible,
-not related to this change, which added a new file only).
+Full backend suite: 415/415 (409 prior + 6 net new/replaced).
 
 ## Flags
-- No API/UI yet, and no caller wired up — StaffService's registration
-  chain and FinanceService's fee-structure approval gap still don't
-  call in; that wiring is a later slice.
-- Approver-chain *resolution* (who the HOD actually is) stays outside
-  this service, per the first slice's own scoping.
+- No new routes for the Finance/Staff approve/reject functions —
+  still service-layer only, per this task's own scope.
+- Turning an `Approved` staff registration into an active login
+  (credentials/`users.is_active`) is still unbuilt — explicitly flagged
+  in `staffService.js`, not invented here.
+- `staffRepository`'s new HOD/Principal lookups pick the earliest-
+  created matching row if more than one exists — nothing in the schema
+  enforces at most one HOD per department or one Principal per
+  college today.

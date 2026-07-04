@@ -23,6 +23,18 @@
 // `remove` is a hard DELETE, not a soft-delete: the ERD in .ai/TASK.md
 // has no soft-delete column (no deleted_at/is_active) for staff yet —
 // same open question flagged for students, not decided here either.
+//
+// findByCollegeDepartmentAndRole/findByCollegeAndRole (Module 8 second
+// slice): the only two queries in this file that JOIN to `users` —
+// `staff` has no `role` column of its own (role lives on users; see
+// this file's own header comment), so resolving "the HOD of this
+// department" or "this college's Principal" for a workflow_requests
+// approver_chain needs both tables. Both order by staff.created_at
+// and LIMIT 1 rather than asserting exactly one row exists: nothing
+// in this schema enforces "at most one HOD per department" or "at
+// most one Principal per college" today, so picking the earliest-
+// created one is a deliberate, minimal tie-break, not a claim that a
+// second one couldn't exist.
 
 const COLUMNS = [
   ['collegeId', 'college_id'],
@@ -109,4 +121,38 @@ async function list(client, { limit = 50, offset = 0 } = {}) {
   return result.rows;
 }
 
-module.exports = { create, findById, findByUserId, findByStaffCode, update, remove, list };
+async function findByCollegeDepartmentAndRole(client, collegeId, department, role) {
+  const result = await client.query(
+    `SELECT staff.* FROM staff
+     JOIN users ON users.id = staff.user_id
+     WHERE staff.college_id = $1 AND staff.department = $2 AND users.role = $3
+     ORDER BY staff.created_at
+     LIMIT 1`,
+    [collegeId, department, role],
+  );
+  return result.rows[0] || null;
+}
+
+async function findByCollegeAndRole(client, collegeId, role) {
+  const result = await client.query(
+    `SELECT staff.* FROM staff
+     JOIN users ON users.id = staff.user_id
+     WHERE staff.college_id = $1 AND users.role = $2
+     ORDER BY staff.created_at
+     LIMIT 1`,
+    [collegeId, role],
+  );
+  return result.rows[0] || null;
+}
+
+module.exports = {
+  create,
+  findById,
+  findByUserId,
+  findByStaffCode,
+  update,
+  remove,
+  list,
+  findByCollegeDepartmentAndRole,
+  findByCollegeAndRole,
+};

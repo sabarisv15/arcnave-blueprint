@@ -13,22 +13,30 @@
 // BusinessRules.md Finance: "Fee changes require approval before
 // taking effect." CLAUDE.md rule 3: WorkflowService is the sole
 // approval gate, human and AI Level 3 actions alike, no exceptions.
-// WorkflowService (Module 8) does not exist yet — Roadmap.md builds
-// Workflow/Notifications after Finance/Documents/Reports. Same "out
-// of scope here, not stubbed" reasoning academicService.js already
-// documents for classes.timetable_status, and attendanceService.js
-// restates for markAttendance's own timetable-approval gate:
-// createFeeStructure/updateFeeStructure validate that `status` is one
-// of the known literals (mirroring classes.timetable_status's own
-// treatment exactly, including reusing the same "no DB CHECK, service-
-// layer enforcement only" shape) but do not call, invoke, or fake a
-// WorkflowService integration — there is nothing real to route
-// through yet. Whether a status transition (e.g. 'Pending Approval' ->
-// 'Approved') came from a genuine review action or a bare create/
-// update call is exactly the distinction CLAUDE.md rule 3 reserves for
-// WorkflowService to enforce once it exists; deliberately not
-// invented here, same as academicService.js never enforcing the real
-// HOD/Principal review-chain transition order for timetable_status.
+//
+// Module 8 second slice: this gate is now real.
+// submitFeeStructureApproval/approveFeeStructure/rejectFeeStructure
+// route through workflowService — the actual fix for the gap 6957f02's
+// own commit message named explicitly ("no status control at all...
+// the one thing that rule exists to prevent [self-approval]"). `status`
+// is no longer in FEE_STRUCTURE_ALLOWED_FIELDS: createFeeStructure/
+// updateFeeStructure can no longer set it directly — a fee_structures
+// row is always created 'Pending Approval' (the DB's own default) and
+// can only move to 'Approved'/'Rejected' via the new functions below,
+// which themselves only ever run after workflowService.approveRequest/
+// rejectRequest actually resolves a real approval. Previously (see
+// 8e5a3d5's own .ai/RESULT.md) status was merely known-literal-
+// validated with no real gate at all; that validation apparatus
+// (VALID_FEE_STRUCTURE_STATUSES/assertValidFeeStructureStatus/
+// FeeStructureStatusError) is removed as dead code now that external
+// callers can no longer reach it.
+//
+// approverChain resolution is a single step (Principal only) —
+// unlike StaffService's Faculty->HOD->Principal chain, nothing in
+// BusinessRules.md or this schema scopes a fee_structures row to one
+// department, so there is no HOD to resolve here. Reused from
+// staffService.findPrincipal (staff+users, real data — see that
+// file's own comment) rather than duplicated.
 //
 // fee_payments' markFeePayment has no such gate at all, by design:
 // BusinessRules.md's approval rule is about "fee changes"
@@ -46,6 +54,8 @@
 const financeRepository = require('../repositories/financeRepository');
 const feePaymentRepository = require('../repositories/feePaymentRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
+const workflowService = require('./workflowService');
+const staffService = require('./staffService');
 
 // Missing academicYear, classId, feeCategory, or amount — fee_structures'
 // own NOT NULL columns (aside from college_id, which always comes from
@@ -55,12 +65,6 @@ const auditLogRepository = require('../repositories/auditLogRepository');
 // every other pre-query guard in this codebase.
 class FeeStructureValidationError extends Error {}
 
-// The Module 5 migration's own comment names this exact gap: status
-// has no DB-level CHECK constraint, known values enforced at the
-// service layer once FinanceService exists — this is that
-// enforcement, same treatment as academicService.ClassTimetableStatusError.
-class FeeStructureStatusError extends Error {}
-
 // fee_structures_college_year_class_category_key (the partial unique
 // index) violated (Postgres 23505) — this class/year/category
 // combination already has a live fee line.
@@ -69,6 +73,17 @@ class FeeStructureConflictError extends Error {}
 // fee_structures_class_id_fkey violated (Postgres 23503) — the given
 // classId doesn't exist.
 class FeeStructureClassNotFoundError extends Error {}
+
+// submitFeeStructureApproval/approveFeeStructure/rejectFeeStructure
+// given an id with no matching row — a required lookup (collegeId
+// drives the workflow submission/lookup), not an optional fetch, same
+// precedent workflowService.WorkflowRequestNotFoundError already set.
+class FeeStructureNotFoundError extends Error {}
+
+// approveFeeStructure/rejectFeeStructure called for a fee structure
+// with no live Pending workflow_requests row (never submitted for
+// approval, or already resolved).
+class FeeStructureNoPendingRequestError extends Error {}
 
 // Missing collegeId, studentId, feeStructureId, actorUserId, or
 // status — fee_payments' own NOT NULL columns, plus the actor identity
@@ -103,7 +118,6 @@ class FeePaymentFeeStructureNotFoundError extends Error {}
 // Same shape as attendanceService.AttendanceSessionConflictError.
 class FeePaymentConflictError extends Error {}
 
-const VALID_FEE_STRUCTURE_STATUSES = ['Pending Approval', 'Approved', 'Rejected'];
 const VALID_FEE_PAYMENT_STATUSES = ['paid', 'not_paid'];
 
 // The fields this service accepts for fee_structures create/update,
@@ -112,13 +126,15 @@ const VALID_FEE_PAYMENT_STATUSES = ['paid', 'not_paid'];
 // defense-in-depth reasoning as academicService.js/studentService.js/
 // staffService.js's own ALLOWED_FIELDS. collegeId is excluded: a fee
 // structure's tenant is set once at creation and never moves via
-// update, same as classes/students/staff.
+// update, same as classes/students/staff. `status` is deliberately
+// excluded too, unlike the first Finance slice — see this file's own
+// header comment: it can no longer be set directly at all, only via
+// approveFeeStructure/rejectFeeStructure below.
 const FEE_STRUCTURE_ALLOWED_FIELDS = [
   'academicYear',
   'classId',
   'feeCategory',
   'amount',
-  'status',
   'remarks',
 ];
 
@@ -132,12 +148,6 @@ function pickFeeStructureFields(source) {
   return result;
 }
 
-function assertValidFeeStructureStatus(status) {
-  if (status !== undefined && !VALID_FEE_STRUCTURE_STATUSES.includes(status)) {
-    throw new FeeStructureStatusError(`status ${JSON.stringify(status)} is not a known value`);
-  }
-}
-
 function assertValidFeePaymentStatus(status) {
   if (!VALID_FEE_PAYMENT_STATUSES.includes(status)) {
     throw new FeePaymentStatusError(`status ${JSON.stringify(status)} is not a known value`);
@@ -148,7 +158,6 @@ async function createFeeStructure(client, { collegeId, academicYear, classId, fe
   if (!academicYear || !classId || !feeCategory || amount === undefined || amount === null) {
     throw new FeeStructureValidationError('academicYear, classId, feeCategory, and amount are required');
   }
-  assertValidFeeStructureStatus(rest.status);
 
   let feeStructure;
   try {
@@ -192,7 +201,6 @@ async function getFeeStructure(client, id) {
 
 async function updateFeeStructure(client, id, fields, { userId } = {}) {
   const patch = pickFeeStructureFields(fields);
-  assertValidFeeStructureStatus(patch.status);
   const hasChanges = Object.keys(patch).length > 0;
 
   let feeStructure;
@@ -258,6 +266,96 @@ async function listFeeStructuresForClassAndYear(client, classId, academicYear) {
 
 async function listFeeStructures(client, { limit, offset } = {}) {
   return financeRepository.list(client, { limit, offset });
+}
+
+// Submits a newly-created (always 'Pending Approval') fee structure
+// for real approval — a separate, explicit step from createFeeStructure
+// itself, not auto-triggered on every create: mirrors
+// staffService.submitStaffRegistration's own separation from
+// createStaff, keeping the existing, already-tested creation path
+// unchanged. Single-step chain (Principal only) — see this file's own
+// header comment for why there's no HOD step here the way Staff's
+// chain has one.
+async function submitFeeStructureApproval(client, feeStructureId, { requestedByUserId, origin = 'human' } = {}) {
+  if (!requestedByUserId) {
+    throw new FeeStructureValidationError('requestedByUserId is required');
+  }
+
+  const feeStructure = await financeRepository.findById(client, feeStructureId);
+  if (feeStructure === null) {
+    throw new FeeStructureNotFoundError(`fee structure ${JSON.stringify(feeStructureId)} does not exist`);
+  }
+
+  const principal = await staffService.findPrincipal(client, feeStructure.college_id);
+
+  return workflowService.submitRequest(client, {
+    collegeId: feeStructure.college_id,
+    entityType: 'fee_structure',
+    entityId: feeStructure.id,
+    requestedByUserId,
+    origin,
+    approverChain: [{ step: 1, role: 'principal', user_id: principal.user_id }],
+  });
+}
+
+// Shared lookup for approve/reject: the fee structure must exist, and
+// exactly one live Pending workflow_requests row must govern it.
+async function loadPendingFeeStructureApproval(client, feeStructureId) {
+  const feeStructure = await financeRepository.findById(client, feeStructureId);
+  if (feeStructure === null) {
+    throw new FeeStructureNotFoundError(`fee structure ${JSON.stringify(feeStructureId)} does not exist`);
+  }
+
+  const pending = await workflowService.findPendingForEntity(client, 'fee_structure', feeStructureId);
+  if (pending === null) {
+    throw new FeeStructureNoPendingRequestError(`fee structure ${JSON.stringify(feeStructureId)} has no pending approval request`);
+  }
+
+  return { feeStructure, pending };
+}
+
+// The actual fix for 6957f02's own named gap: status now only ever
+// moves to 'Approved' as a consequence of a real
+// workflowService.approveRequest resolution (which itself enforces
+// ADR-005's self-approval rule, the wrong-actor/wrong-step rejection,
+// etc.) — never from a bare caller-supplied field on update. A single-
+// step chain always resolves on this one call (current_step never
+// advances past 1), so there's no "still mid-chain" branch to handle
+// the way a multi-step StaffService chain would need.
+async function approveFeeStructure(client, feeStructureId, { actorUserId, remarks } = {}) {
+  const { pending } = await loadPendingFeeStructureApproval(client, feeStructureId);
+  await workflowService.approveRequest(client, pending.id, { actorUserId, remarks });
+
+  const feeStructure = await financeRepository.update(client, feeStructureId, { status: 'Approved' });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: feeStructure.college_id,
+    userId: actorUserId,
+    action: 'fee_structure_approved',
+    entity: 'fee_structures',
+    entityId: feeStructureId,
+    metadata: null,
+  });
+
+  return feeStructure;
+}
+
+async function rejectFeeStructure(client, feeStructureId, { actorUserId, remarks } = {}) {
+  const { pending } = await loadPendingFeeStructureApproval(client, feeStructureId);
+  await workflowService.rejectRequest(client, pending.id, { actorUserId, remarks });
+
+  const feeStructure = await financeRepository.update(client, feeStructureId, { status: 'Rejected' });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: feeStructure.college_id,
+    userId: actorUserId,
+    action: 'fee_structure_rejected',
+    entity: 'fee_structures',
+    entityId: feeStructureId,
+    metadata: null,
+  });
+
+  return feeStructure;
 }
 
 // Marks a student's fee line paid/not-paid — an upsert, same
@@ -372,9 +470,10 @@ async function removeFeePayment(client, id, { userId } = {}) {
 
 module.exports = {
   FeeStructureValidationError,
-  FeeStructureStatusError,
   FeeStructureConflictError,
   FeeStructureClassNotFoundError,
+  FeeStructureNotFoundError,
+  FeeStructureNoPendingRequestError,
   FeePaymentValidationError,
   FeePaymentStatusError,
   FeePaymentStudentNotFoundError,
@@ -386,6 +485,9 @@ module.exports = {
   removeFeeStructure,
   listFeeStructuresForClassAndYear,
   listFeeStructures,
+  submitFeeStructureApproval,
+  approveFeeStructure,
+  rejectFeeStructure,
   markFeePayment,
   getFeePayment,
   listFeePaymentsForStudent,

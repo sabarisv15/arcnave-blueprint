@@ -6,18 +6,26 @@
 // directly — this file is what makes that possible for staff).
 //
 // This slice assumes a `userId` for an already-existing `users` row
-// is handed in — it does not create accounts, run the HOD/Principal
-// approval chain, or generate credentials (`generatedCreds` in
-// HodDashboard.jsx/PrincipalDashboard.jsx). That's WorkflowService
-// (Module 8) plus a users-row-creation step, neither of which exists
-// yet — same scope boundary the Module 2 first slice's .ai/TASK.md
-// already drew. "Only HOD/Principal may add staff" is an
-// authorization rule, not business logic — left to the route/RBAC
-// layer once Module 2's API exists, same reasoning studentService.js
-// used for "only the class tutor may edit."
+// is handed in — it does not create accounts or generate credentials
+// (`generatedCreds` in HodDashboard.jsx/PrincipalDashboard.jsx). That
+// needs a users-row-creation step this codebase doesn't have yet —
+// still a real, flagged gap (see submitStaffRegistration's own comment
+// below), unchanged from the Module 2 first slice's .ai/TASK.md.
+// "Only HOD/Principal may add staff" is an authorization rule, not
+// business logic — left to the route/RBAC layer once Module 2's API
+// exists, same reasoning studentService.js used for "only the class
+// tutor may edit."
+//
+// The HOD/Principal approval chain itself (Module 8's own second gap)
+// IS wired here now: submitStaffRegistration/approveStaffRegistration/
+// rejectStaffRegistration route through workflowService, per ADR-005/
+// CLAUDE.md rule 3. findHodForDepartment/findPrincipal resolve real
+// approver identities from the `staff`+`users` tables (staffRepository's
+// own new JOIN queries) — never a placeholder/hardcoded user id.
 
 const staffRepository = require('../repositories/staffRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
+const workflowService = require('./workflowService');
 
 // Missing userId or fullName — staff.user_id and staff.full_name are
 // both NOT NULL at the DB level. Raised before any repository call,
@@ -52,6 +60,30 @@ class StaffCodeConflictError extends Error {}
 // caller-supplied free text), so any 23503 here unambiguously means
 // this, no separate existence check needed.
 class StaffUserNotFoundError extends Error {}
+
+// submitStaffRegistration/approveStaffRegistration/rejectStaffRegistration
+// given a staffId with no matching row — a required lookup (the
+// staff row's own college_id/department drive the whole chain), not
+// an optional fetch, same precedent workflowService.WorkflowRequestNotFoundError
+// already set.
+class StaffNotFoundError extends Error {}
+
+// findHodForDepartment found no `staff` row in this department whose
+// linked `users.role` is 'hod'. A real, surfaced gap (not silently
+// defaulted to some other approver) — a department with no HOD
+// assigned yet cannot have a registration request submitted against
+// it until one exists.
+class StaffHodNotFoundError extends Error {}
+
+// findPrincipal found no `staff` row in this college whose linked
+// `users.role` is 'principal'. Same reasoning as StaffHodNotFoundError.
+class StaffPrincipalNotFoundError extends Error {}
+
+// approveStaffRegistration/rejectStaffRegistration called for a
+// staffId with no live Pending workflow_requests row (never submitted,
+// or already resolved) — mirrors workflowService.WorkflowRequestNotFoundError's
+// "a required lookup, not an optional fetch" shape.
+class StaffRegistrationNotPendingError extends Error {}
 
 // The fields this service accepts for create/update, deliberately
 // listed here rather than trusting staffRepository's own COLUMNS
@@ -210,14 +242,127 @@ async function listStaff(client, { limit, offset } = {}) {
   return staffRepository.list(client, { limit, offset });
 }
 
+// Resolves the real HOD of a department from staff+users — never a
+// placeholder. Throws rather than returning null: a registration
+// submission cannot build a valid approver_chain without this, same
+// "required lookup" precedent createStaff's own error mapping already
+// established for a bad FK.
+async function findHodForDepartment(client, collegeId, department) {
+  const hod = await staffRepository.findByCollegeDepartmentAndRole(client, collegeId, department, 'hod');
+  if (hod === null) {
+    throw new StaffHodNotFoundError(`no hod found for department ${JSON.stringify(department)}`);
+  }
+  return hod;
+}
+
+// Resolves the real Principal of a college from staff+users — same
+// reasoning as findHodForDepartment.
+async function findPrincipal(client, collegeId) {
+  const principal = await staffRepository.findByCollegeAndRole(client, collegeId, 'principal');
+  if (principal === null) {
+    throw new StaffPrincipalNotFoundError(`no principal found for college ${JSON.stringify(collegeId)}`);
+  }
+  return principal;
+}
+
+// BusinessRules.md's Staff registration chain: Faculty submits ->
+// HOD (of the department named on the request) approves -> Principal
+// gives final approval. Modeled as a 2-step approver_chain, resolved
+// here from real data (findHodForDepartment/findPrincipal), not
+// hardcoded — CLAUDE.md rule 3/ADR-005: this is the same WorkflowService
+// gate every other approval routes through.
+//
+// Deliberately NOT built here: turning an Approved outcome into an
+// active login (Staff ID generation, credential emailing,
+// `users.is_active`/`activated_by`). This file's own module comment
+// already names that as a separate, unbuilt users-row-creation/
+// credentialing capability — wiring the approval chain itself doesn't
+// require inventing that too, and doing so here would silently expand
+// this slice's scope well past "wire callers." A future slice that
+// does build it can react to approveStaffRegistration's returned
+// status === 'Approved', same shape financeService.approveFeeStructure
+// reacts to its own workflowService.approveRequest result.
+//
+// requestedByUserId is the actor submitting on the named staff
+// member's behalf (per BusinessRules, "Faculty submits" — in this
+// codebase's current placeholder RBAC, every staff write route is
+// gated requireRole('principal') regardless, so who that concretely is
+// today is a route-layer question, not this function's to assume).
+async function submitStaffRegistration(client, staffId, { requestedByUserId, origin = 'human' } = {}) {
+  if (!requestedByUserId) {
+    throw new StaffValidationError('requestedByUserId is required');
+  }
+
+  const staff = await staffRepository.findById(client, staffId);
+  if (staff === null) {
+    throw new StaffNotFoundError(`staff ${JSON.stringify(staffId)} does not exist`);
+  }
+  if (!staff.department) {
+    throw new StaffValidationError(`staff ${JSON.stringify(staffId)} has no department set, cannot resolve an HOD approver`);
+  }
+
+  const hod = await findHodForDepartment(client, staff.college_id, staff.department);
+  const principal = await findPrincipal(client, staff.college_id);
+
+  return workflowService.submitRequest(client, {
+    collegeId: staff.college_id,
+    entityType: 'staff_registration',
+    entityId: staff.id,
+    requestedByUserId,
+    origin,
+    approverChain: [
+      { step: 1, role: 'hod', user_id: hod.user_id },
+      { step: 2, role: 'principal', user_id: principal.user_id },
+    ],
+  });
+}
+
+// Shared lookup for approve/reject: the staff row must exist, and
+// exactly one live Pending workflow_requests row must govern it —
+// workflowService.findPendingForEntity is the pure read this slice
+// added to workflowService specifically for this correlation (see its
+// own comment there).
+async function loadPendingRegistration(client, staffId) {
+  const staff = await staffRepository.findById(client, staffId);
+  if (staff === null) {
+    throw new StaffNotFoundError(`staff ${JSON.stringify(staffId)} does not exist`);
+  }
+
+  const pending = await workflowService.findPendingForEntity(client, 'staff_registration', staffId);
+  if (pending === null) {
+    throw new StaffRegistrationNotPendingError(`staff ${JSON.stringify(staffId)} has no pending registration request`);
+  }
+
+  return pending;
+}
+
+async function approveStaffRegistration(client, staffId, { actorUserId, remarks } = {}) {
+  const pending = await loadPendingRegistration(client, staffId);
+  return workflowService.approveRequest(client, pending.id, { actorUserId, remarks });
+}
+
+async function rejectStaffRegistration(client, staffId, { actorUserId, remarks } = {}) {
+  const pending = await loadPendingRegistration(client, staffId);
+  return workflowService.rejectRequest(client, pending.id, { actorUserId, remarks });
+}
+
 module.exports = {
   StaffValidationError,
   StaffUserConflictError,
   StaffCodeConflictError,
   StaffUserNotFoundError,
+  StaffNotFoundError,
+  StaffHodNotFoundError,
+  StaffPrincipalNotFoundError,
+  StaffRegistrationNotPendingError,
   createStaff,
   getStaff,
   updateStaff,
   removeStaff,
   listStaff,
+  findHodForDepartment,
+  findPrincipal,
+  submitStaffRegistration,
+  approveStaffRegistration,
+  rejectStaffRegistration,
 };

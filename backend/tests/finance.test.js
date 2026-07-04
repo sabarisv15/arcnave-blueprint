@@ -3,20 +3,24 @@
 // Integration tests for the Finance API (/api/v1/finance/...) — real
 // HTTP requests against a live Postgres, same discipline as
 // classes.test.js/attendance.test.js: error mapping
-// (FeeStructureValidationError/FeeStructureStatusError/
-// FeePaymentValidationError/FeePaymentStatusError -> 400,
+// (FeeStructureValidationError/FeePaymentValidationError/
+// FeePaymentStatusError -> 400,
 // FeeStructureClassNotFoundError/FeePaymentStudentNotFoundError/
 // FeePaymentFeeStructureNotFoundError -> 404,
 // FeeStructureConflictError/FeePaymentConflictError -> 409) is proven
 // against financeService's actual behavior hitting real DB
 // constraints, not hand-thrown errors standing in for them.
 //
-// No WorkflowService gate is exercised here because there isn't one —
-// financeService.js's own file-level comment (and 8e5a3d5's
-// .ai/RESULT.md) already established that fee_structures.status is
-// known-literal-validated only, same as classes.timetable_status. This
-// file proves that validation reaches the route correctly; it does not
-// (and cannot) prove an approval workflow that doesn't exist yet.
+// Module 8 second slice: `status` is no longer a route-writable field
+// at all (financeService.js's own header comment) — create/update
+// tests that used to assert 400 on an "unknown status" or a real
+// status change via PUT are updated below to prove it's now silently
+// ignored instead. The real approval gate
+// (submitFeeStructureApproval/approveFeeStructure/rejectFeeStructure)
+// has no route yet (still service-layer only, per this task's own
+// scope), so it isn't exercised here — see finance-service.test.js's
+// mocked-workflowService coverage and this task's own live verification
+// script instead.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -196,12 +200,13 @@ test('finance', async (t) => {
     assert.equal(resp.status, 400);
   });
 
-  await t.test('create rejects an unknown status with 400', async () => {
+  await t.test('create silently ignores a caller-supplied status, always Pending Approval', async () => {
     const token = await login(collegeA, 'principaluser');
     const resp = await post(baseUrl, '/api/v1/finance/fee-structures', headersFor(collegeA, token), {
-      academic_year: '2025-2026', class_id: collegeA.classId, fee_category: 'Hostel', amount: '1000.00', status: 'On Hold',
+      academic_year: '2025-2026', class_id: collegeA.classId, fee_category: 'Hostel', amount: '1000.00', status: 'Approved',
     });
-    assert.equal(resp.status, 400);
+    assert.equal(resp.status, 201);
+    assert.equal(resp.body.status, 'Pending Approval');
   });
 
   await t.test('create on a duplicate (class, year, category) within the same tenant is a real 409, from a real DB constraint', async () => {
@@ -242,7 +247,7 @@ test('finance', async (t) => {
 
   // --- fee_structures: update ---
 
-  await t.test('principal updates a fee structure: 200 with the changed fields', async () => {
+  await t.test('principal updates a fee structure: 200 with the changed fields, status untouched', async () => {
     const token = await login(collegeA, 'principaluser');
     const created = await post(baseUrl, '/api/v1/finance/fee-structures', headersFor(collegeA, token), {
       academic_year: '2025-2026', class_id: collegeA.classId, fee_category: 'Library', amount: '400.00',
@@ -254,10 +259,13 @@ test('finance', async (t) => {
     });
     assert.equal(updated.status, 200);
     assert.equal(updated.body.amount, '450.00');
-    assert.equal(updated.body.status, 'Approved');
+    // status is no longer a route-writable field at all (Module 8
+    // second slice) — a caller-supplied value is silently ignored, the
+    // row stays at its real, DB-defaulted state.
+    assert.equal(updated.body.status, 'Pending Approval');
   });
 
-  await t.test('update with an unknown status returns 400, not a 500', async () => {
+  await t.test('update silently ignores a status-only body (no recognized fields, no-op)', async () => {
     const token = await login(collegeA, 'principaluser');
     const created = await post(baseUrl, '/api/v1/finance/fee-structures', headersFor(collegeA, token), {
       academic_year: '2025-2026', class_id: collegeA.classId, fee_category: 'Uniform', amount: '600.00',
@@ -265,7 +273,9 @@ test('finance', async (t) => {
     const resp = await put(baseUrl, `/api/v1/finance/fee-structures/${created.body.id}`, headersFor(collegeA, token), {
       status: 'Whatever',
     });
-    assert.equal(resp.status, 400);
+    assert.equal(resp.status, 200);
+    assert.equal(resp.body.status, 'Pending Approval');
+    assert.equal(resp.body.amount, '600.00');
   });
 
   await t.test('update on a nonexistent id returns 404, not a 500', async () => {

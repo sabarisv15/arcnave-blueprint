@@ -68,7 +68,7 @@ class WorkflowRequestValidationError extends Error {}
 
 // origin has no DB CHECK constraint (see the migration's own file-level
 // comment) — known values ('human'|'ai') enforced here, same house
-// convention as financeService.FeeStructureStatusError.
+// convention as academicService.ClassTimetableStatusError.
 class WorkflowRequestOriginError extends Error {}
 
 // workflow_requests_requested_by_user_id_fkey violated (Postgres
@@ -290,6 +290,22 @@ async function listPendingForApprover(client, userId) {
   return workflowRepository.findPendingForApprover(client, userId);
 }
 
+// A pure read, not new approval logic (this task's own scope note):
+// FinanceService/StaffService need to correlate their own entity id
+// (a fee_structures.id, a staff.id) back to the workflow_requests row
+// governing it before they can call approveRequest/rejectRequest,
+// since neither table stores its own workflow_request_id column (no
+// schema change this slice). At most one Pending request can exist
+// per entity (workflow_requests_entity_pending_key, the partial unique
+// index from the first slice), so filtering findByEntity's
+// created-descending results down to the single Pending one (or null)
+// is unambiguous — same thin-wrapper shape as listPendingForApprover
+// above, just filtered differently.
+async function findPendingForEntity(client, entityType, entityId) {
+  const requests = await workflowRepository.findByEntity(client, entityType, entityId);
+  return requests.find((request) => request.status === 'Pending') || null;
+}
+
 module.exports = {
   WorkflowRequestValidationError,
   WorkflowRequestOriginError,
@@ -303,4 +319,5 @@ module.exports = {
   approveRequest,
   rejectRequest,
   listPendingForApprover,
+  findPendingForEntity,
 };

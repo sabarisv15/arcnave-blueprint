@@ -1,7 +1,7 @@
 # Module 8 — Workflow & Notifications
 
-Status: In progress (schema + repositories + WorkflowService; no
-API/UI yet).
+Status: In progress (schema + repositories + WorkflowService + real
+FinanceService/StaffService callers wired in; no API/UI yet).
 
 ## Tables
 `workflow_requests` — the approval request itself: polymorphic
@@ -60,15 +60,43 @@ already-resolved re-action rejected, malformed input mapped to the
 right domain error, cross-tenant isolation holds through the service
 layer.
 
+## Callers wired (third slice)
+`workflowService` gained one pure read, `findPendingForEntity(client,
+entityType, entityId)` — lets a caller correlate its own entity id
+back to the governing `workflow_requests` row (neither `staff` nor
+`fee_structures` stores a `workflow_request_id` column).
+
+**FinanceService** (closes `6957f02`'s gap): `status` removed from
+`FEE_STRUCTURE_ALLOWED_FIELDS` entirely — `createFeeStructure`/
+`updateFeeStructure` can no longer set it directly. New
+`submitFeeStructureApproval`/`approveFeeStructure`/`rejectFeeStructure`
+route the real transition through `workflowService` (single-step
+chain, Principal only, resolved from real data).
+
+**StaffService**: `staffRepository` gained `findByCollegeDepartmentAndRole`/
+`findByCollegeAndRole` (JOINs to `users` — `staff` has no `role` column
+of its own). `findHodForDepartment`/`findPrincipal` wrap them (throw,
+don't silently fall back, if nobody holds the role).
+`submitStaffRegistration`/`approveStaffRegistration`/
+`rejectStaffRegistration` build and drive a real 2-step
+Faculty→HOD→Principal chain from that resolved data.
+
+Verified live: real HOD/Principal resolution (no-HOD department
+throws), full registration chain (wrong actor / self-approval rejected
+at each step), fee-structure approval proving the actual point of this
+slice — the resolved Principal cannot approve their own submission, a
+genuinely different Principal can, and a direct `status` write via
+`updateFeeStructure` is now silently ignored. Full suite: 415/415.
+
 ## Known gaps / deferred
-- No API/UI yet — next slice.
-- Approver-chain *resolution* (who is the HOD of a given department)
-  is not this service's job — the calling service resolves real
-  `user_id`s before calling `submitRequest`.
-- Finance's fee-structure approval gap and Staff's registration-
-  approval gap both still point at this table but are not wired up
-  yet — that's `FinanceService`/`StaffService` calling into
-  `workflowService`, a later slice.
+- No API/UI yet for any of this — next slice.
+- Turning an `Approved` staff registration into an active login
+  (Staff ID, credentials, `users.is_active`) is still unbuilt — a
+  separate, explicitly-flagged capability, not invented here.
+- `staffRepository`'s HOD/Principal lookups pick the earliest-created
+  matching row if more than one exists — nothing enforces at most one
+  HOD per department or one Principal per college today.
 
 ## Commits
-Schema + repositories · `workflowService.js` (this slice).
+Schema + repositories · `workflowService.js` · FinanceService/
+StaffService wiring (this slice).
