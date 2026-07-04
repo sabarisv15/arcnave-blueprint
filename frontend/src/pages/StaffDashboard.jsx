@@ -7,7 +7,7 @@ import { FileUp, Plus, Trash2, ArrowRight, ShieldAlert, Sparkles, Clock, CheckCi
 
 export default function StaffDashboard() {
   const { showToast } = useToast();
-  const { user } = useAuth();
+  const { user, accessToken } = useAuth();
   const navigate = useNavigate();
 
   const [submissions, setSubmissions] = useState([]);
@@ -110,18 +110,61 @@ export default function StaffDashboard() {
     }
   };
 
+  // Repointed to the real API (routes/attendance.js,
+  // POST /api/v1/attendance) -- the actual grounding source for
+  // attendance_sessions (see attendanceService.js's own .ai/TASK.md
+  // history: this exact flow, not TutorClass.jsx's aggregate
+  // present_today/present_this_hour counter, is what the real
+  // per-period, per-student attendance_sessions shape was modeled on
+  // -- TutorClass.jsx's own counter is left untouched here, on
+  // purpose, it was never the grounding source and isn't becoming one
+  // now).
+  //
+  // Two real field-shape changes, following the exact tutor_id ->
+  // class_id / free-text -> real-id renames Module 3's own UI slice
+  // (dbe8380) already made elsewhere: class_id replaces the
+  // prototype's tutor_id (a username string) -- the real backend
+  // identifies a class by its own id, never by its tutor's username.
+  // absent_student_ids replaces absent_rolls, since the real
+  // attendance_sessions.absent_student_ids column expects real
+  // students.id UUIDs, not roll-number strings.
+  //
+  // Both source values are still blocked, not fixed here:
+  // GET /api/staff/my-schedule (selectedPeriod's own source, fetched
+  // by fetchSchedule above) is a separate, still-unrepointed prototype
+  // endpoint that doesn't exist in the Node backend either -- it
+  // 404s today exactly like /api/hod/classes did before Module 3's
+  // own UI slice, so `schedule` never populates and this whole panel's
+  // "Mark Attendance" button is already unreachable dead code in the
+  // real app right now, the same starting state classesList was in
+  // before dbe8380. selectedPeriod.class_id and each absent entry's
+  // real student id don't exist in that endpoint's still-prototype
+  // response shape (it only ever returned tutor_id and
+  // roll_number-keyed students) -- repointing this POST call carries
+  // no behavior risk today (nothing currently renders this panel with
+  // real data either way), and leaves the least remaining work for
+  // whichever future slice repoints GET /api/staff/my-schedule (or
+  // builds a real "my schedule" equivalent, e.g. over
+  // academicService.listFacultyAllocationsForStaff) to actually supply
+  // them. selectedPeriod.total_students needed no rename or new
+  // source -- it already exists on the current (still-prototype)
+  // schedule shape, and the real API needs exactly that field too.
   const handleMarkPeriodAttendance = async () => {
     if (!selectedPeriod) return;
     setSubmittingAttendance(true);
     try {
-      const res = await fetch('/api/staff/mark-period-attendance', {
+      const res = await fetch('/api/v1/attendance', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
         body: JSON.stringify({
-          tutor_id: selectedPeriod.tutor_id,
+          class_id: selectedPeriod.class_id,
+          session_date: selectedPeriod.periodKey.split('_')[0],
           hour_index: selectedPeriod.hour_index,
-          absent_rolls: absentRolls,
-          date_key: selectedPeriod.periodKey.split('_')[0]
+          absent_student_ids: absentRolls,
+          total_students: selectedPeriod.total_students,
         })
       });
       if (res.ok) {
@@ -130,7 +173,7 @@ export default function StaffDashboard() {
         fetchSchedule();
       } else {
         const errData = await res.json();
-        showToast(errData.error || 'Failed to mark attendance', 'danger');
+        showToast(errData.detail || 'Failed to mark attendance', 'danger');
       }
     } catch (err) {
       showToast(err.message, 'danger');

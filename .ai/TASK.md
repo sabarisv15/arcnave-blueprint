@@ -1,146 +1,119 @@
 # TASK
 
 ## Objective
-Module 4 (Attendance): API routes for `attendance_sessions` —
-`/api/v1/attendance` — wiring `attendanceService.markAttendance` and
-its two reads, following Module 3's route/error-mapping conventions
-(`routes/classes.js`, `235aa8b`; `routes/facultyAllocation.js`,
-`e36bfb8`). This is the last piece needed to prove, end-to-end from a
-real HTTP request, that all three of BusinessRules.md's eligible
-attendance markers actually work — the "scheduled staff" leg in
-particular, closed at the service layer in `576ca6b` but never
-exercised through a route until now.
+Module 4 (Attendance), UI slice: repoint `StaffDashboard.jsx`'s real
+`POST /api/staff/mark-period-attendance` flow — the actual grounding
+source `attendance_sessions`'s ERD was built against
+(`attendanceService.js`'s own `.ai/TASK.md` history, `82f8479`) — to
+the real `POST /api/v1/attendance` (`7e466ec`). Same "repoint what's
+real, flag what's blocked" discipline as Module 3's UI slice
+(`dbe8380`).
 
-## Grounding (read before assuming any route shape)
-- `.ai/RESULT.md`/`.ai/TASK.md` (`576ca6b`) for `attendanceService.js`'s
-  exact function signatures, error classes, and — critically — the
-  fact that `markAttendance` requires **both** `actorUserId` and
-  `actorRole`, unlike every other service's create function (which
-  only needs `actorUserId`, for audit attribution). `assertCanMark`
-  needs the role to evaluate the HOD leg.
-- `routes/classes.js`/`routes/facultyAllocation.js` (the named
-  patterns): `requireResolvedTenant` guard, a `*_BODY_FIELDS`
-  snake<->camel array local to the route file, `mapXServiceError`
-  returning a boolean so the catch block can `throw err` for anything
-  unmapped, responses left in the repository's native snake_case.
-- `attendanceRepository.js`/the Module 4 first slice (`49c8b4b`):
-  `attendance_sessions` is soft-delete only, and no `removeX`/`softDelete`
-  wrapper exists anywhere above the repository layer — there is
-  nothing for a `DELETE` route to call.
+## Grounding (read before assuming any rename is safe)
+- `StaffDashboard.jsx`'s `handleMarkPeriodAttendance`: the only real,
+  working per-student attendance-marking flow in this codebase — it
+  sends `{ tutor_id, hour_index, absent_rolls, date_key }` to the
+  (nonexistent in the Node backend, confirmed via grep, same as every
+  other `/api/staff/*`/`/api/hod/*` prototype route) old endpoint.
+  `TutorClass.jsx`'s "Live Attendance" widget (`present_today`/
+  `present_this_hour`) is explicitly **not** touched here — it's not
+  the grounding source (already settled in `attendanceService.js`'s
+  own `.ai/TASK.md`: that widget "never names individual students at
+  all... a materially weaker, dead-end shape"), and doesn't become one
+  now.
+- `routes/attendance.js`'s exact body shape (`7e466ec`): `class_id`,
+  `session_date`, `hour_index`, `absent_student_ids`, `total_students`,
+  requiring a real `Authorization: Bearer` header (`requireAuth`), and
+  `err.detail` (not `err.error`) on failure.
+- `fetchSchedule`'s own source, `GET /api/staff/my-schedule`: also
+  confirmed via grep to not exist anywhere in the Node backend — same
+  situation `classesList`'s old `GET /api/hod/classes` was in before
+  Module 3's own UI slice. This means `schedule` state is always `[]`
+  in the real app today, so the entire "Mark Attendance" button and
+  its panel are already unreachable dead code — repointing the POST
+  call underneath it carries zero behavior risk right now.
 
-## Key design decision: this route does NOT use requireRole('principal') for writes — the one real departure from every other Module 3/4 route
-Every route so far (`classes`, `staff`, `students`,
-`faculty-allocation`, `timetable-periods`) gates writes with
-`requireRole('principal')` as a deliberately conservative placeholder,
-specifically *because* their underlying services have no
-fine-grained authorization logic of their own — the route is the only
-gate that exists. `attendanceService.markAttendance` is different: it
-already enforces BusinessRules.md's real rule itself (class tutor, HOD
-force-mark, or the staff member genuinely scheduled for the period —
-`assertCanMark`, `576ca6b`), throwing `AttendanceForbiddenError` for
-anyone else. Gating `POST /attendance` with `requireRole('principal')`
-on top of that would be actively wrong, not just redundant — it would
-lock out every actor BusinessRules.md actually names as eligible
-(ordinary teaching staff and class tutors are not principals),
-defeating the entire point of the service-layer work already done.
-`POST /attendance` uses `requireAuth` only (any authenticated tenant
-user may attempt to mark; the service decides who succeeds), with
-`AttendanceForbiddenError` mapped to a 403 — the real authorization
-decision lives in exactly one place, not duplicated or second-guessed
-at the route.
+## Key design decision: two field-shape renames, both grounded, both still blocked upstream
+- `tutor_id` (a username string, the old model's way of identifying
+  "which class") -> `class_id` (the real backend's actual class
+  identity) — the identical rename Module 3's own UI slice already
+  made for `classesList`'s `tutor_id` -> `tutor_user_id`. Sourced from
+  `selectedPeriod.class_id`, a field that does **not** exist in
+  `GET /api/staff/my-schedule`'s still-unrepointed response shape
+  (which only ever returns `tutor_id`) — this is not fixed here,
+  flagged as blocked on a future slice repointing that GET endpoint
+  (or building a real "my schedule" equivalent, e.g. over
+  `academicService.listFacultyAllocationsForStaff`).
+- `absent_rolls` (roll-number strings) -> `absent_student_ids` (real
+  `students.id` UUIDs, per `attendance_sessions`'s own ERD) — same
+  "the real column expects a resolved id, the prototype only ever had
+  a human-facing identifier" gap `attendanceService.js`'s own design
+  decision already named for this exact column. Also not fixed here:
+  `selectedPeriod.students` (from the same unrepointed schedule
+  endpoint) only ever carries `roll_number`, never a real student id.
+- `selectedPeriod.total_students` needed **no** rename or new source —
+  it already exists on the current (still-prototype) schedule shape,
+  and the real API needs exactly that field, under exactly that name.
+  Not every field in this repoint is blocked; this one already lines
+  up.
+- `session_date` (`selectedPeriod.periodKey.split('_')[0]`, was
+  `date_key`) — a pure key rename, no shape change, same extraction
+  logic kept as-is.
 
-## Key design decision: POST returns 200, not 201
-`markAttendance` is a real create-or-update (mark-or-re-mark) action —
-`StaffDashboard.jsx`'s own "Mark Attendance"/"Update Attendance"
-button is the same handler either way (per `576ca6b`'s own grounding).
-The service's return value doesn't distinguish which happened, so
-there's no clean signal to key a conditional 201-vs-200 off of without
-changing `markAttendance`'s own contract, which this slice doesn't do
-— that function is already built, tested, and live-verified;
-touching it isn't this slice's job. `200` uniformly for both branches
-is the honest, simplest choice.
+Net effect: this repoint is *correct given the real API*, but not yet
+*reachable with real data* — identical in shape to Module 3's own UI
+slice, where `classesList`'s rename was correct but `staffList`
+stayed empty for a different unrepointed reason. Two separate blocked
+dependencies are named here, not one, and neither is invented or
+guessed at to paper over the gap.
 
-## Key design decision: no DELETE route
-`attendance_sessions` is soft-delete only per BusinessRules.md's AI
-section, and real deletion is an approval-gated action ("even with
-approval") — `WorkflowService` (Module 8) doesn't exist yet.
-`attendanceService.js` itself exposes no `softDelete`/`removeX`
-wrapper over `attendanceRepository.softDelete` — nothing exists for a
-route to call. Building one now would mean inventing both the service
-wrapper and the approval gate in the same breath, the same "don't
-invent structure nobody asked for yet" restraint applied everywhere
-else in this codebase.
-
-## Key design decision: GET /attendance requires both class_id and session_date
-Unlike `facultyAllocation.js`'s list route (exactly one of two
-filters, an either/or choice), `attendanceService.listAttendanceSessionsForClassAndDate`
-takes both `classId` and `sessionDate` as required positional
-arguments — there's no service function that accepts just one. The
-route validates both are present (400 otherwise) rather than
-inventing a third listing shape the service doesn't support.
+## Key design decision: TutorClass.jsx is deliberately untouched
+Named explicitly because the task's own framing invites the
+comparison: `attendanceService.js`'s grounding notes already settled
+that `TutorClass.jsx`'s aggregate `present_today`/`present_this_hour`
+counter is a dead end for this column's real shape — it never sends
+per-student identity anywhere, and the individual students a tutor
+checks off there are computed into a count and discarded, never
+transmitted. Nothing about closing `StaffDashboard.jsx`'s gap changes
+that. Not repointed, not revisited.
 
 ## Files likely affected
-- `backend/src/routes/attendance.js` (new)
-- `backend/src/tenantApp.js` (one new `require` + one new `app.use`)
-- `backend/tests/attendance.test.js` (new)
+- `frontend/src/pages/StaffDashboard.jsx`
 
 ## Exact changes
-
-**`routes/attendance.js`**:
-- `ATTENDANCE_BODY_FIELDS`: `class_id`/`session_date`/`hour_index`/
-  `absent_student_ids`/`total_students` <-> their camelCase service
-  fields. `college_id` absent (always `req.collegeId`).
-  `absent_student_ids` passed through as the raw JSON array
-  `express.json()` already parsed — `attendanceService.markAttendance`
-  is the one that `JSON.stringify`s it before the repository call, not
-  this route.
-- `mapAttendanceServiceError`: `AttendanceValidationError` -> 400;
-  `AttendanceClassNotFoundError` -> 404;
-  `AttendanceTimetableNotApprovedError`/`AttendanceLockedError`/
-  `AttendanceSessionConflictError` -> 409 (same "resource not in the
-  right state" semantics `ClassNameConflictError`/
-  `FacultyAllocationPeriodTakenError` already use 409 for elsewhere);
-  `AttendanceForbiddenError` -> 403.
-- `POST /attendance` (`requireAuth`) -> `markAttendance`, with
-  `actorUserId: req.jwtClaims.sub` **and** `actorRole:
-  req.jwtClaims.role` — the one route in this codebase that needs to
-  pass the actor's role into a service call for a real authorization
-  decision, not just RBAC gating. Returns 200.
-- `GET /attendance/:id` (`requireAuth`) -> `getAttendanceSession`, 404
-  if `null`.
-- `GET /attendance` (`requireAuth`) -> `listAttendanceSessionsForClassAndDate`,
-  requiring both `class_id` and `session_date` query params (400 if
-  either missing).
-- No `DELETE` route (see design decision above).
-
-**`tenantApp.js`**: `require('./routes/attendance')` +
-`app.use(createAttendanceRouter())`, same block/order as every other
-Module 3/4 route.
+- `useAuth()` destructure gains `accessToken` (wasn't pulled in
+  before — no fetch call in this file sent an `Authorization` header
+  previously, since nothing it called was ever a real, checked
+  endpoint).
+- `handleMarkPeriodAttendance`'s fetch: URL `/api/staff/mark-period-attendance`
+  -> `/api/v1/attendance`; adds `Authorization: Bearer ${accessToken}`;
+  body renamed per the design decision above
+  (`class_id`/`session_date`/`hour_index`/`absent_student_ids`/
+  `total_students`); error handling `errData.error` ->
+  `errData.detail`, matching every other UI repoint slice's own
+  precedent (`dbe8380`/`49c2c36`/`c9b6248`).
+- Nothing else in this file changed: `fetchSchedule`/`fetchWorkload`/
+  `fetchHistory`/the marksheet-submission form/`handleFileUpload` all
+  remain on their old, still-dead prototype endpoints — out of scope,
+  per this task's own precise framing (only the POST flow named).
 
 ## Acceptance criteria
-- All three of BusinessRules.md's eligible markers work through a
-  real HTTP request against a live Postgres: class tutor, HOD
-  force-mark, and — the key proof this slice exists for — the staff
-  member genuinely scheduled for the period, verified against a real
-  seeded `faculty_allocation`/`timetable_periods` row, not a mock.
-- An unrelated staff member (none of the three) gets a real 403, not
-  a 500 or a silent 200.
-- `AttendanceTimetableNotApprovedError`/`AttendanceLockedError`/
-  `AttendanceSessionConflictError` all map to 409, proven live
-  (including the locked-session case, reached the same way
-  `attendanceService.js`'s own tests reach it: a direct `UPDATE`
-  against `locked_at`, since no real code path can set it yet).
-- Re-marking the same `(class, date, hour)` updates the existing row
-  (same id), proven through the route, not just the service layer
-  already proven in `576ca6b`.
-- `GET /attendance` requires both `class_id` and `session_date`; both
-  missing and either-missing all correctly 400.
-- `POST /attendance` requires only authentication, not a specific
-  role — proven by an HOD and an ordinary scheduled staff member (not
-  a principal) both successfully marking attendance.
-- Cross-tenant isolation and audit attribution (including the
-  `attendance_marked` vs `attendance_remarked` action-name
-  distinction) match every other Module 3/4 route's own proof.
-- No `DELETE /attendance` route exists.
-- Full backend suite passes with no regressions (285 tests: 268
-  pre-existing + 17 new).
+- `npm run build` (frontend) succeeds with no errors.
+- Live, end-to-end proof the new request shape is accepted: seeded a
+  real tenant + tutor user + real `'Approved'` class in the live
+  Docker Postgres, logged in through the real
+  `POST /api/v1/auth/login`, then called `POST /api/v1/attendance`
+  with the *exact* body/headers `handleMarkPeriodAttendance` now sends
+  — confirms a real `200` with the created `attendance_sessions` row.
+- Confirmed the failure path too: the same call without an
+  `Authorization` header gets a real `401`; a call missing `class_id`
+  gets a real `400` with a `detail` field (not `error`) — proving the
+  `errData.detail` rename is correct, not just plausible.
+- No behavior change to any currently-observable app state:
+  `schedule` was already always `[]` before this change (the source
+  GET endpoint doesn't exist), so this panel was already fully
+  unreachable and stays that way — this repoint changes what *would*
+  happen if reached, not what currently renders.
+- `TutorClass.jsx` untouched.
+- No backend files touched — this slice is UI-only, matching Module
+  3's own UI-slice precedent.
