@@ -94,9 +94,13 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
     );
   });
 
-  await t.test('markAttendance rejects an actor who is neither the tutor nor an HOD', async () => {
+  await t.test('markAttendance rejects an actor who is neither the tutor, an HOD, nor scheduled for the period', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
-    t.after(() => getClassMock.mock.restore());
+    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriod', async () => null);
+    t.after(() => {
+      getClassMock.mock.restore();
+      getPeriodMock.mock.restore();
+    });
 
     await assert.rejects(
       () => attendanceService.markAttendance(
@@ -108,9 +112,13 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
     );
   });
 
-  await t.test('markAttendance rejects a class with no tutor assigned when actor is not HOD', async () => {
+  await t.test('markAttendance rejects a class with no tutor assigned when actor is not HOD or scheduled', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => ({ ...APPROVED_CLASS, tutor_user_id: null }));
-    t.after(() => getClassMock.mock.restore());
+    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriod', async () => null);
+    t.after(() => {
+      getClassMock.mock.restore();
+      getPeriodMock.mock.restore();
+    });
 
     await assert.rejects(
       () => attendanceService.markAttendance(
@@ -120,6 +128,78 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
       ),
       attendanceService.AttendanceForbiddenError,
     );
+  });
+
+  await t.test('markAttendance rejects when a period exists but this class has no allocation for it', async () => {
+    const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriod', async () => ({ id: 'period-1' }));
+    const getAllocMock = t.mock.method(academicService, 'getFacultyAllocationForClassAndPeriod', async () => null);
+    t.after(() => {
+      getClassMock.mock.restore();
+      getPeriodMock.mock.restore();
+      getAllocMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => attendanceService.markAttendance(
+        {},
+        { classId: 'class-1', sessionDate: '2026-07-04', hourIndex: 1, totalStudents: 10 },
+        { actorUserId: 'some-staff', actorRole: 'staff' },
+      ),
+      attendanceService.AttendanceForbiddenError,
+    );
+  });
+
+  await t.test('markAttendance rejects when an allocation exists but for a different staff member', async () => {
+    const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriod', async () => ({ id: 'period-1' }));
+    const getAllocMock = t.mock.method(academicService, 'getFacultyAllocationForClassAndPeriod', async () => ({ staff_user_id: 'someone-else' }));
+    t.after(() => {
+      getClassMock.mock.restore();
+      getPeriodMock.mock.restore();
+      getAllocMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => attendanceService.markAttendance(
+        {},
+        { classId: 'class-1', sessionDate: '2026-07-04', hourIndex: 1, totalStudents: 10 },
+        { actorUserId: 'some-staff', actorRole: 'staff' },
+      ),
+      attendanceService.AttendanceForbiddenError,
+    );
+  });
+
+  await t.test('markAttendance allows the staff member genuinely scheduled for that period, even without tutor/HOD status', async () => {
+    const getClassMock = t.mock.method(academicService, 'getClass', async () => ({ ...APPROVED_CLASS, tutor_user_id: 'some-other-tutor' }));
+    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriod', async (client, collegeId, dayOfWeek, hourIndex) => {
+      assert.equal(collegeId, 'c1');
+      assert.equal(dayOfWeek, 'Saturday'); // 2026-07-04 is a Saturday
+      assert.equal(hourIndex, 1);
+      return { id: 'period-1' };
+    });
+    const getAllocMock = t.mock.method(academicService, 'getFacultyAllocationForClassAndPeriod', async (client, classId, periodId) => {
+      assert.equal(classId, 'class-1');
+      assert.equal(periodId, 'period-1');
+      return { staff_user_id: 'scheduled-staff' };
+    });
+    const findMock = t.mock.method(attendanceRepository, 'findByClassSessionAndHour', async () => null);
+    const createMock = t.mock.method(attendanceRepository, 'create', async (client, fields) => ({ id: 'session-scheduled', ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      getClassMock.mock.restore();
+      getPeriodMock.mock.restore();
+      getAllocMock.mock.restore();
+      findMock.mock.restore();
+      createMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    await assert.doesNotReject(() => attendanceService.markAttendance(
+      {},
+      { classId: 'class-1', sessionDate: '2026-07-04', hourIndex: 1, totalStudents: 10 },
+      { actorUserId: 'scheduled-staff', actorRole: 'staff' },
+    ));
   });
 
   await t.test('markAttendance allows the class tutor to create a new session', async () => {

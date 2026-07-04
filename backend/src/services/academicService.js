@@ -21,24 +21,32 @@
 // exists, matching staffService.js's precedent for "only HOD/Principal
 // may add staff."
 //
-// Faculty allocation (assignFacultyAllocation and friends, added in a
-// later slice) lives in this same file, not a new service: Architecture.md
-// 2.5's own Business Services table lists "faculty allocation" as part
-// of what AcademicService owns, alongside "timetable" — not inferred,
-// stated outright. facultyAllocationRepository.js/timetablePeriodRepository.js
+// Faculty allocation (assignFacultyAllocation and friends) lives in
+// this same file, not a new service: Architecture.md 2.5's own
+// Business Services table lists "faculty allocation" as part of what
+// AcademicService owns, alongside "timetable" — not inferred, stated
+// outright. facultyAllocationRepository.js/timetablePeriodRepository.js
 // were added purely additively (classes.timetable_data untouched — see
 // that slice's .ai/TASK.md) specifically to give AttendanceService's
 // "scheduled staff member" gap (attendanceService.js, 82f8479) a real,
-// structured link to eventually use; this slice is the business-logic
-// layer over that link, surfacing the migration's own uniqueness rules
-// as domain errors, same pattern as classRepository's own constraints
-// above. No authorization check here either: BusinessRules.md names no
-// specific actor for "who may assign faculty," unlike "Class Tutor is
-// assigned only by HOD" — left to the route/RBAC layer once an API
-// exists, not invented here.
+// structured link — surfacing the migration's own uniqueness rules as
+// domain errors, same pattern as classRepository's own constraints
+// above. No authorization check on assign/remove: BusinessRules.md
+// names no specific actor for "who may assign faculty," unlike "Class
+// Tutor is assigned only by HOD" — left to the route/RBAC layer once
+// an API exists, not invented here.
+//
+// getTimetablePeriod/getFacultyAllocationForClassAndPeriod are the two
+// read-only lookups attendanceService.markAttendance now composes
+// (client, day-of-week, hour_index) -> a shared period ->
+// (class, period) -> who's allocated to teach it — to verify
+// BusinessRules.md Attendance's third eligible marker, "the staff
+// member scheduled for that period." See attendanceService.js for the
+// composition; this file only exposes the two lookups it's made of.
 
 const classRepository = require('../repositories/classRepository');
 const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
+const timetablePeriodRepository = require('../repositories/timetablePeriodRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 
 // Missing className — classes.class_name is NOT NULL at the DB level.
@@ -342,11 +350,28 @@ async function listFacultyAllocationsForClass(client, classId) {
 }
 
 // A staff member's full teaching schedule — the real, structured link
-// AttendanceService's own "scheduled staff member" gap needs (see
-// attendanceService.js, 82f8479); not wired into that check yet, only
-// exposed here for whichever slice does that next.
+// AttendanceService's own "scheduled staff member" gap needed (see
+// attendanceService.js, 82f8479 for where it was flagged, and its
+// later patch for where it's actually wired in).
 async function listFacultyAllocationsForStaff(client, staffUserId) {
   return facultyAllocationRepository.findByStaffUserId(client, staffUserId);
+}
+
+// null means no shared period exists for that (college, day, hour) —
+// not an error, same convention as every other getX in this file.
+// This is the lookup attendanceService.markAttendance uses to resolve
+// a calendar date + hour_index into the shared timetable_periods row
+// before it can ask "who's allocated to teach this class then."
+async function getTimetablePeriod(client, collegeId, dayOfWeek, hourIndex) {
+  return timetablePeriodRepository.findByCollegeDayAndHour(client, collegeId, dayOfWeek, hourIndex);
+}
+
+// null means no allocation exists for that (class, period) — not an
+// error. The other half of the same lookup: once a period is
+// resolved, this answers "which staff member (if any) is allocated to
+// teach this specific class during it."
+async function getFacultyAllocationForClassAndPeriod(client, classId, periodId) {
+  return facultyAllocationRepository.findByClassAndPeriod(client, classId, periodId);
 }
 
 // Looks the allocation up first, both to get collegeId for the audit
@@ -399,4 +424,6 @@ module.exports = {
   listFacultyAllocationsForClass,
   listFacultyAllocationsForStaff,
   removeFacultyAllocation,
+  getTimetablePeriod,
+  getFacultyAllocationForClassAndPeriod,
 };

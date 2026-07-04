@@ -16,9 +16,29 @@
 // this is service-to-service, not repository-to-repository.
 //
 // Two rules from BusinessRules.md's Attendance section are enforced
-// here for real, and one is deliberately not — see the two comments
-// below (assertTimetableApproved, assertCanMark) for exactly which
-// and why. Neither is worked around or faked.
+// here for real — see assertTimetableApproved and assertCanMark below
+// for exactly how. Neither is worked around or faked.
+//
+// assertCanMark originally (82f8479) verified only two of
+// BusinessRules.md's three eligible actors — class tutor and HOD —
+// and explicitly refused to verify the third ("the staff member
+// scheduled for that period") because nothing in the schema could
+// resolve a timetable cell to a real user_id without heuristic text
+// matching. That gap is now closed: a later Module 3 slice
+// (facultyAllocationRepository.js/timetablePeriodRepository.js,
+// `4fa8f12`, and academicService.js's business logic over them,
+// `8b66a4c`) built the real, structured link — assertCanMark now
+// composes academicService.getTimetablePeriod and
+// academicService.getFacultyAllocationForClassAndPeriod to check it
+// for real. See assertCanMark's own comment for the exact
+// composition, and its known, honest limitation: this only works once
+// real timetable_periods/faculty_allocation rows exist, and nothing
+// in this codebase populates them yet (no CSV-upload-to-normalized-
+// rows path exists — flagged in `4fa8f12`'s own .ai/RESULT.md) — so in
+// practice, today, this third leg still never actually grants access;
+// it's real, live-verified code with no real data behind it yet, the
+// same shape of gap assertTimetableApproved already has for a
+// different reason.
 
 const attendanceRepository = require('../repositories/attendanceRepository');
 const academicService = require('./academicService');
@@ -46,8 +66,8 @@ class AttendanceTimetableNotApprovedError extends Error {}
 
 // BusinessRules.md Attendance: "Only the staff member scheduled for
 // that period, the class tutor, or an HOD (force-mark) may mark
-// attendance for a given hour." See assertCanMark below for which of
-// those three this slice can actually verify.
+// attendance for a given hour." See assertCanMark below for how all
+// three are now verified.
 class AttendanceForbiddenError extends Error {}
 
 // BusinessRules.md Attendance: "Attendance cannot be modified after
@@ -87,45 +107,71 @@ function assertTimetableApproved(cls) {
   }
 }
 
-// BusinessRules.md names three eligible actors. Two are verified here
-// with real, structured data:
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// sessionDate is expected as an ISO date string ("YYYY-MM-DD", or a
+// full ISO timestamp — only the first 10 characters are used), the
+// same shape any real JSON request body would send. Parsed via
+// explicit Date.UTC components, deliberately not `new Date(sessionDate).getDay()`:
+// getDay() (not getUTCDay()) reads the *local* calendar day of
+// whatever timezone this process runs in, which can silently roll a
+// date-only string back or forward a day depending on the server's
+// offset. Date.UTC + getUTCDay() is immune to that — live-verified
+// against a known date while building this (see .ai/RESULT.md).
+function dayOfWeekName(sessionDate) {
+  const [year, month, day] = String(sessionDate).slice(0, 10).split('-').map(Number);
+  return DAY_NAMES[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+}
+
+// BusinessRules.md names three eligible actors. All three are now
+// verified with real, structured data:
 //   - "the class tutor" -> classes.tutor_user_id === actorUserId, a
 //     real FK comparison (Module 3).
 //   - "an HOD (force-mark)" -> actorRole === 'hod', trusted the same
 //     way rbac.js trusts req.jwtClaims.role (a verified JWT claim, not
 //     re-derived here).
-// The third — "the staff member scheduled for that period" — is
-// deliberately NOT verified in this slice. Doing so would require
-// resolving classes.timetable_data's free-text grid cell (e.g.
-// "DBMS (Dr. Amit)") to a real user_id, and nothing in this schema
-// makes that resolution reliable: Module 3's first slice explicitly
-// deferred building any subjects/faculty_allocation/timetable_periods
-// structure ("the real, working frontend never queries a normalized
-// subjects/periods table"), so the only available technique is the
-// same fuzzy substring/normalize match TutorClass.jsx already does
-// client-side (`normUser === normStaff || normStaff.includes(normUser)
-// || normUser.includes(normStaff)`). Putting a heuristic text match
-// behind an actual authorization decision — something that grants a
-// real capability, not just a display hint — is a different and much
-// riskier thing than the read-only "which subject is showing right
-// now" display it's used for today; BusinessRules.md's own "final
-// year" note already warns that this kind of soft text match is not a
-// guaranteed structured filter. Until a real, structured
-// faculty-allocation link exists, this leg of the rule is
-// under-enforced on purpose: only the tutor or an HOD can mark today,
-// which is a stricter (safer) subset of who BusinessRules.md actually
-// allows, not a looser one. The practical consequence — ordinary
-// scheduled teaching staff (StaffDashboard.jsx's primary real user)
-// cannot yet mark their own periods through this service — is a real,
-// named gap, not a silent one. See .ai/TASK.md.
-function assertCanMark(cls, actorUserId, actorRole) {
+//   - "the staff member scheduled for that period" -> resolved
+//     structurally, not by the fuzzy free-text matching
+//     TutorClass.jsx does client-side
+//     (`normUser === normStaff || normStaff.includes(normUser) ||
+//     normUser.includes(normStaff)`) that this function's own prior
+//     version (82f8479) explicitly refused to copy into an
+//     authorization decision. The real path: convert sessionDate to a
+//     day-of-week name, look up that (college, day, hour)'s shared
+//     timetable_periods row via academicService.getTimetablePeriod,
+//     then look up that (class, period)'s faculty_allocation row via
+//     academicService.getFacultyAllocationForClassAndPeriod — if one
+//     exists and its staff_user_id matches actorUserId, this actor is
+//     genuinely the scheduled teacher, no heuristics involved.
+//
+// Both lookups return null gracefully (no period defined for that
+// slot yet, or no allocation recorded for this class in it) rather
+// than throwing — the honest, current-day consequence: since nothing
+// in this codebase populates timetable_periods/faculty_allocation yet
+// (no CSV-upload-to-normalized-rows path exists — flagged in
+// `4fa8f12`'s own .ai/RESULT.md), this leg will almost always resolve
+// to "no match" in real usage today, same as
+// assertTimetableApproved's gate almost always resolving to "not
+// Approved." Real, correct code; not yet exercised by real data. Not
+// worked around here — see .ai/TASK.md.
+async function assertCanMark(client, cls, sessionDate, hourIndex, actorUserId, actorRole) {
   const isTutor = cls.tutor_user_id !== null && cls.tutor_user_id === actorUserId;
   const isHod = actorRole === 'hod';
-  if (!isTutor && !isHod) {
-    throw new AttendanceForbiddenError(
-      `user ${JSON.stringify(actorUserId)} (role ${JSON.stringify(actorRole)}) may not mark attendance for class ${JSON.stringify(cls.id)}`,
-    );
+  if (isTutor || isHod) {
+    return;
   }
+
+  const period = await academicService.getTimetablePeriod(client, cls.college_id, dayOfWeekName(sessionDate), hourIndex);
+  if (period !== null) {
+    const allocation = await academicService.getFacultyAllocationForClassAndPeriod(client, cls.id, period.id);
+    if (allocation !== null && allocation.staff_user_id === actorUserId) {
+      return;
+    }
+  }
+
+  throw new AttendanceForbiddenError(
+    `user ${JSON.stringify(actorUserId)} (role ${JSON.stringify(actorRole)}) may not mark attendance for class ${JSON.stringify(cls.id)}`,
+  );
 }
 
 // Creates a new session or re-marks an existing one for the same
@@ -166,7 +212,7 @@ async function markAttendance(
   }
 
   assertTimetableApproved(cls);
-  assertCanMark(cls, actorUserId, actorRole);
+  await assertCanMark(client, cls, sessionDate, hourIndex, actorUserId, actorRole);
 
   const existing = await attendanceRepository.findByClassSessionAndHour(client, classId, sessionDate, hourIndex);
 
