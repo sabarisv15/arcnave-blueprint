@@ -15,6 +15,7 @@ const createStaffRouter = require('./routes/staff');
 const createClassesRouter = require('./routes/classes');
 const createFacultyAllocationRouter = require('./routes/facultyAllocation');
 const createTimetablePeriodsRouter = require('./routes/timetablePeriods');
+const createAttendanceRouter = require('./routes/attendance');
 
 // The tenant-facing API — a genuinely separate Express app from
 // platformApp.js, mounted at /api/v1 in app.js. Owns the full tenant
@@ -100,6 +101,7 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   app.use(createClassesRouter());
   app.use(createFacultyAllocationRouter());
   app.use(createTimetablePeriodsRouter());
+  app.use(createAttendanceRouter());
 
   if (typeof registerExtraRoutes === 'function') {
     registerExtraRoutes(app);

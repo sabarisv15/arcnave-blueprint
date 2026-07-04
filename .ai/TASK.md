@@ -1,162 +1,146 @@
 # TASK
 
 ## Objective
-Module 3 (Academic): API routes for `faculty_allocation`
-(`/api/v1/faculty-allocation`) and `timetable_periods`
-(`/api/v1/timetable-periods`), following the existing
-`/api/v1/classes` pattern (`235aa8b`). Closes the gap `576ca6b`
-flagged: nothing could populate these tables via any real API yet, so
-`attendanceService`'s newly-wired "scheduled staff member" check was
-real code with no real way to become true. No UI — checked first
-(see below), nothing invents one.
+Module 4 (Attendance): API routes for `attendance_sessions` —
+`/api/v1/attendance` — wiring `attendanceService.markAttendance` and
+its two reads, following Module 3's route/error-mapping conventions
+(`routes/classes.js`, `235aa8b`; `routes/facultyAllocation.js`,
+`e36bfb8`). This is the last piece needed to prove, end-to-end from a
+real HTTP request, that all three of BusinessRules.md's eligible
+attendance markers actually work — the "scheduled staff" leg in
+particular, closed at the service layer in `576ca6b` but never
+exercised through a route until now.
 
 ## Grounding (read before assuming any route shape)
-- `.ai/RESULT.md`/`.ai/TASK.md` (`8b66a4c` — the service layer this
-  needs): `academicService.js` already had `assignFacultyAllocation`/
-  `getFacultyAllocation`/`listFacultyAllocationsForClass`/
-  `listFacultyAllocationsForStaff`/`removeFacultyAllocation`, but nothing
-  for `timetable_periods` beyond the single internal
-  `getTimetablePeriodByDayAndHour` lookup `576ca6b` added for
-  `attendanceService`'s own use — no way to *create* a period existed
-  anywhere in this codebase before this slice.
-- `routes/classes.js` (the named pattern): `requireResolvedTenant`
-  guard, a `*_BODY_FIELDS` snake<->camel array local to the route file,
-  `mapXServiceError` returning a boolean so the catch block can `throw
-  err` for anything unmapped, responses left in the repository's
-  native snake_case, `requireRole('principal')` on writes /
-  `requireAuth` on reads (the same conservative placeholder every
-  Module 3 route already carries, not a final decision).
-- A dedicated `Explore` search of `frontend/src` (this slice's own
-  research, not reused from an earlier one) confirmed: every "period"/
-  "slot" concept in the real, working frontend
-  (`TutorClass.jsx`/`HodDashboard.jsx`/`PrincipalDashboard.jsx`/
-  `StaffDashboard.jsx`/`TutorClassMonitor.jsx`) is derived by parsing
-  `classes.timetable_data`'s free-text grid client-side — zero
-  references anywhere to `academicService`, `timetable_periods`,
-  `faculty_allocation`, or any structured period/allocation UI. No
-  screen needs this API today — confirmed, not assumed. Matches the
-  precedent `timetable_data`'s own read-only, grid-based repoint
-  already set. **No UI built in this slice.**
+- `.ai/RESULT.md`/`.ai/TASK.md` (`576ca6b`) for `attendanceService.js`'s
+  exact function signatures, error classes, and — critically — the
+  fact that `markAttendance` requires **both** `actorUserId` and
+  `actorRole`, unlike every other service's create function (which
+  only needs `actorUserId`, for audit attribution). `assertCanMark`
+  needs the role to evaluate the HOD leg.
+- `routes/classes.js`/`routes/facultyAllocation.js` (the named
+  patterns): `requireResolvedTenant` guard, a `*_BODY_FIELDS`
+  snake<->camel array local to the route file, `mapXServiceError`
+  returning a boolean so the catch block can `throw err` for anything
+  unmapped, responses left in the repository's native snake_case.
+- `attendanceRepository.js`/the Module 4 first slice (`49c8b4b`):
+  `attendance_sessions` is soft-delete only, and no `removeX`/`softDelete`
+  wrapper exists anywhere above the repository layer — there is
+  nothing for a `DELETE` route to call.
 
-## Key design decision: timetable_periods needed real CRUD added to academicService.js first, before any route could exist
-`576ca6b` only needed (and only built) a single read lookup for
-`attendanceService`'s internal use — there was no `createTimetablePeriod`,
-no plain `getTimetablePeriod(id)`, no `listTimetablePeriods`, no
-`removeTimetablePeriod` anywhere. "List/manage periods" (this slice's
-own ask) isn't reachable without those, so this slice adds them to
-`academicService.js` first, same file, same reasoning `8b66a4c`
-already gave for faculty allocation living there (Architecture.md 2.5
-lists both "faculty allocation" and "timetable" under AcademicService).
+## Key design decision: this route does NOT use requireRole('principal') for writes — the one real departure from every other Module 3/4 route
+Every route so far (`classes`, `staff`, `students`,
+`faculty-allocation`, `timetable-periods`) gates writes with
+`requireRole('principal')` as a deliberately conservative placeholder,
+specifically *because* their underlying services have no
+fine-grained authorization logic of their own — the route is the only
+gate that exists. `attendanceService.markAttendance` is different: it
+already enforces BusinessRules.md's real rule itself (class tutor, HOD
+force-mark, or the staff member genuinely scheduled for the period —
+`assertCanMark`, `576ca6b`), throwing `AttendanceForbiddenError` for
+anyone else. Gating `POST /attendance` with `requireRole('principal')`
+on top of that would be actively wrong, not just redundant — it would
+lock out every actor BusinessRules.md actually names as eligible
+(ordinary teaching staff and class tutors are not principals),
+defeating the entire point of the service-layer work already done.
+`POST /attendance` uses `requireAuth` only (any authenticated tenant
+user may attempt to mark; the service decides who succeeds), with
+`AttendanceForbiddenError` mapped to a 403 — the real authorization
+decision lives in exactly one place, not duplicated or second-guessed
+at the route.
 
-## Key design decision: renamed the existing day/hour lookup to avoid a naming collision
-`576ca6b` named its lookup `getTimetablePeriod(client, collegeId,
-dayOfWeek, hourIndex)`. Every other `getX` in this file
-(`getClass`/`getFacultyAllocation`) takes a single `id` — the natural,
-consistent name for the new by-id lookup a route needs is
-`getTimetablePeriod(client, id)`, which collides with the existing
-three-argument function. Resolved by renaming the existing lookup to
-`getTimetablePeriodByDayAndHour` (more explicit about what it actually
-does anyway) and adding the simple by-id `getTimetablePeriod(client,
-id)` fresh, keeping the by-id convention consistent across the file
-rather than making the new function the oddly-named one.
-`attendanceService.js`'s call site and its own test file's mocks were
-updated to the new name — verified live and via the full unit-test
-suite that nothing was left calling the old name silently with the
-wrong arguments (a real risk here: JS doesn't enforce arity, so a
-stale call to the renamed 4-argument-shaped function against the new
-1-argument function would have silently misbehaved rather than
-throwing).
+## Key design decision: POST returns 200, not 201
+`markAttendance` is a real create-or-update (mark-or-re-mark) action —
+`StaffDashboard.jsx`'s own "Mark Attendance"/"Update Attendance"
+button is the same handler either way (per `576ca6b`'s own grounding).
+The service's return value doesn't distinguish which happened, so
+there's no clean signal to key a conditional 201-vs-200 off of without
+changing `markAttendance`'s own contract, which this slice doesn't do
+— that function is already built, tested, and live-verified;
+touching it isn't this slice's job. `200` uniformly for both branches
+is the honest, simplest choice.
 
-## Key design decision: removeTimetablePeriod maps the FK RESTRICT case to a real domain error
-Deleting a `timetable_periods` row still referenced by a
-`faculty_allocation` row hits Postgres's default RESTRICT (no `ON
-DELETE` override exists — house convention, per the migration's own
-`.ai/TASK.md`) and raises a real `23503` on
-`faculty_allocation_period_id_fkey`. `removeTimetablePeriod` maps this
-to `TimetablePeriodInUseError` (409 at the route layer) rather than
-letting a raw constraint-violation 500 reach a caller — this is the
-one `removeX` in `academicService.js` that needs a `try/catch` at all,
-since nothing else in this schema is referenced the way
-`faculty_allocation` FKs into `timetable_periods`.
-`removeFacultyAllocation` needed no equivalent change: nothing FKs
-into `faculty_allocation`.
+## Key design decision: no DELETE route
+`attendance_sessions` is soft-delete only per BusinessRules.md's AI
+section, and real deletion is an approval-gated action ("even with
+approval") — `WorkflowService` (Module 8) doesn't exist yet.
+`attendanceService.js` itself exposes no `softDelete`/`removeX`
+wrapper over `attendanceRepository.softDelete` — nothing exists for a
+route to call. Building one now would mean inventing both the service
+wrapper and the approval gate in the same breath, the same "don't
+invent structure nobody asked for yet" restraint applied everywhere
+else in this codebase.
 
-## Key design decision: no plain "list all" faculty-allocation route
-`academicService.js` only ever exposed the two lookups a known
-consumer needs (`listFacultyAllocationsForClass`/
-`listFacultyAllocationsForStaff`), matching its own established
-"wrap only what's needed" precedent. `GET /faculty-allocation`
-requires exactly one of `class_id`/`staff_user_id` as a query
-parameter (400 if neither or both), dispatching to the matching
-service function — no unscoped, tenant-wide listing exists at either
-layer.
+## Key design decision: GET /attendance requires both class_id and session_date
+Unlike `facultyAllocation.js`'s list route (exactly one of two
+filters, an either/or choice), `attendanceService.listAttendanceSessionsForClassAndDate`
+takes both `classId` and `sessionDate` as required positional
+arguments — there's no service function that accepts just one. The
+route validates both are present (400 otherwise) rather than
+inventing a third listing shape the service doesn't support.
 
 ## Files likely affected
-- `backend/src/services/academicService.js` (extended: timetable_periods
-  CRUD + the getTimetablePeriodByDayAndHour rename)
-- `backend/src/services/attendanceService.js` (call site updated for
-  the rename)
-- `backend/src/routes/facultyAllocation.js` (new)
-- `backend/src/routes/timetablePeriods.js` (new)
-- `backend/src/tenantApp.js` (two new routers wired in)
-- `backend/tests/academic-service.test.js` (extended)
-- `backend/tests/attendance-service.test.js` (mocks renamed)
-- `backend/tests/faculty-allocation.test.js` (new)
-- `backend/tests/timetable-periods.test.js` (new)
+- `backend/src/routes/attendance.js` (new)
+- `backend/src/tenantApp.js` (one new `require` + one new `app.use`)
+- `backend/tests/attendance.test.js` (new)
 
 ## Exact changes
 
-**`academicService.js`**: three new error classes
-(`TimetablePeriodValidationError`, `TimetablePeriodSlotTakenError`,
-`TimetablePeriodInUseError`) and four new functions —
-`createTimetablePeriod`, `getTimetablePeriod(id)`,
-`listTimetablePeriods`, `removeTimetablePeriod` — same
-validate/map-constraints/audit-log shape as every other write in this
-file. `getTimetablePeriodByDayAndHour` is the renamed prior lookup.
+**`routes/attendance.js`**:
+- `ATTENDANCE_BODY_FIELDS`: `class_id`/`session_date`/`hour_index`/
+  `absent_student_ids`/`total_students` <-> their camelCase service
+  fields. `college_id` absent (always `req.collegeId`).
+  `absent_student_ids` passed through as the raw JSON array
+  `express.json()` already parsed — `attendanceService.markAttendance`
+  is the one that `JSON.stringify`s it before the repository call, not
+  this route.
+- `mapAttendanceServiceError`: `AttendanceValidationError` -> 400;
+  `AttendanceClassNotFoundError` -> 404;
+  `AttendanceTimetableNotApprovedError`/`AttendanceLockedError`/
+  `AttendanceSessionConflictError` -> 409 (same "resource not in the
+  right state" semantics `ClassNameConflictError`/
+  `FacultyAllocationPeriodTakenError` already use 409 for elsewhere);
+  `AttendanceForbiddenError` -> 403.
+- `POST /attendance` (`requireAuth`) -> `markAttendance`, with
+  `actorUserId: req.jwtClaims.sub` **and** `actorRole:
+  req.jwtClaims.role` — the one route in this codebase that needs to
+  pass the actor's role into a service call for a real authorization
+  decision, not just RBAC gating. Returns 200.
+- `GET /attendance/:id` (`requireAuth`) -> `getAttendanceSession`, 404
+  if `null`.
+- `GET /attendance` (`requireAuth`) -> `listAttendanceSessionsForClassAndDate`,
+  requiring both `class_id` and `session_date` query params (400 if
+  either missing).
+- No `DELETE` route (see design decision above).
 
-**`routes/facultyAllocation.js`**: `POST /faculty-allocation` ->
-`assignFacultyAllocation`, `GET /faculty-allocation/:id` ->
-`getFacultyAllocation` (404 if null), `GET /faculty-allocation` ->
-`listFacultyAllocationsForClass`/`listFacultyAllocationsForStaff`
-dispatched on `class_id`/`staff_user_id` query params (400 if neither
-or both), `DELETE /faculty-allocation/:id` -> `removeFacultyAllocation`
-(204/404). Error mapping: `FacultyAllocationValidationError` -> 400;
-`FacultyAllocationPeriodTakenError`/`FacultyAllocationStaffConflictError`
--> 409; `FacultyAllocationClassNotFoundError`/
-`FacultyAllocationPeriodNotFoundError`/
-`FacultyAllocationStaffNotFoundError` -> 404.
-
-**`routes/timetablePeriods.js`**: `POST /timetable-periods` ->
-`createTimetablePeriod`, `GET /timetable-periods/:id` ->
-`getTimetablePeriod`, `GET /timetable-periods` -> `listTimetablePeriods`
-(limit/offset passthrough, same as classes.js), `DELETE
-/timetable-periods/:id` -> `removeTimetablePeriod`. Error mapping:
-`TimetablePeriodValidationError` -> 400;
-`TimetablePeriodSlotTakenError`/`TimetablePeriodInUseError` -> 409.
-
-**`tenantApp.js`**: both routers registered in the same block as
-`classes`, after `tenantMiddleware`.
+**`tenantApp.js`**: `require('./routes/attendance')` +
+`app.use(createAttendanceRouter())`, same block/order as every other
+Module 3/4 route.
 
 ## Acceptance criteria
-- All endpoints reachable against a real running server + live
-  Postgres, not mocked request/response pairs.
-- Every domain error from `academicService.js` maps to the correct
-  HTTP status, proven with genuine Postgres constraint violations
-  (duplicate slot, duplicate class+period, staff double-booking, all
-  three FK violations, the FK-RESTRICT-on-delete case) — not
-  hand-thrown ones.
-- The "shared period" design (two different classes' allocations
-  pointing at the same `timetable_periods` row) works through the
-  route layer, not just the repository/service layers already proven
-  in prior slices.
-- Deleting a period still referenced by a `faculty_allocation` row
-  returns 409, not a 500.
-- `GET /faculty-allocation` requires exactly one of
-  `class_id`/`staff_user_id`; both or neither is a 400.
-- RBAC and cross-tenant isolation match every other Module 3 route
-  exactly.
-- Audit log entries correctly attributed on every create.
-- No UI — confirmed via dedicated frontend research this slice ran
-  itself, not assumed.
-- Full backend suite passes with no regressions (268 tests: 221
-  pre-existing + 47 new).
+- All three of BusinessRules.md's eligible markers work through a
+  real HTTP request against a live Postgres: class tutor, HOD
+  force-mark, and — the key proof this slice exists for — the staff
+  member genuinely scheduled for the period, verified against a real
+  seeded `faculty_allocation`/`timetable_periods` row, not a mock.
+- An unrelated staff member (none of the three) gets a real 403, not
+  a 500 or a silent 200.
+- `AttendanceTimetableNotApprovedError`/`AttendanceLockedError`/
+  `AttendanceSessionConflictError` all map to 409, proven live
+  (including the locked-session case, reached the same way
+  `attendanceService.js`'s own tests reach it: a direct `UPDATE`
+  against `locked_at`, since no real code path can set it yet).
+- Re-marking the same `(class, date, hour)` updates the existing row
+  (same id), proven through the route, not just the service layer
+  already proven in `576ca6b`.
+- `GET /attendance` requires both `class_id` and `session_date`; both
+  missing and either-missing all correctly 400.
+- `POST /attendance` requires only authentication, not a specific
+  role — proven by an HOD and an ordinary scheduled staff member (not
+  a principal) both successfully marking attendance.
+- Cross-tenant isolation and audit attribution (including the
+  `attendance_marked` vs `attendance_remarked` action-name
+  distinction) match every other Module 3/4 route's own proof.
+- No `DELETE /attendance` route exists.
+- Full backend suite passes with no regressions (285 tests: 268
+  pre-existing + 17 new).
