@@ -311,6 +311,95 @@ export default function TutorClass() {
     }
   };
 
+  // Students: repointed to the real GET /api/v1/students
+  // (routes/students.js) — StudentEditorModal.jsx's own save/create
+  // path (c9b6248) has assumed this real shape for a while; this is
+  // the read side (the roster this whole page is built around)
+  // finally catching up, closing the gap Finance's own UI slice
+  // (e4eb36b) found: student objects without a real `id` can't
+  // resolve fee_payments.student_id, so the Finance step in
+  // StudentEditorModal could never actually load anything for a
+  // student opened from here.
+  //
+  // Fetched independently of the class-settings call below — no
+  // longer a single Promise.all gated on both succeeding. That old
+  // gate meant the student fetch's own success was worthless unless
+  // /api/tutor/class-settings *also* succeeded, and that endpoint has
+  // no real backend route at all (confirmed via grep — same
+  // "TutorClass.jsx's main timetable display" gap dbe8380 already
+  // flagged, unrepointed for the identical reason: no "find my own
+  // class settings" endpoint exists yet). Keeping the old combined
+  // gate would have made this repoint a no-op in practice — the
+  // students call would succeed, but the settings call would always
+  // still fail, and the catch block would keep discarding the real
+  // data in favor of FALLBACK_STUDENTS forever.
+  //
+  // isFallback now means specifically "the student roster came from
+  // FALLBACK_STUDENTS," not "did every data source on this page
+  // succeed" — the only meaning this slice's own scope (repoint the
+  // student fetch) actually asked to change. Every isFallback-gated
+  // action elsewhere in this file (handleDeleteStudent's offline
+  // filter, handleAcceptInvitation/handleRejectInvitation's local-only
+  // fallback) still calls its own equally-dead prototype endpoint
+  // either way — real students now correctly route those actions into
+  // their non-fallback branch, which will surface a real fetch error
+  // instead of a graceful "(offline)" message. That's an honest
+  // consequence of this repoint making real data reachable for the
+  // first time, not a regression this slice introduces or is
+  // responsible for fixing — those endpoints were never repointed and
+  // aren't in this slice's scope. See .ai/TASK.md.
+  //
+  // No class-scoping: GET /api/v1/students has no filter beyond
+  // limit/offset (students carries no class_id FK at all yet — the
+  // same restated gap Module 5's own Finance slices already flagged
+  // repeatedly), so this shows every student in the tenant, not just
+  // this tutor's own class roster. Flagged, not worked around.
+  const fetchStudents = useCallback(async () => {
+    try {
+      const res = await fetch('/api/v1/students?limit=200', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) throw new Error('API error');
+      const studData = await res.json();
+      const normalized = (Array.isArray(studData) ? studData : []).map(s => ({
+        ...s,
+        name: s.name || s.full_name || '',
+        roll_number: s.roll_number || s.roll_no || '',
+        gender: s.gender || 'Male',
+        entry_type: s.entry_type || 'Regular',
+        attendance: s.attendance || parseInt(s.sem2_attendance) || parseInt(s.sem1_attendance) || 0,
+        sem2_grade: s.sem2_grade || s.sem1_grade || '',
+        sem2_result: s.sem2_result || s.sem1_result || 'Pass'
+      }));
+      setStudents(normalized);
+      setIsFallback(false);
+    } catch (err) {
+      setStudents(FALLBACK_STUDENTS);
+      setIsFallback(true);
+    }
+  }, [accessToken]);
+
+  // Class settings / live timetable: still the dead
+  // /api/tutor/class-settings prototype endpoint — deliberately not
+  // repointed in this slice, see the comment above fetchStudents.
+  // Independent try/catch (not Promise.all'd with the student fetch)
+  // so its guaranteed failure can never mask the student fetch
+  // succeeding.
+  const fetchClassSettings = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/tutor/class-settings?tutor_id=${selectedTutorId}`);
+      if (!res.ok) throw new Error('API error');
+      const settData = await res.json();
+      setSettings(settData.settings || FALLBACK_SETTINGS);
+      setLivePresToday(settData.settings?.present_today || 0);
+      setLivePresHour(settData.settings?.present_this_hour || 0);
+    } catch (err) {
+      setSettings(FALLBACK_SETTINGS);
+      setLivePresToday(0);
+      setLivePresHour(0);
+    }
+  }, [selectedTutorId]);
+
   const fetchData = useCallback(async () => {
     if (!selectedTutorId) return;
     if (selectedTutorId.startsWith('unassigned_')) {
@@ -327,38 +416,9 @@ export default function TutorClass() {
       return;
     }
     setLoading(true);
-    try {
-      const [studRes, settingsRes] = await Promise.all([
-        fetch(`/api/tutor-students?tutor_id=${selectedTutorId}`),
-        fetch(`/api/tutor/class-settings?tutor_id=${selectedTutorId}`)
-      ]);
-      if (studRes.ok && settingsRes.ok) {
-        const studData = await studRes.json();
-        const settData = await settingsRes.json();
-        const normalized = (studData.students || []).map(s => ({
-          ...s,
-          name: s.name || s.full_name || '',
-          roll_number: s.roll_number || s.roll_no || '',
-          gender: s.gender || 'Male',
-          entry_type: s.entry_type || 'Regular',
-          attendance: s.attendance || parseInt(s.sem2_attendance) || parseInt(s.sem1_attendance) || 0,
-          sem2_grade: s.sem2_grade || s.sem1_grade || '',
-          sem2_result: s.sem2_result || s.sem1_result || 'Pass'
-        }));
-        setStudents(normalized);
-        setSettings(settData.settings || FALLBACK_SETTINGS);
-        setLivePresToday(settData.settings?.present_today || 0);
-        setLivePresHour(settData.settings?.present_this_hour || 0);
-        setIsFallback(false);
-      } else throw new Error('API error');
-    } catch (err) {
-      setStudents(FALLBACK_STUDENTS);
-      setSettings(FALLBACK_SETTINGS);
-      setIsFallback(true);
-    } finally {
-      setLoading(false);
-    }
-  }, [selectedTutorId]);
+    await Promise.all([fetchStudents(), fetchClassSettings()]);
+    setLoading(false);
+  }, [selectedTutorId, fetchStudents, fetchClassSettings]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 

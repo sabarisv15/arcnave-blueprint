@@ -1,119 +1,94 @@
 # TASK
 
-## Objective
-Module 5 (Finance), fifth vertical slice: UI only. API layer already
-done (`77dfcd0`) — 5 endpoints under `/api/v1/finance/...`.
+## Objective (Slice A of two independent follow-ups)
+Repoint `TutorClass.jsx`'s student-roster fetch to the real
+`GET /api/v1/students` — `StudentEditorModal.jsx` was repointed to
+`/api/v1/students` in Module 1 (`c9b6248`), but its only real caller,
+`TutorClass.jsx`, never was. Student objects it passes into the modal
+lack a real `id`, found while building Finance's UI step (`e4eb36b`).
+Verify Finance's step in the modal now actually receives a real id and
+works end-to-end.
 
-## Scope (this session's own instruction)
-- Add a Finance section to the existing student profile screen, "find
-  wherever Academic/Attendance already added their sections there,
-  same pattern."
-- List fee categories for the student with paid/not-paid status,
-  calling the fee_payments list-by-student endpoint.
-- Toggle/mark paid-not-paid action, calling the mark-paid endpoint.
-- No fee-structure creation/management UI — separate admin screen,
-  out of scope.
-- Match existing profile section styling/conventions exactly.
+## Grounding
+Confirmed via grep before touching anything: `/api/tutor-students`,
+`/api/tutor/class-settings`, `/api/tutor/live-attendance`,
+`/api/tutor/invitations/*` all have **zero** matching routes anywhere
+in `backend/src/routes/` — every one is a dead prototype endpoint that
+always 404s. This means, today, `fetchData`'s existing
+`Promise.all([studRes, settingsRes])` gate (`if (studRes.ok && settingsRes.ok)`)
+**always** falls through to its catch block — every real user of this
+app has always seen `FALLBACK_STUDENTS`, never real data, since Module 1.
 
-## Pre-check: the premise didn't hold — surfaced, not guessed past
-Before writing anything, searched for "wherever Academic/Attendance
-already added their sections" on a student profile screen. It doesn't
-exist:
-- `frontend/src/pages/Profile.jsx` (routes `/profile`, `/profile/:username`)
-  is a **staff/tutor** profile — staff_id, department, workload, linked
-  classes. No student fields, no Academic/Attendance sections.
-- `frontend/src/components/StudentEditorModal.jsx` is the only thing
-  literally titled "Edit Student Profile," but it's a create/edit
-  wizard for a student's own master-data fields, not a read view. It
-  has an "Academic" *step* (prior SSLC/HSC/ITI marks — Module 1's own
-  meaning of "academic," not Module 3's timetable/curriculum), but no
-  "Attendance" step at all.
-- No dedicated route/component anywhere shows a single student's
-  profile with drill-down sections fed from real APIs — `TutorClass.jsx`
-  only ever opens `StudentEditorModal` for editing.
+`dbe8380` already repointed this file's `deptClasses` dropdown (HOD's
+department-classes selector) to `GET /api/v1/classes`, and explicitly
+flagged the main student roster (`fetchData`) and
+`TutorClassMonitor.jsx` as out of scope for that slice. This session's
+task is exactly that flagged gap.
 
-Asked the user directly rather than guessing which surface to extend
-(a wrong guess here means building UI in the wrong place entirely, not
-a small correction). Chosen: **`StudentEditorModal`'s step wizard** —
-add a 5th step, matching the existing step-tab pattern, even though the
-modal is otherwise an edit wizard rather than a read view.
+## The blocking design problem, found and solved
+Repointing only the student half of `fetchData` while keeping the
+existing combined `Promise.all` gate would have been a no-op: the
+settings call (`/api/tutor/class-settings`) has no real route and will
+never succeed, so `if (studRes.ok && settingsRes.ok)` would still
+always take the catch branch and discard real student data in favor of
+`FALLBACK_STUDENTS`, forever. Fixed by splitting `fetchData` into two
+independent, separately-try/caught functions — `fetchStudents()`
+(repointed, real) and `fetchClassSettings()` (unchanged, still dead) —
+run via `Promise.all([fetchStudents(), fetchClassSettings()])` but no
+longer gating each other's success.
 
 ## Key design decisions
-- **`BASE_STEPS` (unchanged: Upload Documents/Personal/Academic/Career
-  Info) + a conditionally-appended `'Finance'` step**, computed as
-  `const steps = isEditMode ? [...BASE_STEPS, { label: 'Finance' }] : BASE_STEPS`.
-  Finance never appears when creating a new student — `fee_payments.student_id`
-  is a real FK to `students.id`, and a new student has no id yet, same
-  "no id yet, nothing to fetch" reasoning every other step's data
-  being local form state already reflects.
-- **Two real reads, not one**, even though this session's own framing
-  names only "the fee_payments list-by-student endpoint":
-  `fee_payments` has no `fee_category`/`amount` columns of its own
-  (only a `fee_structure_id` FK — c1b7aac's ERD), and there is no
-  GET-by-id for a single fee_structure (`77dfcd0`'s own explicit scope
-  decision), so a human-readable category name can only come from also
-  reading `GET /finance/fee-structures` (the existing plain, unscoped
-  list, `?limit=200`). Merged client-side: a fee category with no
-  `fee_payments` row yet defaults to `'not_paid'` — a row only exists
-  once a mark has actually been made (`financeService.js`'s own file
-  comment), so "no row" and "marked not paid" are indistinguishable,
-  and treating an unmarked fee the same as an explicitly-unpaid one is
-  the correct default.
-- **`student.id` (not `student._id || student.id`) gates whether the
-  Finance step can actually fetch anything.** Every real backend row
-  carries `id` (every migration's PK column); `_id` is specifically
-  the prototype-era field `FALLBACK_STUDENTS`/`/api/tutor-students`
-  still use, since `TutorClass.jsx` (this modal's only real caller)
-  hasn't been repointed to `/api/v1/students` yet. When `student.id` is
-  missing, the Finance step shows a flagged "not available" message
-  instead of firing a fetch with a bogus/absent id — same "correct
-  given the real API, not yet reachable with real data" pattern
-  `32f61bb`'s own UI slice already established for a different reason.
-- **Toggle button styling reuses this file's own existing
-  emerald/slate verified-toggle pattern** (the `phoneVerified`/
-  `parentPhoneVerified` buttons a few steps earlier) rather than
-  inventing a new visual language for "on/off."
-- **RBAC is not duplicated client-side.** The mark endpoint is
-  `requireRole('principal')`-gated (`77dfcd0`'s own conservative
-  placeholder). The toggle button is shown to every role; a
-  non-principal actor gets a real 403 surfaced via the existing
-  `showToast(err.message, 'danger')` error path, same as every other
-  fetch failure in this file — no new client-side authorization logic
-  invented to pre-empt it.
+- **`isFallback` now means "the student roster came from
+  `FALLBACK_STUDENTS`,"** not "did every data source on this page
+  succeed." This is the one thing this slice's own scope (repoint the
+  student fetch) asked to change. Every other `isFallback`-gated action
+  in this file (`handleDeleteStudent`'s offline filter,
+  `handleAcceptInvitation`/`handleRejectInvitation`'s local-only
+  fallback) still targets its own equally-dead prototype endpoint
+  either way — with real students now loaded, those actions correctly
+  route into their non-fallback branch, which will surface a real
+  fetch error instead of a graceful "(offline)" message. This is an
+  honest consequence of making real data reachable for the first time,
+  not a regression introduced or owed to this slice — those endpoints
+  were never repointed and aren't in scope here. Flagged, not silently
+  left for someone to discover as a surprise later.
+- **No class-scoping**: `GET /api/v1/students` has no filter beyond
+  `limit`/`offset` — `students` carries no `class_id` FK at all
+  (restated gap, every prior Finance slice already flagged this
+  repeatedly for its own reasons). This repoint necessarily shows every
+  student in the tenant, not just this tutor's own class roster.
+  `?limit=200` is a generous, flagged cap, same as Finance's own UI
+  step used for its unscoped fee-structures list.
+- **Real students will show `0%` attendance and blank grades** — the
+  normalization's existing fallbacks (`s.attendance || ... || 0`,
+  `s.sem2_grade || ... || ''`) already handle this gracefully; `students`
+  carries no attendance/grade columns (that's Module 4's
+  `attendance_sessions`, not joined here). Not a bug introduced by this
+  repoint — an existing, honest gap the pre-existing code already
+  tolerates.
+- **`handleDeleteStudent`'s DELETE call remains on the dead
+  `/api/tutor-students/:id` endpoint**, untouched — out of scope, same
+  as `dbe8380`'s own scope boundary. With real students now loaded
+  (non-fallback), clicking delete will surface a real fetch failure
+  instead of the previous always-taken offline branch — again, an
+  honest exposure of an existing gap, not a new one.
 
 ## Files affected
-- `frontend/src/components/StudentEditorModal.jsx`
+- `frontend/src/pages/TutorClass.jsx`
 
 ## Verification
-- `npm run build` (frontend): succeeds, all 1510 modules transform, no
-  errors.
-- Started the real Vite dev server and loaded the app in headless
-  Chrome (`chrome.exe --headless --screenshot`) — confirms the app
-  renders a real frame (login screen), not blank/broken, after this
-  change.
-- **No interactive click-through of the Finance step itself**: no
-  Playwright/browser-automation tooling is installed in this project,
-  and the real interactive path is upstream-blocked regardless —
-  `TutorClass.jsx` is still on `/api/tutor-students` (unrepointed), so
-  there is no live route today that opens this modal with a real
-  `student.id`. Same limitation `32f61bb`'s own UI slice documented.
-- **Live API-shape proof instead** (same substitute technique
-  `32f61bb` used): seeded a real tenant + student + two real
-  `fee_structures` rows against the live `docker-compose` Postgres,
-  then issued the *exact* requests `fetchFeeData`/
-  `handleToggleFeePayment` make (same URLs, headers, body shapes) —
-  confirmed the merge defaults an unmarked category to `not_paid`,
-  marking paid returns 200 and the row re-fetches as `paid`, and
-  toggling back to `not_paid` re-marks the same row (not a duplicate).
-- No backend files touched this slice.
-
-## Flag: fee-structure admin UI needed as a separate follow-up slice
-Per this session's own explicit ask. `POST`/`PUT /finance/fee-structures`
-exist at the API layer (`77dfcd0`) but have **no UI at all** — there is
-currently no way for anyone to create or edit a fee category through
-this application short of a direct API call. This student-profile
-Finance step deliberately only *reads* `fee_structures` (to populate
-category names) and never creates/edits one, per this session's own
-explicit scope. A real admin screen (likely Principal-only, given the
-route's own RBAC) is a genuine, separate future slice — not attempted
-here.
+- `npm run build`: succeeds, all 1510 modules transform, no errors.
+- **Live, chained end-to-end proof** against the real `docker-compose`
+  Postgres (no browser-automation tooling installed in this project,
+  same limitation `e4eb36b` already documented): seeded a real tenant
+  with a tutor, a principal, a class, and a `fee_structures` row; created
+  a real student through `POST /api/v1/students` (the same path
+  `StudentEditorModal`'s save already uses); called the *exact*
+  `GET /api/v1/students?limit=200` request `fetchStudents()` now makes
+  and ran its own normalization function against the response —
+  confirmed the real UUID `id` survives untouched; took that id and
+  ran it through the *exact* two calls `StudentEditorModal`'s Finance
+  step makes (`fetchFeeData`), confirming a correct merge; then called
+  the *exact* mark-paid request, confirming `200` end-to-end. All
+  seeded data cleaned up afterward.
+- No backend files touched.
