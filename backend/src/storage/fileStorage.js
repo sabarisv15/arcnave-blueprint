@@ -29,9 +29,15 @@ function sanitizeFileName(fileName) {
 // must be equally collision-free, or the second upload would
 // overwrite the first version's bytes on disk while the DB still had
 // two distinct rows pointing at the same now-corrupted file).
+//
+// studentId is optional (documents.student_id is nullable as of
+// 1752800000000, for non-student files like generated reports) — a
+// missing studentId uses a fixed 'shared' path segment instead of
+// path.posix.join silently coercing undefined to the string
+// "undefined".
 function buildStoragePath({ collegeId, studentId, docType, fileName }) {
   const unique = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-  return path.posix.join(collegeId, studentId, docType, `${unique}-${sanitizeFileName(fileName)}`);
+  return path.posix.join(collegeId, studentId || 'shared', docType, `${unique}-${sanitizeFileName(fileName)}`);
 }
 
 function resolveAbsolutePath(relativePath) {

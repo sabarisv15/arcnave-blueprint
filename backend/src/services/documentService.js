@@ -57,9 +57,14 @@ function assertValidReviewStatus(status) {
 // default) — stricter than fee_structures.status, which does accept a
 // caller-supplied value at create. No forged initial state here: only
 // reviewDocument can ever move a document out of 'uploaded'.
+//
+// studentId is optional (documents.student_id is nullable as of
+// 1752800000000) — omitted for files not owned by one student, e.g.
+// ReportService's generated exports. Every existing per-student caller
+// is unaffected; this only widens what's allowed.
 async function uploadDocument(client, { collegeId, studentId, docType, fileName, mimeType, fileBuffer }, { actorUserId } = {}) {
-  if (!studentId || !docType || !fileName || !mimeType || !fileBuffer || !actorUserId) {
-    throw new DocumentValidationError('studentId, docType, fileName, mimeType, fileBuffer, and actorUserId are required');
+  if (!docType || !fileName || !mimeType || !fileBuffer || !actorUserId) {
+    throw new DocumentValidationError('docType, fileName, mimeType, fileBuffer, and actorUserId are required');
   }
 
   const storagePath = fileStorage.buildStoragePath({ collegeId, studentId, docType, fileName });

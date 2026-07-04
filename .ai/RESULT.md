@@ -1,37 +1,45 @@
 # RESULT
 
 ## Files changed
-- `docs/adr/ADR-018-Ledger-Style-Repositories.md` (new)
-- `backend/migrations/1752700000000_module-7-reports-schema.js` (new)
-- `backend/src/repositories/generatedReportRepository.js` (new)
+- `backend/migrations/1752800000000_documents-student-id-nullable.js` (new)
+- `backend/src/storage/fileStorage.js` (`studentId` optional)
+- `backend/src/services/documentService.js` (`studentId` optional)
+- `backend/src/generators/csvGenerator.js` (new)
+- `backend/src/services/reportService.js` (new)
+- `backend/tests/report-service.test.js` (new)
 
-## What was built
-`generated_reports`: tenant RLS, append-only (no `UPDATE`/`DELETE`
-grant, no `deleted_at`/`updated_at` — a row's outcome is fully known at
-INSERT time since no background-job mechanism exists yet). Real FK to
-`documents(id)`, nullable for a failed generation. `status` has no DB
-default (always explicit, same as `fee_payments.status`).
-`generatedReportRepository.js`: `create`/`findById`/`list` only, no
-update/remove — matches the table's own grant.
-
-ADR-018 formalizes why this doesn't violate Architecture.md 2.7:
-`audit_log`/`generated_reports` are cross-cutting ledgers with no
-owning business-domain service, called directly (same pattern every
-service already uses for `auditLogRepository`), not "ReportService's
-domain repository." Sets precedent for `ApprovalHistory`/`ChatHistory`
-later.
+## Design correction found during live verification
+Original plan: on generation failure, write a `'failed'` ledger row
+then re-throw. Live-tested and wrong — `generateStudentExportReport`
+runs inside the caller's request-scoped transaction; re-throwing lets
+the surrounding rollback (every route in this codebase rolls back on a
+thrown error) undo the very ledger row the catch block just wrote.
+Fixed: on a generation/upload failure (not a `ReportValidationError`,
+which still throws before touching anything), the function **resolves**
+with the failed row instead — same "return the outcome, don't throw"
+contract `markFeePayment` already uses. Documented inline in
+`reportService.js`.
 
 ## Verification
-- Migration up/down/up against live Postgres; `\d generated_reports`
-  confirmed shape, FKs, RLS policy.
-- Throwaway script: 7/7 checks passed — completed + failed report
-  creation (JSONB round-trip, null `document_id` on failure),
-  `findById`, `list` (newest-first), and RLS proven through the real
-  `arcnave_app` role (not the admin/bypass role).
-- Full suite: 381/381, unchanged (no existing code touched).
+- Live: migration applied (`documents.student_id` confirmed nullable),
+  full `npm test` unaffected (381/381 before this slice's own tests).
+- Live throwaway script (deleted after use): happy path — real CSV
+  bytes round-tripped through disk via `documentService`, correct BOM/
+  header/rows, ledger row `completed` with `document_id` set, stored
+  document has `student_id IS NULL`. Failure path — forced
+  `studentService.listStudents` to throw, confirmed the function
+  resolves (not rejects) with `status: 'failed'`, `document_id: null`,
+  `error_message` set. Validation path — missing `collegeId` throws
+  `ReportValidationError` before any repository call.
+- `report-service.test.js` (mocked, committed): 7 cases covering the
+  above plus a `documentService.uploadDocument` failure. `csvGenerator`
+  tested directly (pure function, no mocking needed).
+- Full suite: 388/388 (381 + 7 new).
 
 ## Flags
-- No service/API/UI yet — next Module 7 slice.
-- `report_type`/`format` stay free text — `CsvExportModal.jsx` (the
-  only real export screen) is fully client-side with no backend
-  concept to ground a fixed set against yet.
+- No API/UI yet.
+- Only `student_export`/CSV this slice — Excel/PDF/Word generators and
+  other report types deferred until a real screen needs them.
+- `STUDENT_EXPORT_LIMIT = 5000` hardcoded — no real pagination; a
+  tenant with more students gets a truncated export (flagged, not
+  solved).

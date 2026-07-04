@@ -1,46 +1,49 @@
 # TASK
 
-## Objective (Module 7 — Reports — first slice)
-`generated_reports` migration + its own repository only. No
-service/API/UI.
+## Objective (Module 7 — Reports — second slice)
+`csvGenerator.js` (Generator Module, 2.6) + `reportService.js`. No
+API/UI.
 
-## Resolving the 2.7 contradiction (see ADR-018)
-Architecture.md 2.7 lists ReportService as having no repository of its
-own; 2.8 lists `GeneratedReports` as a dedicated table anyway. Same
-shape `audit_log`/`auditLogRepository.js` already has: a cross-cutting
-ledger with no owning business-domain service, called directly by
-whichever service needs it (not gated behind an "AuditLogService").
-`generated_reports` is that same category, not a violation — ADR-018
-formalizes it so Module 8 (ApprovalHistory) doesn't re-litigate this.
+## Real gap found and fixed: documents.student_id was NOT NULL
+A generated report (e.g. "export every student") isn't owned by one
+student the way a certificate is, but 2.6's flow requires
+DocumentService to store the bytes (CLAUDE.md rule 2 — no bypassing
+it). Module 6 scoped `documents.student_id NOT NULL` because that
+slice's own stated scope was student files only, not because every row
+must belong to a student (2.5 already frames DocumentService as owning
+"all files"). Fixed via a small migration
+(`1752800000000_documents-student-id-nullable.js`) dropping the
+constraint, `documentService.uploadDocument`'s `studentId` requirement
+relaxed to optional, and `fileStorage.buildStoragePath` using a
+`'shared'` path segment when absent. Every existing per-student caller
+is unaffected — this only widens what's allowed.
 
-## Shape decisions
-- Checked `CsvExportModal.jsx` (the only real "export" screen) — fully
-  client-side, no backend, no persistence at all. Confirms there's no
-  existing report-history concept to match; grounds `report_type`/
-  `format` as free text (nothing to normalize against yet).
-- Append-only, like `audit_log`: no `UPDATE`/`DELETE` grant, no
-  `deleted_at`, no `updated_at`. Reasoning: no background-job mechanism
-  exists (Architecture.md 3's own named gap), so ReportService's future
-  synchronous flow (`ReportModel → Generator → bytes →
-  DocumentService → Storage`, ADR-008) means a row's outcome
-  (`status`, `document_id`) is already known at the moment it's
-  created — no pending-then-updated transition to support.
-- `status` (`completed`/`failed`) has no DB default — always explicit
-  at insert time, same "no unattended default makes sense" reasoning
-  `fee_payments.status` already established.
-- `document_id` nullable FK to `documents(id)` — real FK now (unlike
-  `fee_payments.receipt_document_id`'s original gap), since
-  `documents` already exists. Null on a failed generation.
-- `parameters` JSONB NOT NULL DEFAULT `'{}'` — matches
-  `configurations.configuration`'s own JSONB convention.
+## Report type: student_export (CSV only)
+Checked `CsvExportModal.jsx` again — real column set, but using actual
+`students` table column names, not that modal's stale MongoDB-era
+aliases. Its "Attendance" section (attendance %, blood_group, dob)
+dropped: none of those three are real columns anywhere in this schema.
+No class-scoped export — `students` has no `class_id` column anywhere
+(checked before assuming otherwise); a flat, tenant-wide, hardcoded-
+limit (5000) export instead, same pragmatic cap
+`?limit=200` fetches already use elsewhere.
+
+No separate `audit_log` entry from `reportService.js` — `generated_reports`
+already is this action's audit record (ADR-018).
 
 ## Files
-- `docs/adr/ADR-018-Ledger-Style-Repositories.md` (new)
-- `backend/migrations/1752700000000_module-7-reports-schema.js` (new)
-- `backend/src/repositories/generatedReportRepository.js` (new)
+- `backend/migrations/1752800000000_documents-student-id-nullable.js` (new)
+- `backend/src/storage/fileStorage.js` (studentId optional)
+- `backend/src/services/documentService.js` (studentId optional)
+- `backend/src/generators/csvGenerator.js` (new)
+- `backend/src/services/reportService.js` (new)
 
 ## Verification
-- Live migration up/down/up against `docker-compose` Postgres.
-- Throwaway script exercising the repository for real (create incl.
-  failed-with-no-document case, findById, list, RLS via `arcnave_app`).
+- Migration up/down/up live.
+- Existing `document-service.test.js`/`documents.test.js` still green
+  (studentId-optional change shouldn't break per-student behavior).
+- Throwaway script: `generateStudentExportReport` end to end against
+  live DB — real CSV bytes round-trip through DocumentService, ledger
+  row `completed` + `document_id` set; a forced-failure path writes
+  `failed` + `error_message`, `document_id` null.
 - Full `npm test` regression.
