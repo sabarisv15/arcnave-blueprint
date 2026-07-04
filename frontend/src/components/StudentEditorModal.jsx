@@ -1,26 +1,26 @@
 import React, { useState, useEffect } from 'react';
 import { useToast, useAuth } from '../App';
-import { X, Check, ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
+import { X, Check, ChevronLeft, ChevronRight } from 'lucide-react';
+import DocumentPanel from './DocumentPanel';
 
 const BASE_STEPS = [
-  { label: 'Upload Documents' },
   { label: 'Personal' },
   { label: 'Academic' },
   { label: 'Career Info' }
 ];
 
-// Finance only makes sense once a student row actually exists to mark
-// fee payments against (fee_payments.student_id is a real FK to
-// students.id) — same "no id yet, nothing to fetch" reasoning that
-// keeps every other step's data local form state instead of a server
-// fetch. Appended, not inserted, so index math for every existing step
-// (including the `index > 1` early-steps-locked check below) is
-// unaffected.
+// Documents and Finance only make sense once a student row actually
+// exists to attach to (documents.student_id / fee_payments.student_id
+// are both real FKs to students.id) — same "no id yet, nothing to
+// fetch" reasoning that keeps every other step's data local form state
+// instead of a server fetch. Both appended, not inserted, so index math
+// for every existing step (including the `index > 0` early-steps-locked
+// check below) stays simple.
 
 export default function StudentEditorModal({ onClose, student, onSave }) {
 
   const { showToast } = useToast();
-  const { accessToken } = useAuth();
+  const { accessToken, user } = useAuth();
   const isEditMode = !!student;
   // Real backend rows always carry `id` (every repository's PK column,
   // per every migration in this schema) — unlike the prototype-era
@@ -32,7 +32,7 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
   // from "this is still prototype data" — see the Finance step's own
   // render branch below for what happens when it's null.
   const realStudentId = student && student.id ? student.id : null;
-  const steps = isEditMode ? [...BASE_STEPS, { label: 'Finance' }] : BASE_STEPS;
+  const steps = isEditMode ? [...BASE_STEPS, { label: 'Documents' }, { label: 'Finance' }] : BASE_STEPS;
   const [currentStep, setCurrentStep] = useState(0);
 
   // Form State
@@ -81,18 +81,11 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
   const [feeLoading, setFeeLoading] = useState(false);
   const [markingFeeStructureId, setMarkingFeeStructureId] = useState(null);
 
-  // Uploaded files list
-  const [uploadedFiles, setUploadedFiles] = useState({
-    marksheet10th: null,
-    marksheet12th: null,
-    marksheetIti: null,
-    marksheet1stSem: null,
-    marksheet2ndSem: null
-  });
-
-  const [isExtracting, setIsExtracting] = useState(false);
-  const [extractionProgress, setExtractionProgress] = useState(0);
-  const [extractionStatus, setExtractionStatus] = useState('');
+  // Documents step state — every document row for this student
+  // (GET /api/v1/documents?student_id=...), newest first. DocumentPanel
+  // itself reduces this to "latest per doc_type" — see its own comment.
+  const [documents, setDocuments] = useState([]);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
 
   // Populate fields if edit mode
   useEffect(() => {
@@ -185,9 +178,28 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
     }
   };
 
+  // Same lazy-fetch restraint as fetchFeeData above: only queried once
+  // the Documents step is actually viewed.
+  const fetchDocuments = async () => {
+    setDocumentsLoading(true);
+    try {
+      const headers = { Authorization: `Bearer ${accessToken}` };
+      const res = await fetch(`/api/v1/documents?student_id=${realStudentId}`, { headers });
+      if (!res.ok) throw new Error('Failed to load documents');
+      setDocuments(await res.json());
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setDocumentsLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (isEditMode && realStudentId && steps[currentStep] && steps[currentStep].label === 'Finance') {
       fetchFeeData();
+    }
+    if (isEditMode && realStudentId && steps[currentStep] && steps[currentStep].label === 'Documents') {
+      fetchDocuments();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep, realStudentId]);
@@ -225,62 +237,6 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
     } finally {
       setMarkingFeeStructureId(null);
     }
-  };
-
-  const handleFileChange = (field, fileName) => {
-    setUploadedFiles(prev => ({
-      ...prev,
-      [field]: fileName
-    }));
-    showToast(`Uploaded ${fileName} successfully!`, 'success');
-  };
-
-  const runDocumentExtraction = () => {
-    setIsExtracting(true);
-    setExtractionProgress(10);
-    setExtractionStatus('Uploading documents to AI OCR engine...');
-
-    const statuses = [
-      { progress: 30, text: 'Scanning SSLC & HSC marksheets...' },
-      { progress: 55, text: 'Extracting student name, parents, and address info...' },
-      { progress: 75, text: 'Reading ITI & semester grade percentages...' },
-      { progress: 90, text: 'Validating driving license and vehicle registration logs...' },
-      { progress: 100, text: 'AI parsing completed!' }
-    ];
-
-    let stepIdx = 0;
-    const interval = setInterval(() => {
-      if (stepIdx < statuses.length) {
-        setExtractionProgress(statuses[stepIdx].progress);
-        setExtractionStatus(statuses[stepIdx].text);
-        stepIdx++;
-      } else {
-        clearInterval(interval);
-        
-        // Auto-fill values
-        setRollNo('CS24' + Math.floor(100 + Math.random() * 900));
-        setFullName('Aravind Swamy');
-        setGender('Male');
-        setEntryType('Regular');
-        setEmisNumber('33021004521');
-        setUmisNumber('UM24009');
-        setEmail('aravind@arcnave.edu');
-        setPhone('9988776655');
-        setParentName('Swamy Nathan');
-        setParentPhone('9876543210');
-        setAddress('Plot 42, Green Gardens, Chennai');
-        setPincode('600020');
-        setMark10th('94.2%');
-        setMark12th('89.6%');
-        setMarkIti('82%');
-        setLicenseNumber('DL-TN07202400894');
-        setBikeNumber('TN-07-BY-1492');
-
-        setIsExtracting(false);
-        showToast('✨ AI OCR: Successfully extracted student details and vehicle credentials!', 'success');
-        setCurrentStep(1); // Advance to Personal info automatically
-      }
-    }, 500);
   };
 
   const handleNext = () => {
@@ -379,7 +335,7 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
             <button
               key={index}
               type="button"
-              disabled={index > 1 && (!rollNo || !fullName)}
+              disabled={index > 0 && (!rollNo || !fullName)}
               onClick={() => setCurrentStep(index)}
               className={`flex items-center gap-1.5 text-xs font-bold transition-all whitespace-nowrap px-3 py-1.5 rounded-lg ${
                 currentStep === index
@@ -400,181 +356,8 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
         {/* Wizard Form Body */}
         <div className="p-6 overflow-y-auto flex-grow space-y-6">
 
-          {/* STEP 0: UPLOAD DOCUMENTS */}
+          {/* STEP 0: PERSONAL */}
           {currentStep === 0 && (
-            <div className="space-y-6 animate-slide-up">
-              {isExtracting ? (
-                <div className="flex flex-col items-center justify-center py-12 space-y-4">
-                  {/* Pulsing AI Scanner Graphic */}
-                  <div className="relative">
-                    <div className="w-16 h-16 rounded-full border-2 border-indigo-500/20 border-t-indigo-500 animate-spin" />
-                    <div className="absolute inset-0 flex items-center justify-center text-indigo-650">
-                      <Sparkles className="w-5 h-5 animate-pulse" />
-                    </div>
-                  </div>
-                  <div className="text-center space-y-1 max-w-md">
-                    <h4 className="font-extrabold text-sm text-slate-800">AI OCR Document Extraction Active</h4>
-                    <p className="text-xs text-indigo-655 font-semibold">{extractionStatus}</p>
-                    <div className="w-48 h-1.5 bg-slate-100 rounded-full mx-auto overflow-hidden mt-3 border border-slate-200">
-                      <div className="h-full bg-indigo-500 rounded-full transition-all duration-300" style={{ width: `${extractionProgress}%` }} />
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-5">
-                  <div className="p-4 bg-indigo-50/40 border border-indigo-100 rounded-2xl flex items-start gap-3">
-                    <Sparkles className="w-5 h-5 text-indigo-650 flex-shrink-0 mt-0.5" />
-                    <div>
-                      <h4 className="text-xs font-black text-slate-805 text-indigo-950">AI Document Parser & OCR Reader</h4>
-                      <p className="text-[11px] text-slate-655 leading-relaxed font-semibold mt-1">
-                        Upload student marksheets below. The system automatically extracts name, EMIS registry numbers, parent phone, addresses, score percentages, and licensing details!
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    
-                    {/* 10th marksheet */}
-                    <div className="p-4 bg-slate-50 border border-slate-150 rounded-2xl flex flex-col justify-between">
-                      <div>
-                        <span className="text-[9px] font-extrabold uppercase text-slate-400">Secondary School Certificate</span>
-                        <h5 className="font-black text-xs text-indigo-950 mt-0.5">10th Marksheet *</h5>
-                      </div>
-                      <div className="mt-4">
-                        {uploadedFiles.marksheet10th ? (
-                          <span className="text-[10px] text-emerald-600 font-mono font-bold bg-emerald-50 px-2.5 py-1 rounded border border-emerald-100">
-                            ✓ {uploadedFiles.marksheet10th}
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => handleFileChange('marksheet10th', '10th_marksheet_swamy.pdf')}
-                            className="px-3 py-1.5 text-[10px] font-bold bg-white hover:border-slate-350 border border-slate-200 rounded-lg text-slate-605 cursor-pointer"
-                          >
-                            Choose File
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* 12th marksheet */}
-                    <div className="p-4 bg-slate-50 border border-slate-150 rounded-2xl flex flex-col justify-between">
-                      <div>
-                        <span className="text-[9px] font-extrabold uppercase text-slate-400">Higher Secondary Certificate</span>
-                        <h5 className="font-black text-xs text-indigo-950 mt-0.5">12th Marksheet</h5>
-                      </div>
-                      <div className="mt-4">
-                        {uploadedFiles.marksheet12th ? (
-                          <span className="text-[10px] text-emerald-600 font-mono font-bold bg-emerald-50 px-2.5 py-1 rounded border border-emerald-100">
-                            ✓ {uploadedFiles.marksheet12th}
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => handleFileChange('marksheet12th', '12th_marksheet_swamy.pdf')}
-                            className="px-3 py-1.5 text-[10px] font-bold bg-white hover:border-slate-350 border border-slate-200 rounded-lg text-slate-605 cursor-pointer"
-                          >
-                            Choose File
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* ITI Certificate */}
-                    <div className="p-4 bg-slate-50 border border-slate-150 rounded-2xl flex flex-col justify-between">
-                      <div>
-                        <span className="text-[9px] font-extrabold uppercase text-slate-400">Industrial Training Institute</span>
-                        <h5 className="font-black text-xs text-indigo-950 mt-0.5">ITI Certificate</h5>
-                      </div>
-                      <div className="mt-4">
-                        {uploadedFiles.marksheetIti ? (
-                          <span className="text-[10px] text-emerald-600 font-mono font-bold bg-emerald-50 px-2.5 py-1 rounded border border-emerald-100">
-                            ✓ {uploadedFiles.marksheetIti}
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => handleFileChange('marksheetIti', 'iti_transcript.pdf')}
-                            className="px-3 py-1.5 text-[10px] font-bold bg-white hover:border-slate-350 border border-slate-200 rounded-lg text-slate-605 cursor-pointer"
-                          >
-                            Choose File
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* 1st Sem marksheet */}
-                    <div className="p-4 bg-slate-50 border border-slate-150 rounded-2xl flex flex-col justify-between">
-                      <div>
-                        <span className="text-[9px] font-extrabold uppercase text-slate-400">Undergraduate Semester 1</span>
-                        <h5 className="font-black text-xs text-indigo-950 mt-0.5">1st Sem Marksheet</h5>
-                      </div>
-                      <div className="mt-4">
-                        {uploadedFiles.marksheet1stSem ? (
-                          <span className="text-[10px] text-emerald-600 font-mono font-bold bg-emerald-50 px-2.5 py-1 rounded border border-emerald-100">
-                            ✓ {uploadedFiles.marksheet1stSem}
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => handleFileChange('marksheet1stSem', 'ug_sem1_grades.pdf')}
-                            className="px-3 py-1.5 text-[10px] font-bold bg-white hover:border-slate-350 border border-slate-200 rounded-lg text-slate-605 cursor-pointer"
-                          >
-                            Choose File
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* 2nd Sem marksheet */}
-                    <div className="p-4 bg-slate-50 border border-slate-150 rounded-2xl flex flex-col justify-between">
-                      <div>
-                        <span className="text-[9px] font-extrabold uppercase text-slate-400">Undergraduate Semester 2</span>
-                        <h5 className="font-black text-xs text-indigo-950 mt-0.5">2nd Sem Marksheet</h5>
-                      </div>
-                      <div className="mt-4">
-                        {uploadedFiles.marksheet2ndSem ? (
-                          <span className="text-[10px] text-emerald-600 font-mono font-bold bg-emerald-50 px-2.5 py-1 rounded border border-emerald-100">
-                            ✓ {uploadedFiles.marksheet2ndSem}
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => handleFileChange('marksheet2ndSem', 'ug_sem2_grades.pdf')}
-                            className="px-3 py-1.5 text-[10px] font-bold bg-white hover:border-slate-350 border border-slate-200 rounded-lg text-slate-605 cursor-pointer"
-                          >
-                            Choose File
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                  </div>
-
-                  {/* Extract action */}
-                  {(uploadedFiles.marksheet10th || uploadedFiles.marksheet12th || uploadedFiles.marksheetIti || uploadedFiles.marksheet1stSem || uploadedFiles.marksheet2ndSem) && (
-                    <div className="p-4 bg-indigo-50 border border-indigo-150 rounded-2xl flex flex-col sm:flex-row justify-between items-center gap-4 animate-slide-up mt-4">
-                      <div>
-                        <h5 className="text-xs font-black text-indigo-950">AI Document Parser Ready</h5>
-                        <p className="text-[10px] text-indigo-500 font-semibold mt-0.5">Click extract to auto-fill name, EMIS, phone, address, marks, DL, and bike details.</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={runDocumentExtraction}
-                        className="px-4 py-2 bg-indigo-650 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm shadow-indigo-500/10 cursor-pointer"
-                      >
-                        <Sparkles className="w-4 h-4" /> Extract details
-                      </button>
-                    </div>
-                  )}
-
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* STEP 1: PERSONAL */}
-          {currentStep === 1 && (
             <div className="space-y-5 animate-slide-up">
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
                 <div>
@@ -688,8 +471,8 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
             </div>
           )}
 
-          {/* STEP 2: ACADEMIC */}
-          {currentStep === 2 && (
+          {/* STEP 1: ACADEMIC */}
+          {currentStep === 1 && (
             <div className="space-y-6 animate-slide-up">
               <div>
                 <h3 className="font-extrabold text-indigo-950 text-sm mb-1">Prior Academic Records</h3>
@@ -723,8 +506,8 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
             </div>
           )}
 
-          {/* STEP 3: CAREER */}
-          {currentStep === 3 && (
+          {/* STEP 2: CAREER */}
+          {currentStep === 2 && (
             <div className="space-y-6 animate-slide-up">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
@@ -762,6 +545,35 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
                   placeholder="Record observations, behavior notes, or counseling remarks..."
                 />
               </div>
+            </div>
+          )}
+
+          {/* STEP 3: DOCUMENTS (edit mode only — see the `steps` computation above) */}
+          {isEditMode && steps[currentStep] && steps[currentStep].label === 'Documents' && (
+            <div className="space-y-6 animate-slide-up">
+              <div>
+                <h3 className="font-extrabold text-indigo-950 text-sm mb-1">Documents</h3>
+                <p className="text-xs text-slate-500 font-bold">Certificates, ID proofs, and photo for this student.</p>
+              </div>
+
+              {!realStudentId ? (
+                <p className="text-xs text-slate-450 text-center py-6 font-medium">
+                  This student record isn't linked to a real backend profile yet, so documents aren't available here.
+                </p>
+              ) : documentsLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="w-8 h-8 border-2 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin" />
+                </div>
+              ) : (
+                <DocumentPanel
+                  studentId={realStudentId}
+                  documents={documents}
+                  accessToken={accessToken}
+                  onDocumentUpdate={fetchDocuments}
+                  canUpload={user?.role === 'principal'}
+                  canVerify={user?.role === 'principal'}
+                />
+              )}
             </div>
           )}
 
