@@ -1,118 +1,132 @@
 # RESULT
 
 ## Files changed
-- `backend/src/services/attendanceService.js` (patched)
 - `backend/src/services/academicService.js` (extended)
-- `backend/tests/attendance-service.test.js` (patched/extended)
+- `backend/src/services/attendanceService.js` (rename call site updated)
+- `backend/src/routes/facultyAllocation.js` (new)
+- `backend/src/routes/timetablePeriods.js` (new)
+- `backend/src/tenantApp.js` (two new routers wired in)
+- `backend/tests/academic-service.test.js` (extended, +11 subtests)
+- `backend/tests/attendance-service.test.js` (mocks renamed, no behavior change)
+- `backend/tests/faculty-allocation.test.js` (new, 20 subtests)
+- `backend/tests/timetable-periods.test.js` (new, 13 subtests)
 
 ## What changed, per file
-- `academicService.js`: added `timetablePeriodRepository` as a
-  dependency alongside `classRepository`/`facultyAllocationRepository`,
-  and two new thin, read-only functions: `getTimetablePeriod(client,
-  collegeId, dayOfWeek, hourIndex)` (wraps
-  `timetablePeriodRepository.findByCollegeDayAndHour`) and
-  `getFacultyAllocationForClassAndPeriod(client, classId, periodId)`
-  (wraps `facultyAllocationRepository.findByClassAndPeriod`). Both
-  return `null` when nothing exists, same convention as `getClass`/
-  `getFacultyAllocation`. The file-level comment was updated to
-  explain these exist specifically for `attendanceService.assertCanMark`'s
-  composition, not for any consumer of their own yet.
-- `attendanceService.js`: `assertCanMark` — previously verified only
-  the class tutor and HOD, with a long comment explaining why the
-  third BusinessRules.md-named actor ("the staff member scheduled for
-  that period") couldn't be verified — now verifies all three. It's
-  `async` now, takes `(client, cls, sessionDate, hourIndex, actorUserId,
-  actorRole)`, and when the actor is neither tutor nor HOD, converts
-  `sessionDate` to a day-of-week name (new `dayOfWeekName` helper),
-  looks up the shared `timetable_periods` row for
-  `(cls.college_id, dayOfWeek, hourIndex)` via
-  `academicService.getTimetablePeriod`, then looks up that
-  `(cls.id, period.id)`'s `faculty_allocation` row via
-  `academicService.getFacultyAllocationForClassAndPeriod` — if one
-  exists and its `staff_user_id` matches `actorUserId`, access is
-  granted. `markAttendance`'s call site now `await`s it. Comments
-  throughout (file header, `AttendanceForbiddenError`, `assertCanMark`)
-  updated to say all three actors are attempted, not two of three.
-- `attendance-service.test.js`: the two existing "rejected — not
-  tutor, not HOD" tests now mock `academicService.getTimetablePeriod`
-  returning `null` (needed since `assertCanMark` calls it whenever
-  neither short-circuit applies). Three new tests added: rejected when
-  a period exists but no allocation for this class; rejected when an
-  allocation exists but for a different staff member; and the
-  scheduled-staff success path (which also asserts the exact
-  `(collegeId, dayOfWeek, hourIndex)` and `(classId, periodId)`
-  arguments flow through correctly, including the date-to-day-name
-  conversion).
+- `academicService.js`: added `TimetablePeriodValidationError`,
+  `TimetablePeriodSlotTakenError`, `TimetablePeriodInUseError`, and
+  `createTimetablePeriod`/`getTimetablePeriod(id)`/
+  `listTimetablePeriods`/`removeTimetablePeriod` — the CRUD surface
+  `576ca6b` never needed (it only ever wanted one internal day/hour
+  lookup). Renamed that lookup, `getTimetablePeriod(collegeId,
+  dayOfWeek, hourIndex)` -> `getTimetablePeriodByDayAndHour`, freeing
+  `getTimetablePeriod(id)` for the standard by-id shape every other
+  `getX` in this file uses.
+- `attendanceService.js`: updated its one call site
+  (`assertCanMark`) and its own comments to the renamed function.
+- `routes/facultyAllocation.js`: five endpoints under
+  `/faculty-allocation`, mirroring `routes/classes.js`'s shape exactly
+  — snake<->camel body translation, `mapAcademicServiceError` covering
+  all five faculty-allocation error classes, the same RBAC placeholder.
+  `GET /faculty-allocation` requires exactly one of `class_id`/
+  `staff_user_id` (400 otherwise), dispatching to
+  `listFacultyAllocationsForClass`/`listFacultyAllocationsForStaff`.
+- `routes/timetablePeriods.js`: four endpoints under
+  `/timetable-periods`, same shape. `DELETE` maps the FK-RESTRICT
+  case (a period still referenced by a `faculty_allocation` row) to
+  409 via `TimetablePeriodInUseError`.
+- `tenantApp.js`: both routers registered alongside `classes`, same
+  block, same order (after `tenantMiddleware`).
 
-## A real timezone bug avoided by checking before writing any code
-Before writing `dayOfWeekName`, checked empirically whether
-`new Date(sessionDate).getDay()` was safe to use for a date-only ISO
-string. It is not, in general: `'YYYY-MM-DD'` parses to UTC midnight,
-but `.getDay()` reads the *local* calendar day of whatever timezone
-the Node process is running in — on a server west of UTC, that can
-read back the day *before* the intended one. Verified the fix instead:
-`Date.UTC(year, month - 1, day)` (components parsed directly out of
-the input string) + `.getUTCDay()` is immune to the running process's
-timezone. Confirmed concretely: `'2026-07-04'` -> `'Saturday'`,
-independent of local timezone. This is the same kind of "verify the
-pg/JS interaction empirically before trusting it" discipline that
-caught the `absentStudentIds` JSON-serialization bug in `82f8479` —
-worth continuing, not a one-off.
+## No UI in this slice — confirmed, not assumed
+Ran a dedicated `Explore` search of `frontend/src` before deciding
+this, rather than reusing an earlier slice's assumption. Every
+"period"/"slot" reference across `TutorClass.jsx`, `HodDashboard.jsx`,
+`PrincipalDashboard.jsx`, `StaffDashboard.jsx`, and
+`TutorClassMonitor.jsx` is derived by parsing
+`classes.timetable_data`'s free-text CSV grid client-side — zero
+references anywhere to `academicService`'s new functions,
+`timetable_periods`, `faculty_allocation`, or any structured
+period/allocation UI (no filenames like `*Period*`/`*Allocation*`
+either). Matches the precedent `timetable_data`'s own read-only,
+grid-based repoint already set (Module 3's fourth slice). No screen
+needs this API today.
+
+## A real risk caught by renaming, and how it was handled safely
+Renaming `getTimetablePeriod` (day/hour lookup) to
+`getTimetablePeriodByDayAndHour` is a genuinely dangerous kind of
+change in this codebase: JavaScript doesn't enforce function arity, so
+a stale caller still invoking the old name with `(collegeId,
+dayOfWeek, hourIndex)` — if a new `getTimetablePeriod(id)` existed
+under that same old name — would silently call the wrong function
+with the wrong argument count instead of throwing. Handled by grepping
+for every call site (`attendanceService.js`'s one real call, plus its
+own test file's five mocks) and updating all of them in the same
+change, then proving nothing was missed via the full unit-test suite
+(which would have failed loudly — `academicService.getTimetablePeriodByDayAndHour`
+being unmocked in a stubbed test hits a real, unstubbed function
+against a fake `{}` client, throwing) before ever touching the live
+database.
 
 ## Tests
-Two layers, same discipline as every prior slice touching this file.
+Two layers, same discipline as every prior slice.
 
-**Unit tests** (extended `attendance-service.test.js`, no DB): 20
-subtests total (17 existing, 2 updated to add the new mock, 3 new),
-all passing — the two "still correctly rejected" paths (no period
-found; period found but no allocation), the "allocated to someone
-else" rejection, and the scheduled-staff success path with exact
-argument assertions (`'2026-07-04'` -> `'Saturday'`, correct
-`classId`/`periodId` threading).
+**Unit tests** (extended `academic-service.test.js`): 11 new subtests
+covering `createTimetablePeriod` validation/success/conflict/passthrough
+error, the three passthrough reads
+(`getTimetablePeriod`/`getTimetablePeriodByDayAndHour`/
+`listTimetablePeriods`), and `removeTimetablePeriod`'s no-op/success/
+`TimetablePeriodInUseError` cases. `attendance-service.test.js`'s five
+existing mocks renamed to match; behavior unchanged, still 20 subtests
+passing.
 
-**Live verification** against the real, already-running Docker
-Postgres (`arcnave-blueprint-db-1` — up throughout this session, no
-restart needed this time). Seeded a real tenant with a tutor, a
-genuinely scheduled staff member, an unrelated random staff member, an
-`'Approved'` class, one real `timetable_periods` row (Saturday, Hour
-3), and one real `faculty_allocation` row linking that class+period to
-the scheduled staff member:
+**Live integration tests** against the real, already-running Docker
+Postgres (`arcnave-blueprint-db-1`, up throughout this session):
 
-- **The real gap, closed** — PASS: the genuinely scheduled staff
-  member (not the tutor, not an HOD) successfully marked attendance —
-  the exact capability `82f8479` documented as missing, now working
-  end-to-end against real data, not a mock.
-- **Still correctly rejected** — PASS: an unrelated staff member with
-  no `faculty_allocation` row for that period was rejected with
-  `AttendanceForbiddenError` — the gap is closed for the *right*
-  person, not thrown open for anyone.
-- **Scoped correctly to the exact period** — PASS: the same scheduled
-  staff member was rejected for a *different* hour on the same
-  class/day (no `timetable_periods` row existed for that hour in the
-  test) — proves the check doesn't grant blanket access once any one
-  allocation matches, and that the "no period found" path degrades to
-  a clean rejection rather than an error.
-- **No regression** — PASS: tutor access on the same class continued
-  to work exactly as before, unaffected by the new third check.
-- All seeded data cleaned up afterward.
+- `timetable-periods.test.js` (13 subtests, all passing): create +
+  snake_case response, validation (400), duplicate-slot conflict
+  (real `23505` on `timetable_periods_college_id_day_of_week_hour_index_key`
+  -> 409), get by id (200/404), list + limit, delete (204, then 404),
+  **delete-while-referenced** (a real `faculty_allocation` row seeded
+  directly, then the period delete attempt genuinely raises `23503`
+  on `faculty_allocation_period_id_fkey` -> 409, not a 500), RBAC
+  (403/401 on writes, 200 for staff reads, 401 unauthenticated reads),
+  cross-tenant isolation (same day/hour slot independently usable in
+  two tenants), and audit attribution.
+- `faculty-allocation.test.js` (20 subtests, all passing): create +
+  snake_case response, validation (400), the real duplicate
+  `(class_id, period_id)` conflict (409), the real staff
+  double-booking conflict across two different classes (409), all
+  three real FK violations (404 each), **the shared-period design
+  proven through the route layer** (a second class assigned a
+  different staff member for the identical period succeeds), get by
+  id (200/404), list requiring exactly one of `class_id`/
+  `staff_user_id` (400 for neither and for both), list scoped
+  correctly by each, delete (204, then 404), RBAC, cross-tenant
+  isolation, and audit attribution. One test-authoring bug was caught
+  and fixed during this work (not a route bug): the cross-tenant test
+  originally reused a class/period pair already consumed by an earlier
+  subtest in the same file, causing a real double-conflict and an
+  `undefined` id flowing into a follow-up request — fixed by seeding a
+  fresh, dedicated class/period for that one test.
 
-Ran the full backend suite (`npm test`): **221/221 pass** (218
-pre-existing + 3 net new subtests), no regressions.
+Ran the full backend suite (`npm test`): **268/268 pass** (221
+pre-existing + 47 new), no regressions.
 
 ## Flags / open questions
-- **Still practically data-starved** — restated deliberately, not
-  hidden: nothing in this codebase populates `timetable_periods`/
-  `faculty_allocation` from any real workflow yet (no CSV-upload path
-  — `4fa8f12`'s own flag, still open), so in real production usage
-  today this third leg will almost always resolve to "no match,"
-  identical in shape to `assertTimetableApproved`'s own
-  `WorkflowService`-shaped gap. This patch closes the
-  *authorization-logic* gap `82f8479` named; it doesn't make
-  attendance marking practically usable end-to-end by itself.
-- **No API route, UI, or `docs/modules/` file touched in this patch**
-  — this is a business-logic fix to two existing service files, not a
-  new vertical slice of its own.
-- Everything else `82f8479`'s and `8b66a4c`'s own flags already
-  named (no `lockAttendanceSession`, no CSV-upload population path, no
-  update function on faculty allocation) remains exactly as open as
-  before — unaffected by this patch.
+- **Still no CSV-upload-to-normalized-rows population path** —
+  unchanged from every prior flag on this topic: nothing in the real
+  frontend populates these tables through this new API yet either
+  (no UI calls it — see above). A principal/HOD would need to call
+  this API directly (e.g. via a future admin tool, or a future UI
+  slice if a real screen ever needs one) to make
+  `attendanceService`'s "scheduled staff member" check reachable in
+  practice.
+- **RBAC is still the same conservative placeholder** every Module 3
+  route carries — `requireRole('principal')` for writes, not a
+  final decision, same open item as `classes.js`/`staff.js`.
+- **No update endpoint on either resource** — matches
+  `academicService.js`'s own `assignFacultyAllocation`/faculty-allocation
+  precedent (remove-then-assign, not in-place edit); `timetable_periods`
+  follows the same shape for consistency, not independently decided.
+- **No `docs/modules/` file touched** — matches every prior Module 3
+  API slice's own scope.

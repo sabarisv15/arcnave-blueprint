@@ -22,6 +22,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const classRepository = require('../src/repositories/classRepository');
 const facultyAllocationRepository = require('../src/repositories/facultyAllocationRepository');
+const timetablePeriodRepository = require('../src/repositories/timetablePeriodRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const academicService = require('../src/services/academicService');
 
@@ -522,5 +523,177 @@ test('AcademicService faculty allocation validation and audit logging (no DB)', 
     assert.equal(removeMock.mock.callCount(), 1);
     assert.equal(auditMock.mock.callCount(), 1);
     assert.equal(auditMock.mock.calls[0].arguments[1].action, 'faculty_allocation_removed');
+  });
+});
+
+// What's deliberately NOT here: an actual
+// timetable_periods_college_id_day_of_week_hour_index_key /
+// faculty_allocation_period_id_fkey violation reaching its domain
+// error end-to-end through a real Postgres constraint. Both were
+// live-verified against a real database while building the API-route
+// slice this test file's own commit belongs to (see .ai/RESULT.md);
+// this file trusts that grounding rather than re-running a live
+// database for a service layer that adds no new SQL of its own.
+test('AcademicService timetable period validation and audit logging (no DB)', async (t) => {
+  await t.test('createTimetablePeriod rejects a missing dayOfWeek without touching the DB', async () => {
+    const createMock = t.mock.method(timetablePeriodRepository, 'create');
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.createTimetablePeriod({}, {
+        collegeId: 'c1', hourIndex: 1, startTime: '09:00', endTime: '10:00',
+      }),
+      academicService.TimetablePeriodValidationError,
+    );
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('createTimetablePeriod rejects a missing hourIndex without touching the DB', async () => {
+    const createMock = t.mock.method(timetablePeriodRepository, 'create');
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.createTimetablePeriod({}, {
+        collegeId: 'c1', dayOfWeek: 'Monday', startTime: '09:00', endTime: '10:00',
+      }),
+      academicService.TimetablePeriodValidationError,
+    );
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('createTimetablePeriod creates a period and attributes the audit entry', async () => {
+    const createMock = t.mock.method(timetablePeriodRepository, 'create', async (client, fields) => ({
+      id: 'period-1',
+      ...fields,
+    }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      createMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const period = await academicService.createTimetablePeriod(
+      {},
+      { collegeId: 'c1', dayOfWeek: 'Monday', hourIndex: 1, startTime: '09:00', endTime: '10:00' },
+      { actorUserId: 'actor-user' },
+    );
+
+    assert.equal(period.id, 'period-1');
+    assert.equal(auditMock.mock.calls[0].arguments[1].userId, 'actor-user');
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'timetable_period_created');
+    assert.equal(auditMock.mock.calls[0].arguments[1].entity, 'timetable_periods');
+  });
+
+  await t.test('createTimetablePeriod maps a slot conflict to TimetablePeriodSlotTakenError', async () => {
+    const createMock = t.mock.method(timetablePeriodRepository, 'create', async () => {
+      const err = new Error('duplicate key value violates unique constraint "timetable_periods_college_id_day_of_week_hour_index_key"');
+      err.code = '23505';
+      err.constraint = 'timetable_periods_college_id_day_of_week_hour_index_key';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.createTimetablePeriod({}, {
+        collegeId: 'c1', dayOfWeek: 'Monday', hourIndex: 1, startTime: '09:00', endTime: '10:00',
+      }),
+      academicService.TimetablePeriodSlotTakenError,
+    );
+  });
+
+  await t.test('createTimetablePeriod lets a non-conflict repository error pass through unchanged', async () => {
+    const boom = new Error('connection lost');
+    const createMock = t.mock.method(timetablePeriodRepository, 'create', async () => { throw boom; });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.createTimetablePeriod({}, {
+        collegeId: 'c1', dayOfWeek: 'Monday', hourIndex: 1, startTime: '09:00', endTime: '10:00',
+      }),
+      (err) => err === boom,
+    );
+  });
+
+  await t.test('getTimetablePeriod is a thin passthrough to findById', async () => {
+    const findMock = t.mock.method(timetablePeriodRepository, 'findById', async (client, id) => ({ id }));
+    t.after(() => findMock.mock.restore());
+
+    const result = await academicService.getTimetablePeriod({}, 'period-9');
+    assert.equal(result.id, 'period-9');
+  });
+
+  await t.test('getTimetablePeriodByDayAndHour is a thin passthrough to findByCollegeDayAndHour', async () => {
+    const findMock = t.mock.method(timetablePeriodRepository, 'findByCollegeDayAndHour', async (client, collegeId, dayOfWeek, hourIndex) => ({
+      collegeId, dayOfWeek, hourIndex,
+    }));
+    t.after(() => findMock.mock.restore());
+
+    const result = await academicService.getTimetablePeriodByDayAndHour({}, 'c1', 'Monday', 1);
+    assert.deepEqual(result, { collegeId: 'c1', dayOfWeek: 'Monday', hourIndex: 1 });
+  });
+
+  await t.test('listTimetablePeriods is a thin passthrough to list', async () => {
+    const listMock = t.mock.method(timetablePeriodRepository, 'list', async (client, opts) => ([{ opts }]));
+    t.after(() => listMock.mock.restore());
+
+    const result = await academicService.listTimetablePeriods({}, { limit: 10, offset: 0 });
+    assert.deepEqual(result, [{ opts: { limit: 10, offset: 0 } }]);
+  });
+
+  await t.test('removeTimetablePeriod on a nonexistent id is a no-op, no audit entry', async () => {
+    const findMock = t.mock.method(timetablePeriodRepository, 'findById', async () => null);
+    const removeMock = t.mock.method(timetablePeriodRepository, 'remove', async () => {});
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      removeMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await academicService.removeTimetablePeriod({}, 'missing-id', { actorUserId: 'u1' });
+
+    assert.equal(result, null);
+    assert.equal(removeMock.mock.callCount(), 0);
+    assert.equal(auditMock.mock.callCount(), 0);
+  });
+
+  await t.test('removeTimetablePeriod on an existing id deletes and writes an audit entry', async () => {
+    const findMock = t.mock.method(timetablePeriodRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const removeMock = t.mock.method(timetablePeriodRepository, 'remove', async () => {});
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      removeMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await academicService.removeTimetablePeriod({}, 'period-1', { actorUserId: 'u1' });
+
+    assert.deepEqual(result, { id: 'period-1', college_id: 'c1' });
+    assert.equal(removeMock.mock.callCount(), 1);
+    assert.equal(auditMock.mock.callCount(), 1);
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'timetable_period_removed');
+  });
+
+  await t.test('removeTimetablePeriod maps a still-referenced period to TimetablePeriodInUseError', async () => {
+    const findMock = t.mock.method(timetablePeriodRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const removeMock = t.mock.method(timetablePeriodRepository, 'remove', async () => {
+      const err = new Error('update or delete on table "timetable_periods" violates foreign key constraint "faculty_allocation_period_id_fkey" on table "faculty_allocation"');
+      err.code = '23503';
+      err.constraint = 'faculty_allocation_period_id_fkey';
+      throw err;
+    });
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      removeMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => academicService.removeTimetablePeriod({}, 'period-1', { actorUserId: 'u1' }),
+      academicService.TimetablePeriodInUseError,
+    );
+    assert.equal(auditMock.mock.callCount(), 0);
   });
 });

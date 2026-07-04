@@ -28,7 +28,7 @@
 // (facultyAllocationRepository.js/timetablePeriodRepository.js,
 // `4fa8f12`, and academicService.js's business logic over them,
 // `8b66a4c`) built the real, structured link — assertCanMark now
-// composes academicService.getTimetablePeriod and
+// composes academicService.getTimetablePeriodByDayAndHour and
 // academicService.getFacultyAllocationForClassAndPeriod to check it
 // for real. See assertCanMark's own comment for the exact
 // composition, and its known, honest limitation: this only works once
@@ -138,7 +138,7 @@ function dayOfWeekName(sessionDate) {
 //     version (82f8479) explicitly refused to copy into an
 //     authorization decision. The real path: convert sessionDate to a
 //     day-of-week name, look up that (college, day, hour)'s shared
-//     timetable_periods row via academicService.getTimetablePeriod,
+//     timetable_periods row via academicService.getTimetablePeriodByDayAndHour,
 //     then look up that (class, period)'s faculty_allocation row via
 //     academicService.getFacultyAllocationForClassAndPeriod — if one
 //     exists and its staff_user_id matches actorUserId, this actor is
@@ -161,7 +161,7 @@ async function assertCanMark(client, cls, sessionDate, hourIndex, actorUserId, a
     return;
   }
 
-  const period = await academicService.getTimetablePeriod(client, cls.college_id, dayOfWeekName(sessionDate), hourIndex);
+  const period = await academicService.getTimetablePeriodByDayAndHour(client, cls.college_id, dayOfWeekName(sessionDate), hourIndex);
   if (period !== null) {
     const allocation = await academicService.getFacultyAllocationForClassAndPeriod(client, cls.id, period.id);
     if (allocation !== null && allocation.staff_user_id === actorUserId) {

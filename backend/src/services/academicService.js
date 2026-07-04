@@ -123,6 +123,26 @@ class FacultyAllocationPeriodTakenError extends Error {}
 // assignment, extended here to double-booking a teacher.
 class FacultyAllocationStaffConflictError extends Error {}
 
+// Missing dayOfWeek, hourIndex, startTime, or endTime —
+// timetable_periods' own NOT NULL columns. Raised before any
+// repository call, same as every other pre-query guard in this file.
+class TimetablePeriodValidationError extends Error {}
+
+// UNIQUE (college_id, day_of_week, hour_index) violated (Postgres
+// 23505, timetable_periods_college_id_day_of_week_hour_index_key) —
+// this college already has a period defined for this exact
+// day+hour slot.
+class TimetablePeriodSlotTakenError extends Error {}
+
+// faculty_allocation_period_id_fkey violated (Postgres 23503) on a
+// DELETE against timetable_periods — this period still has one or
+// more faculty_allocation rows referencing it. The FK has no ON
+// DELETE override (house convention, see the migration's own
+// .ai/TASK.md), so Postgres's default RESTRICT raises this rather
+// than silently cascading — surfaced as a domain error instead of a
+// raw pg one, same discipline as every other constraint in this file.
+class TimetablePeriodInUseError extends Error {}
+
 // Known real timetable_status values, per the migration's own comment
 // and .ai/TASK.md's grounding against TutorClass.jsx/
 // TutorClassMonitor.jsx.
@@ -361,8 +381,13 @@ async function listFacultyAllocationsForStaff(client, staffUserId) {
 // not an error, same convention as every other getX in this file.
 // This is the lookup attendanceService.markAttendance uses to resolve
 // a calendar date + hour_index into the shared timetable_periods row
-// before it can ask "who's allocated to teach this class then."
-async function getTimetablePeriod(client, collegeId, dayOfWeek, hourIndex) {
+// before it can ask "who's allocated to teach this class then." Named
+// ...ByDayAndHour, not the bare getTimetablePeriod(id) shape every
+// other getX in this file uses, specifically to leave that simpler
+// name free for the plain by-id lookup below — this one takes three
+// arguments and answers a different question ("does a period exist
+// for this slot") than "fetch this known period."
+async function getTimetablePeriodByDayAndHour(client, collegeId, dayOfWeek, hourIndex) {
   return timetablePeriodRepository.findByCollegeDayAndHour(client, collegeId, dayOfWeek, hourIndex);
 }
 
@@ -372,6 +397,92 @@ async function getTimetablePeriod(client, collegeId, dayOfWeek, hourIndex) {
 // teach this specific class during it."
 async function getFacultyAllocationForClassAndPeriod(client, classId, periodId) {
   return facultyAllocationRepository.findByClassAndPeriod(client, classId, periodId);
+}
+
+// Defines one shared, college-wide bell-schedule slot. No
+// authorization check: same reasoning as assignFacultyAllocation —
+// BusinessRules.md names no specific actor for "who may define
+// periods," left to the route/RBAC layer once an API exists.
+async function createTimetablePeriod(client, { collegeId, dayOfWeek, hourIndex, startTime, endTime }, { actorUserId } = {}) {
+  if (!dayOfWeek || hourIndex === undefined || hourIndex === null || !startTime || !endTime) {
+    throw new TimetablePeriodValidationError('dayOfWeek, hourIndex, startTime, and endTime are required');
+  }
+
+  let period;
+  try {
+    period = await timetablePeriodRepository.create(client, {
+      collegeId,
+      dayOfWeek,
+      hourIndex,
+      startTime,
+      endTime,
+    });
+  } catch (err) {
+    if (err.code === '23505' && err.constraint === 'timetable_periods_college_id_day_of_week_hour_index_key') {
+      throw new TimetablePeriodSlotTakenError(
+        `a period already exists for ${JSON.stringify(dayOfWeek)} hour ${JSON.stringify(hourIndex)} in this college`,
+      );
+    }
+    throw err;
+  }
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId,
+    userId: actorUserId,
+    action: 'timetable_period_created',
+    entity: 'timetable_periods',
+    entityId: period.id,
+    metadata: null,
+  });
+
+  return period;
+}
+
+// null means no period exists with this id — not an error. The route
+// turns that into 404, same as getClass/getFacultyAllocation.
+async function getTimetablePeriod(client, id) {
+  return timetablePeriodRepository.findById(client, id);
+}
+
+async function listTimetablePeriods(client, { limit, offset } = {}) {
+  return timetablePeriodRepository.list(client, { limit, offset });
+}
+
+// Looks the period up first, both to get collegeId for the audit
+// entry and to avoid logging a removal for an id that never existed —
+// same shape as removeClass/removeFacultyAllocation. Maps the FK
+// RESTRICT case (a faculty_allocation row still references this
+// period) to a real domain error instead of a raw pg one; every other
+// removeX in this file hard-deletes without needing this because
+// nothing else FKs into classes/faculty_allocation/students/staff the
+// way faculty_allocation FKs into timetable_periods.
+async function removeTimetablePeriod(client, id, { actorUserId } = {}) {
+  const period = await timetablePeriodRepository.findById(client, id);
+  if (period === null) {
+    return null;
+  }
+
+  try {
+    await timetablePeriodRepository.remove(client, id);
+  } catch (err) {
+    if (err.code === '23503' && err.constraint === 'faculty_allocation_period_id_fkey') {
+      throw new TimetablePeriodInUseError(
+        `period ${JSON.stringify(id)} still has faculty_allocation rows referencing it`,
+      );
+    }
+    throw err;
+  }
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: period.college_id,
+    userId: actorUserId,
+    action: 'timetable_period_removed',
+    entity: 'timetable_periods',
+    entityId: id,
+    metadata: null,
+  });
+
+  return period;
 }
 
 // Looks the allocation up first, both to get collegeId for the audit
@@ -414,6 +525,9 @@ module.exports = {
   FacultyAllocationStaffNotFoundError,
   FacultyAllocationPeriodTakenError,
   FacultyAllocationStaffConflictError,
+  TimetablePeriodValidationError,
+  TimetablePeriodSlotTakenError,
+  TimetablePeriodInUseError,
   createClass,
   getClass,
   updateClass,
@@ -424,6 +538,10 @@ module.exports = {
   listFacultyAllocationsForClass,
   listFacultyAllocationsForStaff,
   removeFacultyAllocation,
-  getTimetablePeriod,
+  getTimetablePeriodByDayAndHour,
   getFacultyAllocationForClassAndPeriod,
+  createTimetablePeriod,
+  getTimetablePeriod,
+  listTimetablePeriods,
+  removeTimetablePeriod,
 };

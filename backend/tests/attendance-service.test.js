@@ -96,7 +96,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance rejects an actor who is neither the tutor, an HOD, nor scheduled for the period', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
-    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriod', async () => null);
+    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => null);
     t.after(() => {
       getClassMock.mock.restore();
       getPeriodMock.mock.restore();
@@ -114,7 +114,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance rejects a class with no tutor assigned when actor is not HOD or scheduled', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => ({ ...APPROVED_CLASS, tutor_user_id: null }));
-    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriod', async () => null);
+    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => null);
     t.after(() => {
       getClassMock.mock.restore();
       getPeriodMock.mock.restore();
@@ -132,7 +132,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance rejects when a period exists but this class has no allocation for it', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
-    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriod', async () => ({ id: 'period-1' }));
+    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => ({ id: 'period-1' }));
     const getAllocMock = t.mock.method(academicService, 'getFacultyAllocationForClassAndPeriod', async () => null);
     t.after(() => {
       getClassMock.mock.restore();
@@ -152,7 +152,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance rejects when an allocation exists but for a different staff member', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
-    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriod', async () => ({ id: 'period-1' }));
+    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => ({ id: 'period-1' }));
     const getAllocMock = t.mock.method(academicService, 'getFacultyAllocationForClassAndPeriod', async () => ({ staff_user_id: 'someone-else' }));
     t.after(() => {
       getClassMock.mock.restore();
@@ -172,7 +172,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance allows the staff member genuinely scheduled for that period, even without tutor/HOD status', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => ({ ...APPROVED_CLASS, tutor_user_id: 'some-other-tutor' }));
-    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriod', async (client, collegeId, dayOfWeek, hourIndex) => {
+    const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async (client, collegeId, dayOfWeek, hourIndex) => {
       assert.equal(collegeId, 'c1');
       assert.equal(dayOfWeek, 'Saturday'); // 2026-07-04 is a Saturday
       assert.equal(hourIndex, 1);
