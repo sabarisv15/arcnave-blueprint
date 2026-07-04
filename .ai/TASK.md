@@ -1,123 +1,86 @@
 # TASK
 
-## Objective (Module 6 — Documents & OCR — first vertical slice)
-ERD + migration + repository only for a `documents` table — no
-service/API/UI this slice, same discipline as every prior module's
-first slice (`classes`, `attendance_sessions`, `fee_structures`).
+## Objective (Module 6 — Documents & OCR — second vertical slice)
+`DocumentService` only — no API/UI this slice. Built on the
+`documents` migration + `documentRepository.js` from the prior slice
+(9b7d779).
 
-Scope, explicitly bounded by this session's instructions: storage of
-**student** certificates/photos/files only. OCR/AI extraction
-(`ai_confidence`, an `ocr_results` table) is Module 9 (AI Tool
-Registry) territory — not added here. Staff documents and college-wide
-templates (also DocumentService-owned per Architecture.md 2.5) are
-likewise out of scope for this slice.
+## Storage backend: local disk (see ADR-017)
+TechStack.md names no storage backend. Chosen: local disk under
+`DOCUMENT_STORAGE_ROOT`, via a new `backend/src/storage/fileStorage.js`
+(pure fs helpers, no DB, no business logic — used only by
+`documentService.js`, per ADR-009's single-writer rule). Justification
+in full: ADR-017. Short version: ADR-014 defers horizontal scaling (one
+Express instance), and TechStack.md's deployment target is Docker/
+Nginx/Postgres backups only — S3 buys nothing until a second instance
+exists, and this project runs no object-storage infra today. Revisit
+when ADR-014's own trigger (a second instance) fires.
 
-## Grounding: which existing screen to check before guessing
-Searched `frontend/src` for a real, wired document-upload screen
-before drafting any column. Found two components that reference
-documents, neither wired to a real backend:
-
-- `frontend/src/components/DocumentPanel.jsx` — a per-student document
-  grid. Every request it makes targets a **dead prototype endpoint**:
-  `POST /api/students/:id/documents/upload`, `POST /api/ai/ocr`,
-  `POST /api/students/:id/documents/:docType/verify` — none under
-  `/api/v1/`, none matching any route this rebuild has created. Not a
-  real backend to repoint, only a shape to ground the ERD against, the
-  same role the old prototype played for every earlier module's first
-  slice (per CLAUDE.md: "prototype validated scope only, not the
-  foundation").
-- `frontend/src/components/ProfileCompletion.jsx` — lists document
-  keys (`aadhaar`, `community_cert`, `bank_passbook`, `income_cert`)
-  as items counted toward profile completion; no upload/fetch logic of
-  its own, just labels.
-
-`DocumentPanel.jsx`'s `DOC_TYPES` gives the real, concrete category
-list a `doc_type` column needs to support:
-`aadhaar`, `community_cert`, `bank_passbook`, `transfer_cert`,
-`birth_cert`, `income_cert`, `scholarship_cert`, `disability_cert` —
-plus a plain student **photo**, named explicitly in this session's own
-scope ("certificates/photos/files") but absent from that list.
-Its status lifecycle (`not_uploaded → uploaded → ai_extracted →
-verified/rejected`) is a *client-side* display state, not a schema to
-port verbatim: `not_uploaded` is simply "no row exists yet", and
-`ai_extracted` is Module 9 territory, excluded this slice per the
-session's own scope. What survives into this table's `status` column
-is `uploaded → verified/rejected` only.
+## fee_payments.receipt_document_id FK: added this slice
+The Module 5 migration's own comment named this exact follow-up ("once
+Module 6 creates documents, must add ... FOREIGN KEY
+(receipt_document_id) REFERENCES documents(id)"). `documents` now
+exists (prior slice) — adding the FK is a small, contained, already-
+planned unblock, not scope creep. Done as its own tiny migration, nothing
+else touched in `fee_payments`.
 
 ## Key design decisions
-- **`doc_type` stays free TEXT, no CHECK** — same "don't normalize what
-  nothing queries that way yet" reasoning `fee_structures.fee_category`
-  and `faculty_allocation.subject` already established. The 9 categories
-  above (8 certs + photo) are documented in the migration comment as
-  the known set, not enforced by a constraint.
-- **`student_id` NOT NULL, scoped to one student** — no polymorphic
-  owner column. Staff documents / templates are a different
-  DocumentService responsibility, explicitly out of scope this
-  session, not modeled with a nullable/polymorphic column "just in
-  case."
-- **No unique constraint on `(student_id, doc_type)`** — Architecture.md
-  2.5 names "versioning" as one of DocumentService's owned
-  responsibilities; re-uploading a document type is a new row (a new
-  version), not an overwrite of the old one. `DocumentPanel.jsx`'s
-  single-record-per-type grid is a *display* convention (show the
-  latest), not a schema constraint — a repository helper
-  (`findLatestByStudentAndType`) resolves "latest" without a table
-  constraint blocking history.
-- **`status` free TEXT, no CHECK, default `'uploaded'`** — same house
-  convention as `timetable_status`/`fee_structures.status`: known
-  values (`uploaded`/`verified`/`rejected`) enforced at the service
-  layer once `DocumentService` exists (not built this slice), not the
-  DB.
-- **`deleted_at` soft-delete, resolved now, not deferred** — unlike
-  `students`' first slice (which left this an open question),
-  Architecture.md 2.5 explicitly names "retention" as one of
-  DocumentService's owned responsibilities, and these rows represent
-  hard-to-replace artifacts (certificates, ID scans) where an
-  accidental hard delete is exactly the kind of loss "retention"
-  exists to prevent. Not a rule named as explicitly as fees/attendance/
-  marks in BusinessRules.md's AI section, but the same risk-averse
-  default, flagged as a deliberate choice, not a guess. GRANT omits
-  DELETE, same as `fee_structures`.
-- **`storage_path` (not file bytes) is what this table stores** —
-  Architecture.md 2.9 / CLAUDE.md rule 2: `DocumentService` is the sole
-  owner of file storage; this table only records *where* a file lives
-  (a tenant-prefixed path DocumentService will assign), not the bytes
-  themselves. No actual storage integration exists yet — a later
-  slice's problem, not silently solved here.
-- **Storing an `'aadhaar'` `doc_type` value does not violate CLAUDE.md
-  rule 8** — rule 8 restricts *using* Aadhaar numbers "for identity,
-  dedup, import, search, AI reasoning, or reporting." This table never
-  reads or reasons over the Aadhaar *number* at all — it records the
-  existence and storage location of a scanned card image, labeled like
-  any other document category, exactly the carve-out BusinessRules.md
-  itself describes ("If a college requires it for a government
-  process, it is stored as an optional, encrypted, access-restricted
-  field only"). Encryption-at-rest for the actual file bytes is a
-  storage-layer concern for a later Module 6 slice once real storage
-  integration exists — flagged as an open gap, not solved here.
-- **`uploaded_by_user_id` NOT NULL, `verified_by_user_id`/`verified_at`
-  nullable** — mirrors the "who/when" shape BusinessRules.md's
-  Staff/Finance approval chains already use elsewhere, without
-  inventing new bookkeeping columns approval doesn't need yet
-  (`remarks` covers a rejection/verification note, same role
-  `fee_structures.remarks` plays).
-- **No Aadhaar *number* column anywhere** (CLAUDE.md rule 8) — only a
-  free-text `doc_type` label, per the point above.
+- **doc_type gets no service-layer validation** — free TEXT, same
+  "don't normalize" treatment `fee_category` gets in `financeService.js`
+  (no validation there either). Unlike `status`, which DOES get
+  validated (see next point) because it has real known-value semantics
+  the service enforces, matching `fee_structures.status`'s precedent.
+- **status validated at the service layer only on review** —
+  `uploadDocument` never accepts a caller-supplied `status` at all (a
+  freshly uploaded document is always `'uploaded'`, the DB default,
+  full stop — no forged initial state, stricter than
+  `fee_structures.status`, which does accept a caller value at create).
+  A dedicated `reviewDocument` transitions to `'verified'`/`'rejected'`
+  only — those are the only two states anything ever transitions a
+  document *to* after upload.
+- **Core file fields are immutable post-upload** — `doc_type`,
+  `file_name`, `storage_path`, `mime_type`, `file_size_bytes`,
+  `student_id` are never touched by any service function after
+  `uploadDocument`. Re-uploading is a new row (versioning, per the
+  migration's own reasoning), not an edit of the old one. Only
+  `reviewDocument` (status/verifiedBy/verifiedAt/remarks) mutates an
+  existing row — narrower than `financeService.updateFeeStructure`'s
+  general-purpose whitelist, because nothing about an uploaded file's
+  identity should change in place.
+- **verifiedByUserId/verifiedAt are stamped by the service, never
+  caller-supplied** — same "the actor is who did it right now, not
+  caller-supplied free text" reasoning `financeService.markFeePayment`
+  already applies to `markedByUserId`.
+- **removeDocument (soft-delete) never touches storage** —
+  `deleted_at` is set, the on-disk file is left alone. Consistent with
+  the migration's own "retention" reasoning (Architecture.md 2.5):
+  soft-deleting the DB row shouldn't destroy the recoverable evidence.
+  A real hard-delete-with-file-removal path doesn't exist — the
+  repository has no hard-delete function at all (same shape Finance's
+  soft-delete-only tables already established).
+- **downloadDocument reads bytes back from disk** — Architecture.md
+  2.5 names "download" as one of DocumentService's owned
+  responsibilities; not just a metadata read, an actual
+  `fileStorage.readFile` round-trip.
 
 ## Files affected
-- `backend/migrations/1752500000000_module-6-documents-schema.js` (new)
-- `backend/src/repositories/documentRepository.js` (new)
+- `docs/adr/ADR-017-Document-Storage-Backend.md` (new)
+- `backend/src/storage/fileStorage.js` (new)
+- `backend/src/config.js` (add `documentStorageRoot`)
+- `backend/src/services/documentService.js` (new)
+- `backend/tests/document-service.test.js` (new — mocked repository/
+  storage, no live DB, same technique as `finance-service.test.js`)
+- `backend/migrations/<ts>_fee-payments-receipt-document-fk.js` (new)
 
 ## Verification
-- Run `npm run migrate` against the live `docker-compose` Postgres
-  (already running, `arcnave-blueprint-db-1`); confirm the migration
-  applies cleanly.
-- Exercise the repository directly (a small throwaway script, same
-  substitute technique used for API-shape proof in prior slices where
-  no HTTP layer exists yet): seed a tenant + student + user, then
-  `create`, `findById`, `findLatestByStudentAndType`,
-  `findByStudentId`, `update` (verify/reject), `softDelete` — confirm
-  each round-trips correctly and `deleted_at` rows drop out of reads.
-- Run `npm run migrate:down` to confirm the migration reverses cleanly,
-  then re-run `up` to leave the DB in the expected final state.
-- Clean up all seeded data afterward.
+- `documentService.js` unit tests (mocked `documentRepository`/
+  `auditLogRepository`/`fileStorage`) — validation, immutability of
+  post-upload fields, review-status enforcement, actor stamping.
+- `fileStorage.js` exercised against the real local filesystem (not
+  mocked in its own right) via a throwaway script: write, read back,
+  confirm bytes match, confirm tenant-prefixed path shape; deleted
+  after use.
+- Live DB: apply the new FK migration against the running
+  `docker-compose` Postgres, confirm `\d fee_payments` shows the new
+  constraint, confirm `down` reverses cleanly, re-apply `up`.
+- Full `npm test` regression run.

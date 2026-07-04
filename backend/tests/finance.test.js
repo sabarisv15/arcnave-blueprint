@@ -129,6 +129,7 @@ async function seedTenant(adminPool, label) {
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM fee_payments WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM documents WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM fee_structures WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM students WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM classes WHERE college_id = $1', [college.collegeId]);
@@ -363,8 +364,18 @@ test('finance', async (t) => {
     });
     assert.equal(first.status, 200);
 
+    // receipt_document_id now has a real FK to documents (added once
+    // Module 6 created that table) — a random UUID with no matching
+    // row would 23503 instead of the 200 this test expects, so a real
+    // row is seeded here rather than a bare crypto.randomUUID().
+    const receiptDoc = await adminPool.query(
+      `INSERT INTO documents (college_id, student_id, doc_type, file_name, storage_path, mime_type, file_size_bytes, uploaded_by_user_id)
+       VALUES ($1, $2, 'fee_receipt', 'receipt.pdf', $3, 'application/pdf', 1024, $4) RETURNING id`,
+      [collegeA.collegeId, collegeA.studentId, `${collegeA.collegeId}/receipts/${crypto.randomUUID()}.pdf`, collegeA.userIds.principaluser],
+    );
+
     const second = await post(baseUrl, '/api/v1/finance/fee-payments', headersFor(collegeA, token), {
-      student_id: collegeA.studentId, fee_structure_id: feeStructure.body.id, status: 'paid', receipt_document_id: crypto.randomUUID(),
+      student_id: collegeA.studentId, fee_structure_id: feeStructure.body.id, status: 'paid', receipt_document_id: receiptDoc.rows[0].id,
     });
     assert.equal(second.status, 200);
     assert.equal(second.body.id, first.body.id);

@@ -1,0 +1,199 @@
+'use strict';
+
+// Business logic for Module 6's `documents` table — validation, actor
+// stamping, audit logging, and the storage read/write DocumentService
+// alone is allowed to do (ADR-009 / CLAUDE.md rule 2). No route/UI
+// consumes this yet (next slice) — AI tools and API routes alike must
+// call through here, never documentRepository or fileStorage directly
+// (CLAUDE.md rule 1).
+//
+// Core file identity (doc_type, file_name, storage_path, mime_type,
+// file_size_bytes, student_id) is immutable once uploaded — no
+// function here edits any of them after uploadDocument. Re-uploading a
+// type is a new row (a new version, per the migration's own
+// reasoning), never an edit of the old one. Only reviewDocument
+// (status/verifiedBy/verifiedAt/remarks) ever mutates an existing row
+// — narrower than financeService.updateFeeStructure's general
+// whitelist, deliberately: nothing about an uploaded file's identity
+// should change in place.
+//
+// removeDocument (soft-delete) never touches storage — deleted_at is
+// set, the on-disk bytes are left alone. Architecture.md 2.5 names
+// "retention" as a DocumentService responsibility; destroying the
+// recoverable file the moment a row is soft-deleted would defeat that.
+// documentRepository has no hard-delete function at all, so there is
+// no branch here that could accidentally do so.
+
+const documentRepository = require('../repositories/documentRepository');
+const auditLogRepository = require('../repositories/auditLogRepository');
+const fileStorage = require('../storage/fileStorage');
+
+// Missing studentId, docType, fileName, mimeType, fileBuffer, or
+// actorUserId — documents' own NOT NULL columns, plus the actor
+// identity every write here needs (same reasoning
+// attendanceService.markAttendance's/financeService.markFeePayment's
+// own actor guards give).
+class DocumentValidationError extends Error {}
+
+// documents_student_id_fkey violated (Postgres 23503) — the given
+// studentId doesn't exist.
+class DocumentStudentNotFoundError extends Error {}
+
+// reviewDocument was asked to set a status other than 'verified'/
+// 'rejected' — the only two states anything transitions a document TO
+// after upload (uploadDocument itself is the only path to 'uploaded',
+// and it never accepts a caller-supplied status at all).
+class DocumentReviewStatusError extends Error {}
+
+const VALID_REVIEW_STATUSES = ['verified', 'rejected'];
+
+function assertValidReviewStatus(status) {
+  if (!VALID_REVIEW_STATUSES.includes(status)) {
+    throw new DocumentReviewStatusError(`status ${JSON.stringify(status)} is not a valid review outcome`);
+  }
+}
+
+// A freshly uploaded document is always status='uploaded' (the DB
+// default) — stricter than fee_structures.status, which does accept a
+// caller-supplied value at create. No forged initial state here: only
+// reviewDocument can ever move a document out of 'uploaded'.
+async function uploadDocument(client, { collegeId, studentId, docType, fileName, mimeType, fileBuffer }, { actorUserId } = {}) {
+  if (!studentId || !docType || !fileName || !mimeType || !fileBuffer || !actorUserId) {
+    throw new DocumentValidationError('studentId, docType, fileName, mimeType, fileBuffer, and actorUserId are required');
+  }
+
+  const storagePath = fileStorage.buildStoragePath({ collegeId, studentId, docType, fileName });
+  await fileStorage.writeFile(storagePath, fileBuffer);
+
+  let document;
+  try {
+    document = await documentRepository.create(client, {
+      collegeId,
+      studentId,
+      docType,
+      fileName,
+      storagePath,
+      mimeType,
+      fileSizeBytes: fileBuffer.length,
+      uploadedByUserId: actorUserId,
+    });
+  } catch (err) {
+    if (err.code === '23503' && err.constraint === 'documents_student_id_fkey') {
+      throw new DocumentStudentNotFoundError(`studentId ${JSON.stringify(studentId)} does not exist`);
+    }
+    throw err;
+  }
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId,
+    userId: actorUserId,
+    action: 'document_uploaded',
+    entity: 'documents',
+    entityId: document.id,
+    metadata: { docType },
+  });
+
+  return document;
+}
+
+// null means no document exists with this id — not an error. A route
+// (next slice) turns that into 404, same as every other getX in this
+// codebase.
+async function getDocument(client, id) {
+  return documentRepository.findById(client, id);
+}
+
+// Architecture.md 2.5 names "download" as a DocumentService-owned
+// responsibility — a real bytes-from-disk round-trip, not just the
+// metadata row. Returns null if the document row doesn't exist (same
+// not-found shape as getDocument); does not distinguish a missing row
+// from a missing file on disk — both are a caller-facing 404 upstream,
+// and a document row should never outlive its file under normal
+// operation (nothing here deletes files independently of rows).
+async function downloadDocument(client, id) {
+  const document = await documentRepository.findById(client, id);
+  if (document === null) {
+    return null;
+  }
+  const buffer = await fileStorage.readFile(document.storage_path);
+  return { document, buffer };
+}
+
+async function listDocumentsForStudent(client, studentId) {
+  return documentRepository.findByStudentId(client, studentId);
+}
+
+async function getLatestDocumentForStudentAndType(client, studentId, docType) {
+  return documentRepository.findLatestByStudentAndType(client, studentId, docType);
+}
+
+// The only path that mutates an existing document row. Stamps
+// verifiedByUserId/verifiedAt from the actor/clock, never
+// caller-supplied — same "the actor is who did it right now" reasoning
+// financeService.markFeePayment applies to markedByUserId.
+async function reviewDocument(client, id, { status, remarks }, { actorUserId } = {}) {
+  assertValidReviewStatus(status);
+
+  const document = await documentRepository.update(client, id, {
+    status,
+    verifiedByUserId: actorUserId,
+    verifiedAt: new Date(),
+    remarks,
+  });
+  if (document === null) {
+    return null;
+  }
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: document.college_id,
+    userId: actorUserId,
+    action: status === 'verified' ? 'document_verified' : 'document_rejected',
+    entity: 'documents',
+    entityId: id,
+    metadata: null,
+  });
+
+  return document;
+}
+
+// Soft-delete only: documentRepository has no hard-delete function at
+// all. softDelete's own WHERE guard means an already-deleted or
+// missing id simply returns null (no error, no audit entry) — same
+// idempotent shape financeService.removeFeeStructure already
+// documents. Storage bytes are deliberately left untouched — see the
+// file-level comment.
+async function removeDocument(client, id, { userId } = {}) {
+  const document = await documentRepository.softDelete(client, id);
+  if (document === null) {
+    return null;
+  }
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: document.college_id,
+    userId,
+    action: 'document_removed',
+    entity: 'documents',
+    entityId: id,
+    metadata: null,
+  });
+
+  return document;
+}
+
+async function listDocuments(client, { limit, offset } = {}) {
+  return documentRepository.list(client, { limit, offset });
+}
+
+module.exports = {
+  DocumentValidationError,
+  DocumentStudentNotFoundError,
+  DocumentReviewStatusError,
+  uploadDocument,
+  getDocument,
+  downloadDocument,
+  listDocumentsForStudent,
+  getLatestDocumentForStudentAndType,
+  reviewDocument,
+  removeDocument,
+  listDocuments,
+};

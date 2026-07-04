@@ -1,145 +1,110 @@
 # RESULT
 
 ## Files changed
-- `backend/migrations/1752500000000_module-6-documents-schema.js` (new)
-- `backend/src/repositories/documentRepository.js` (new)
+- `docs/adr/ADR-017-Document-Storage-Backend.md` (new)
+- `backend/src/storage/fileStorage.js` (new)
+- `backend/src/config.js` (`documentStorageRoot`)
+- `backend/src/services/documentService.js` (new)
+- `backend/tests/document-service.test.js` (new)
+- `backend/migrations/1752600000000_fee-payments-receipt-document-fk.js` (new)
+- `backend/tests/finance.test.js` (fixed — see below)
+- `.gitignore` (`backend/storage/`)
 
-No service/API/UI files touched — matches this slice's own scope.
+No API/UI touched — matches this slice's scope.
+
+## Storage backend: local disk (ADR-017)
+TechStack.md named none. Chosen over S3 because ADR-014 defers
+horizontal scaling to a single Express instance (S3's shared-blob-store
+advantage buys nothing until a second instance exists) and the
+deployment target is Docker/Nginx/Postgres-backups only, with no
+object-storage credential/bucket provisioned anywhere. Local disk under
+a tenant-prefixed tree, same persistence pattern already proven for
+Postgres's own `pgdata` volume. Revisit trigger: ADR-014's own trigger
+(a second app instance).
 
 ## What was built
-A `documents` table (Module 6, Documents & OCR, first vertical slice)
-scoped to student certificates/photos/files only, plus a matching
-`documentRepository.js` offering pure query mechanics — same shape as
-every prior module's first slice (`classes`, `attendance_sessions`,
-`fee_structures`).
+`documentService.js` — validation, actor stamping, audit logging, and
+storage read/write, on top of `documentRepository.js`/`fileStorage.js`:
+`uploadDocument`, `getDocument`, `downloadDocument`,
+`listDocumentsForStudent`, `getLatestDocumentForStudentAndType`,
+`reviewDocument`, `removeDocument`, `listDocuments`.
 
-**Schema** (`documents`):
-- `college_id` — tenant column, ENABLE + FORCE RLS + `tenant_isolation`
-  policy, identical pattern to every other tenant table.
-- `student_id` NOT NULL, `REFERENCES students(id)` — one student per
-  row, no polymorphic owner. Staff documents / templates (also
-  DocumentService-owned per Architecture.md 2.5) are out of scope this
-  session.
-- `doc_type` free TEXT, no CHECK — same "don't normalize what nothing
-  queries that way yet" convention `fee_category`/`subject` already
-  established. Known categories (documented, not enforced): `aadhaar`,
-  `community_cert`, `bank_passbook`, `transfer_cert`, `birth_cert`,
-  `income_cert`, `scholarship_cert`, `disability_cert`, `photo`.
-- `file_name`, `storage_path`, `mime_type`, `file_size_bytes` — this
-  table records file *metadata and location*, never bytes.
-  `DocumentService` (a later slice) owns the actual storage write;
-  this migration doesn't invent storage integration.
-- `status` free TEXT, default `'uploaded'` (`uploaded` /
-  `verified` / `rejected`) — enforced at the service layer once
-  `DocumentService` exists, not the DB, matching `timetable_status`/
-  `fee_structures.status`.
-- `uploaded_by_user_id` NOT NULL, `verified_by_user_id` / `verified_at`
-  nullable, `remarks` nullable — who/when/why shape mirroring
-  `fee_structures.remarks`.
-- `deleted_at` soft-delete, **resolved now** (unlike `students`' first
-  slice, which left this an open question) — Architecture.md 2.5 names
-  "retention" as a `DocumentService` responsibility, and certificates/
-  ID scans are exactly the kind of artifact an accidental hard delete
-  would irrecoverably destroy. GRANT omits DELETE entirely, same as
-  `fee_structures`.
-- No UNIQUE constraint on `(student_id, doc_type)` — re-uploading a
-  type is a new row (a version), per Architecture.md 2.5's
-  "versioning" responsibility, not an overwrite. A plain (non-unique)
-  index on `(student_id, doc_type) WHERE deleted_at IS NULL` supports
-  the "latest version of this type" lookup without blocking history.
-- No Aadhaar *number* column anywhere (CLAUDE.md rule 8). Storing an
-  `'aadhaar'` `doc_type` *label* on a scanned file is not "using
-  Aadhaar for identity/dedup/search" — see the migration's file-level
-  comment for the full reasoning, grounded in BusinessRules.md's own
-  government-process carve-out.
+Key decisions (full reasoning in each file's own comments):
+- `uploadDocument` never accepts a caller-supplied `status` — always
+  the DB default `'uploaded'`. `doc_type` gets no service-layer
+  validation (free text, same as `fee_category`); `status` DOES, but
+  only inside `reviewDocument`, to `'verified'`/`'rejected'` only.
+- Core file identity (`doc_type`/`file_name`/`storage_path`/
+  `mime_type`/`file_size_bytes`/`student_id`) is immutable after
+  upload — only `reviewDocument` mutates a row (status/verifiedBy/
+  verifiedAt/remarks), narrower than `financeService.updateFeeStructure`'s
+  general whitelist by design.
+- `verifiedByUserId`/`verifiedAt` are always stamped by the service
+  from the actor/clock, never caller-supplied.
+- `removeDocument` (soft-delete) never touches `fileStorage` — the
+  file stays on disk even after `deleted_at` is set, per Architecture.md
+  2.5's "retention" responsibility.
+- `downloadDocument` does a real bytes-from-disk round-trip
+  (Architecture.md 2.5 names "download" explicitly), not just a
+  metadata read.
+- `fileStorage.js` sanitizes `fileName` (strips anything but
+  alnum/dot/dash/underscore) before building a path — closes a
+  directory-traversal door at the one place paths get built.
 
-**Repository** (`documentRepository.js`): `create`, `findById`,
-`findByStudentId`, `findLatestByStudentAndType`, `update`,
-`softDelete`, `list` — query mechanics only, no business logic, same
-entries-filtering INSERT/UPDATE pattern as `financeRepository.js`. No
-hard-delete function exists (matches the table's own GRANT).
+## fee_payments.receipt_document_id: FK added this slice
+The Module 5 migration's own comment pre-planned this exact follow-up.
+`documents` exists as of the prior slice, so
+`1752600000000_fee-payments-receipt-document-fk.js` adds
+`FOREIGN KEY (receipt_document_id) REFERENCES documents(id)` — nothing
+else touched in `fee_payments`. No `NOT VALID`/`VALIDATE` split: dev-only
+schema, no production rows to violate the new constraint.
 
-## Which existing screen this was grounded against
-`frontend/src/components/DocumentPanel.jsx` — a per-student document
-grid whose upload/OCR/verify requests all target dead prototype
-endpoints (none under `/api/v1/`, none matching a route this rebuild
-has created). Not a backend to repoint — the same role the old
-prototype played for every earlier module's first slice — but its
-`DOC_TYPES` list and `uploaded → verified/rejected` states are exactly
-what grounded `doc_type`'s known-category list and `status`'s
-lifecycle. Its `not_uploaded`/`ai_extracted` states deliberately don't
-appear in the schema: `not_uploaded` just means no row exists, and
-`ai_extracted`/`ai_confidence` is Module 9 (AI Tool Registry) territory,
-out of scope this session.
-`frontend/src/components/ProfileCompletion.jsx` was also checked — it
-only references document-type labels for a completion-percentage UI,
-no upload/fetch logic of its own.
+This broke one existing test:
+`finance.test.js`'s "re-marking updates the existing payment" test
+inserted a bare `crypto.randomUUID()` for `receipt_document_id` with no
+matching row — a 23503 under the new FK instead of the 200 it expected.
+Fixed by seeding a real `documents` row via `adminPool` first and using
+its real id; also added `documents` to that test file's tenant cleanup
+(deleted before `fee_structures`, since `fee_payments` — deleted first
+— is what references `documents`, not the other way around).
 
 ## Verification
-1. **Migration applied** against the live `docker-compose` Postgres
-   (`arcnave-blueprint-db-1`, already running) via
-   `npm run migrate` — clean apply, confirmed via `\d documents`
-   (all columns, FKs, the partial index, and the forced RLS policy
-   present as designed).
-2. **Repository exercised directly** (a throwaway script, same
-   substitute technique used throughout this project's first slices
-   where no HTTP layer exists yet — deleted after use, never
-   committed): seeded a real tenant + 2 users + 1 student, then ran
-   every repository function through its own transaction (mirroring
-   one-transaction-per-request in the real app — reusing a single
-   transaction for multiple inserts was tried first and produced a
-   false failure, because Postgres's `now()` is frozen for an entire
-   transaction, making all rows share one `created_at`; switching to
-   per-call transactions fixed it and is the more realistic test
-   anyway). All 15 functional checks passed: default `status`/
-   `deleted_at`, versioning (two uploads of the same `doc_type` both
-   persist), `findLatestByStudentAndType` resolves the newest version,
-   `findByStudentId` orders newest-first and excludes soft-deleted
-   rows, `findById` round-trips and excludes soft-deleted rows,
-   `update` both verifies and rejects, `softDelete` is idempotent,
-   `list` excludes soft-deleted rows.
-3. **RLS proved through the real `arcnave_app` role**, not the
-   migration/admin role — `MIGRATION_DATABASE_URL` (`arcnave_admin`) is
-   a Postgres superuser and bypasses RLS unconditionally regardless of
-   `FORCE ROW LEVEL SECURITY` (documented precedent:
-   `rls-tenant-isolation.test.js`'s own negative-control test). Seeded
-   a second tenant, connected as `arcnave_app` with
-   `SET LOCAL app.current_tenant` set to that tenant, and confirmed its
-   `list()` call returns none of the first tenant's documents — a real
-   proof, not a vacuous one.
-4. **Migration reversibility**: `npm run migrate:down` dropped the
-   table cleanly (confirmed via `\dt documents` returning no relation),
-   then `npm run migrate` re-applied it to leave the DB in the expected
-   final state.
-5. **Full existing suite regression check**: `npm test` — 351/351
-   passing, 0 failures, after this slice's changes (up from 145 tests
-   collected in an earlier partial env-var run; the full run needed
-   `PLATFORM_DATABASE_URL` set alongside `DATABASE_URL`/
-   `MIGRATION_DATABASE_URL`, all sourced from the local `.env`).
-6. All seeded test data cleaned up afterward (real `DELETE`s via the
-   admin connection, confirmed no leftover rows in
-   `documents`/`students`/`users`/`colleges` for the test college IDs).
+1. **`documentService.js` unit tests** (`document-service.test.js`,
+   mocked repository/storage, no live DB/filesystem) — 13 cases:
+   missing-field/missing-actor rejection, status-forging rejection,
+   write-before-create ordering, FK-violation mapping, review-status
+   whitelist enforcement, actor/timestamp stamping (never caller-
+   supplied), no-op-on-missing-id (no audit entry), soft-delete never
+   touching storage, download's found/not-found paths. All pass.
+2. **`fileStorage.js` against the real filesystem** (throwaway script,
+   deleted after use): confirmed `buildStoragePath` strips a
+   `../../etc/passwd`-style traversal attempt down to a safe
+   tenant-prefixed path, a real `writeFile`/`readFile` round-trip
+   matches bytes exactly, and two uploads of the identical `fileName`
+   get distinct paths (no silent overwrite).
+3. **FK migration** applied against the live `docker-compose`
+   Postgres: `\d fee_payments` shows
+   `fee_payments_receipt_document_id_fkey` referencing `documents(id)`;
+   `down` drops it cleanly, re-applied `up` after.
+4. **Full suite regression**: `npm test` — 364/364 passing (up from
+   351: +13 new `document-service.test.js` cases, plus the
+   `finance.test.js` fix holding).
 
 ## Flags / open questions
-- **No service/API/UI yet** — `documentService.js`, `/api/v1/documents`
-  routes, and repointing `DocumentPanel.jsx` off its dead prototype
-  endpoints are later slices, same vertical-build sequencing every
-  prior module followed.
-- **`fee_payments.receipt_document_id` is still a bare UUID with no FK**
-  (restated, unchanged) — a later Finance-touching migration should now
-  add `FOREIGN KEY (receipt_document_id) REFERENCES documents(id)`
-  since `documents` exists as of this commit. Not done in this slice
-  (out of this session's stated scope), but no longer blocked.
-- **No actual file storage integration** — this table only records
-  `storage_path`/`mime_type`/`file_size_bytes` metadata; the real
-  upload-bytes-to-storage mechanism (local disk / S3-compatible /
-  whatever gets chosen) is unbuilt, a later Module 6 slice's job.
-- **No encryption-at-rest mechanism for stored files** — flagged in
-  the migration comment specifically re: Aadhaar scans; a storage-layer
-  concern for whichever slice adds real storage integration, not
-  solved here.
-- **`WorkflowService` (Module 8) still unbuilt** (restated, unchanged
-  from every prior module) — a real document-verification approval
-  flow, if one turns out to be needed beyond the simple
-  `verified_by_user_id`/`verified_at` columns here, would route through
-  it once it exists.
+- **No API/UI yet** — `/api/v1/documents` routes and repointing
+  `DocumentPanel.jsx` off its dead prototype endpoints are the next
+  slice(s), same vertical sequencing every prior module followed.
+- **`docker-compose.yml` doesn't mount a persistent volume for
+  `DOCUMENT_STORAGE_ROOT`** yet (ADR-017's own flagged consequence) —
+  uploaded files currently live inside the app container's writable
+  layer, gone on container recreation. Needs a named volume (mirroring
+  `pgdata`) before this is deploy-safe; not this slice's job.
+- **No backup story for on-disk files** (ADR-017) — Postgres has
+  `pg_dump`; uploaded bytes do not have an equivalent yet.
+- **No encryption-at-rest** — flagged in the Module 6 migration's own
+  comment (re: Aadhaar scans specifically), still unsolved; a
+  storage-layer concern for whenever it's prioritized.
+- **`WorkflowService` (Module 8) still unbuilt** (restated) —
+  `reviewDocument`'s verify/reject is a direct, ungated action for now,
+  same "no real approval gate exists yet" caveat every other module's
+  status-transition logic already carries.

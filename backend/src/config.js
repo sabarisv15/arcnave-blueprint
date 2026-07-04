@@ -4,6 +4,8 @@
 // secrets/connection strings have no hardcoded fallback — a missing
 // required value fails loudly at startup, not silently at first use.
 
+const path = require('path');
+
 function required(name) {
   const value = process.env[name];
   if (!value) {
@@ -64,4 +66,12 @@ module.exports = {
   // invitePrincipal) stays acceptable. A safe default, not a business
   // rule yet — nothing in BusinessRules.md specifies this.
   principalInvitationExpireHours: Number(process.env.PRINCIPAL_INVITATION_EXPIRE_HOURS) || 72,
+
+  // Local-disk root DocumentService writes uploaded files under (see
+  // ADR-017). Not a secret — a plain path, defaulted like appName/
+  // logLevel rather than required() like the connection strings above.
+  // docker-compose.yml does not yet mount a persistent volume here —
+  // a flagged gap, not solved by this default (see ADR-017's
+  // Consequences).
+  documentStorageRoot: process.env.DOCUMENT_STORAGE_ROOT || path.join(__dirname, '../storage'),
 };
