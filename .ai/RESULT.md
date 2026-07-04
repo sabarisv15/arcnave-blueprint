@@ -1,74 +1,72 @@
 # RESULT
 
 ## Files changed
-- `backend/package.json`, `backend/package-lock.json` (+`docxtemplater`, `pizzip`)
-- `backend/src/generators/templateMerger.js` (new — pure `mergeTemplate`)
-- `backend/src/services/documentService.js` (+`uploadTemplate`, +re-exported `mergeTemplate`/`TemplateMergeError`/`TEMPLATE_DOC_TYPE`)
-- `docs/architecture/TechStack.md`, `docs/modules/Module-06-Documents.md` (docs)
-
-No migration — `documents.student_id` (nullable since 1752800000000)
-and `doc_type` (free TEXT) already support this shape.
+- `backend/src/services/workflowService.js` (+`getRequest`, plain read)
+- `backend/src/routes/workflowRequests.js` (new — pending/approve/reject)
+- `backend/src/routes/staff.js` (+`POST /staff/:id/submit-registration`)
+- `backend/src/routes/finance.js` (+`POST /finance/fee-structures/:id/submit-approval`)
+- `backend/src/tenantApp.js` (+router registration)
+- `frontend/src/pages/HodDashboard.jsx`, `frontend/src/pages/PrincipalDashboard.jsx`
+  (new "Pending Approvals" tab; Principal also gets a "Staff
+  Registrations" section + a Fee Structures "Submit for Approval" button)
+- `docs/modules/Module-08-Workflow-Notifications.md` (closes the module)
 
 ## What was built
-**Storage**: `documentService.uploadTemplate(client, {collegeId,
-fileName, mimeType, fileBuffer}, {actorUserId})` — a thin wrapper over
-the existing `uploadDocument`, fixing `doc_type = 'template'`,
-`student_id = null` (neither caller-suppliable through this path).
-Same table, same `storage_path`, same validation/audit-logging
-`uploadDocument` already has — no parallel implementation.
+**Routes**: `GET /workflow-requests/pending` (thin
+`listPendingForApprover` wrapper, `requireAuth` — the query itself is
+the authorization boundary). `POST /workflow-requests/:id/approve`/
+`:id/reject` **dispatch by `entity_type`**: `staff_registration` →
+`staffService.approveStaffRegistration`/`rejectStaffRegistration`;
+`fee_structure` → `financeService.approveFeeStructure`/
+`rejectFeeStructure`; anything else → `workflowService` directly. Asked
+the user directly whether a bare `workflowService`-only route was
+acceptable given it would silently skip the real entity cascades
+(fee status flip, staff activation) — user chose dispatch. `POST
+/staff/:id/submit-registration` and `POST
+/finance/fee-structures/:id/submit-approval` wire the two
+previously-unreachable submit functions; both `requireAuth`, not
+`requireRole('principal')`, to avoid deadlocking ADR-005 against the
+single-principal case.
 
-**Merge**: `generators/templateMerger.js`'s `mergeTemplate(templateBuffer,
-fields) -> Buffer` — a pure function (no DB, no storage), `docxtemplater`
-+ `pizzip`. No fixed field list: an unmatched `{{tag}}` renders blank
-(`nullGetter`) rather than throwing.
+**UI**: "Pending Approvals" tab (generic list, Approve/Reject) on both
+dashboards. Principal additionally gets "Staff Registrations" (submit
+trigger, using a new `realStaffList` fetch — deliberately separate
+from the existing dead-endpoint `staffList` the legacy Staff
+Directory/Edit modal still uses) and a "Submit for Approval" button on
+the existing Fee Structures list.
 
-## Real bug found and fixed during live verification
-docxtemplater's own default delimiter is single-brace `{tag}` (it
-reuses that character for its loop/condition syntax), not `{{tag}}`.
-This project's templates are specified as `{{field}}`, so the first
-version (relying on the library default) failed every real template
-with a confusing "duplicate open tag"/"duplicate close tag" error —
-`{{studentName}}` was being lexed as two nested single-brace tags.
-Fixed by setting `delimiters: { start: '{{', end: '}}' }` explicitly in
-the `Docxtemplater` constructor options. Caught empirically (a real
-generated `.docx` template failed to merge), not by reading the
-library's docs in advance.
-
-## CLAUDE.md rule 9 (merge field VALUES are untrusted, never instructions)
-docxtemplater parses a template's own `{{tags}}` once, at load time,
-from the template's XML; a field VALUE is substituted afterward as a
-literal XML text node, never re-scanned for further tags. Verified
-live, not just asserted: a field value containing literal `{{rollNo}}`
-text and a fragment resembling a closing XML tag rendered as that exact
-string in the merged output, never re-substituted or interpreted as a
-second tag. The one thing that would break this guarantee — attaching
-docxtemplater's optional angular-expressions/eval parser module — is
-never done here.
+## Real interaction found live (browser click-through, not by inspection)
+Staff/fee-structure `create` is still gated `requireRole('principal')`
+(unchanged, pre-existing), and Principal is always a resolved approver
+in both chains. A Principal who both creates AND submits the same
+record 403s trying to approve it themselves (ADR-005) — correct
+behavior, surfaced cleanly via a toast, not a crash. Recoverable:
+`rejectRequest` has no self-check, so the same Principal can withdraw
+their own submission and have a different account resubmit. Added a
+visible warning caption on both submit surfaces; documented as a real,
+unfixed gap in Module-08's own doc (fixing it means revisiting the
+create routes' RBAC, out of this slice's "no new service logic" scope).
 
 ## Verification
-Live against the real docker-compose Postgres + a real generated
-`.docx` template (one-off script, deleted after use): uploaded via
-`uploadTemplate` (`doc_type='template'`, `student_id=NULL` confirmed on
-the row); a second tenant's `getDocument` on the same id returned
-`null` (RLS holds for template rows, same as student-document rows);
-downloaded bytes byte-identical to the upload; `mergeTemplate`
-correctly substituted every `{{field}}`; a missing field rendered
-blank rather than throwing; the rule-9 hostile-value proof above; a
-non-`.docx` buffer raised a clean `TemplateMergeError`. Full backend
-suite: 430/430 (no regressions; no new automated tests added — this
-slice is storage + a generator, same "one-off verification script,
-deleted after use" pattern this project's other first-slice
-migration/repository/generator commits already use, not a service
-layer with its own permanent unit-test file yet).
+Full backend suite: 430/430, no regressions. A real HTTP round-trip
+script (one-off, deleted after use) proved: submit, wrong-actor 403,
+step advance (HOD list → Principal list), terminal cascade (staff_code
+assigned, `users.is_active`/`activated_by` real), fee structure
+`status` actually flipping, self-approval 403 through the dispatch
+route, duplicate-submit 409, reject path. Then a real browser: a
+standalone backend (`PORT=5000`) + the real Vite dev server, driven
+with headless Chrome (`playwright-core`, scratch-installed for this one
+verification pass only — not added to this repo's dependencies) through
+the actual login flow and UI — this is how the RBAC/self-approval
+interaction above was actually found, not predicted in advance.
+Screenshots confirmed the toast messages, the list moving between
+HOD's and Principal's queues, and the "Staff Registrations" row
+disappearing once `staff_code` was really assigned. `console` free of
+runtime errors at every step. Frontend production build clean both
+before and after the fix.
 
 ## Flags
-- No API/UI: nothing yet accepts a template upload or a merge request
-  from outside; a future slice wires a route (or NotificationService,
-  which Architecture.md 2.5 already names as composing DocumentService's
-  templates) into these two functions.
-- No orchestration combining upload -> merge -> store-the-filled-result
-  into one flow — this slice built storage and merge as two separate
-  pieces, per its own scope.
-- No mime-type/content check that an upload tagged `doc_type =
-  'template'` is actually a `.docx` at upload time; `mergeTemplate` is
-  what needs a valid `.docx`, and validates that at merge time instead.
+- The create-route-RBAC / ADR-005 interaction above — real, recoverable,
+  not fixed this slice.
+- No orchestration linking create → submit into one flow; a Principal
+  must switch tabs to submit after creating a record.

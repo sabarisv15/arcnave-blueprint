@@ -4,6 +4,7 @@ const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requireRole } = require('../middleware/rbac');
 const staffService = require('../services/staffService');
+const workflowService = require('../services/workflowService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -65,6 +66,37 @@ function mapStaffServiceError(err, res) {
   }
   if (err instanceof staffService.StaffUserNotFoundError) {
     res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.StaffNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  // submitStaffRegistration's own error surface, per its own comment:
+  // resolves the department's real HOD and the college's real Principal
+  // (each throws if none exists yet), then calls
+  // workflowService.submitRequest (throws if a Pending request already
+  // governs this staff row, or the resolved shape is somehow invalid) —
+  // none of these are staffService's own CRUD error classes, but this
+  // route is the one place they can actually surface.
+  if (err instanceof staffService.StaffHodNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.StaffPrincipalNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestConflictError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestUserNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestValidationError) {
+    res.status(400).json({ detail: err.message });
     return true;
   }
   return false;
@@ -138,6 +170,40 @@ function createStaffRouter() {
         return;
       }
       res.json(staff);
+    } catch (err) {
+      if (mapStaffServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // Module 8 final slice: submitStaffRegistration was built (Module 8
+  // first/third slices) but never wired to a route — a staff profile
+  // created above has no way to actually enter the real
+  // Faculty->HOD->Principal chain. This is that trigger point.
+  //
+  // requireAuth, deliberately NOT requireRole('principal') like
+  // create/update above: BusinessRules.md names a real actor for this
+  // one action ("Faculty submits"), unlike create/update which have no
+  // named actor and so fall back to this router's conservative
+  // placeholder. Gating submission to principal-only would actively
+  // break the feature for the common single-principal-per-college
+  // case — requestedByUserId would equal the Principal's own user_id,
+  // which is also the resolved final-step approver in every chain
+  // (findPrincipal), so ADR-005's self-approval rule would reject
+  // every single submission at the terminal step. workflowService's
+  // own step-matching + self-approval checks are the real gate here
+  // (same "the service is the gate, not requireRole" reasoning
+  // attendance.js's router comment already gives for
+  // AttendanceForbiddenError), not this route's RBAC.
+  router.post('/staff/:id/submit-registration', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const workflowRequest = await staffService.submitStaffRegistration(
+        req.dbClient,
+        req.params.id,
+        { requestedByUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(workflowRequest);
     } catch (err) {
       if (mapStaffServiceError(err, res)) return;
       throw err;

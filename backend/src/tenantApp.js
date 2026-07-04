@@ -19,6 +19,7 @@ const createAttendanceRouter = require('./routes/attendance');
 const createFinanceRouter = require('./routes/finance');
 const createDocumentsRouter = require('./routes/documents');
 const createReportsRouter = require('./routes/reports');
+const createWorkflowRequestsRouter = require('./routes/workflowRequests');
 
 // The tenant-facing API — a genuinely separate Express app from
 // platformApp.js, mounted at /api/v1 in app.js. Owns the full tenant
@@ -108,6 +109,7 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   app.use(createFinanceRouter());
   app.use(createDocumentsRouter());
   app.use(createReportsRouter());
+  app.use(createWorkflowRequestsRouter());
 
   if (typeof registerExtraRoutes === 'function') {
     registerExtraRoutes(app);

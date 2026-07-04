@@ -1,10 +1,9 @@
 # Module 8 — Workflow & Notifications
 
-Status: Complete for this build order's scope (schema, repositories,
-WorkflowService, real FinanceService/StaffService callers, minimal
-NotificationService, staff-approval → active login). No API/UI yet —
-Module 9 (AI) can build against this; a real UI slice can follow
-independently.
+Status: **Complete, end to end** (schema, repositories, WorkflowService,
+real FinanceService/StaffService callers, minimal NotificationService,
+staff-approval → active login, and now the pending-approvals API + UI).
+Module 9 (AI) can build against this.
 
 ## Tables
 `workflow_requests` — the approval request itself: polymorphic
@@ -133,8 +132,102 @@ regenerates `password_hash` off its placeholder, writes a
 unconfigured — the cascade completes and commits regardless of
 notification delivery. Full suite: 430/430.
 
+## API + UI (final slice) — closes Module 8 end to end
+Three generic routes (`backend/src/routes/workflowRequests.js`), plus
+two entity-specific submit routes previously built but unreachable:
+
+- `GET /api/v1/workflow-requests/pending` — thin wrapper over
+  `workflowService.listPendingForApprover`; `requireAuth`, not a role
+  gate — the query itself is the authorization boundary (only rows
+  where the caller is the resolved approver at the current step), same
+  "the service is the gate" reasoning `attendance.js`'s router comment
+  already gives for `AttendanceForbiddenError`.
+- `POST /api/v1/workflow-requests/:id/approve` / `:id/reject` —
+  **dispatch by `entity_type`, not a bare `workflowService` passthrough.**
+  `workflowService.approveRequest`/`rejectRequest` alone only ever flip
+  the `workflow_requests` row itself; `staffService.approveStaffRegistration`
+  and `financeService.approveFeeStructure`/`rejectFeeStructure` each do
+  real, load-bearing work on top of that (fee structure `status` actually
+  flipping; staff_code assignment + user activation + credentials email).
+  Calling `workflowService` directly for those two entity types would
+  have flipped `workflow_requests.status` to `'Approved'` while leaving
+  the fee structure stuck at `'Pending Approval'` forever and the staff
+  member never activated — a real regression of Module 8's own earlier
+  slices, not an acceptable simplification. The route resolves the
+  pending request's own `entity_type` first (`workflowService.getRequest`,
+  a new plain read added for exactly this) and dispatches to the
+  matching, already-existing entity-specific function — no new service
+  logic, only routing between functions that already existed. Anything
+  outside `staff_registration`/`fee_structure` falls back to calling
+  `workflowService` directly, so a future entity type with no dedicated
+  cascade still works through this same endpoint.
+- `POST /api/v1/staff/:id/submit-registration` /
+  `POST /api/v1/finance/fee-structures/:id/submit-approval` — the
+  actual trigger points for `submitStaffRegistration`/
+  `submitFeeStructureApproval`, both built earlier in this module but
+  never reachable from any route. **`requireAuth`, deliberately NOT
+  `requireRole('principal')`** like every other write on `staff.js`/
+  `finance.js`: BusinessRules.md names a real actor ("Faculty submits")
+  unlike create/update's no-named-actor placeholder, and gating
+  submission to principal-only would have broken the feature outright
+  for the common single-principal case — `requestedByUserId` would
+  equal the Principal's own `user_id`, which is also the resolved
+  final-step approver in every chain (`findPrincipal`), so ADR-005's
+  self-approval rule would reject every submission at the terminal
+  step. `workflowService`'s own step-matching + self-approval checks
+  are the real gate, not this route's RBAC.
+
+**UI**: a "Pending Approvals" tab in both `HodDashboard.jsx` and
+`PrincipalDashboard.jsx` (generic list, Approve/Reject buttons, same
+card+list convention `PrincipalDashboard.jsx`'s existing Fee Structures
+tab already uses) plus, on `PrincipalDashboard.jsx` only, a "Staff
+Registrations" section (the `submitStaffRegistration` trigger) and a
+"Submit for Approval" button added to the existing Fee Structures list
+(the `submitFeeStructureApproval` trigger). Both use a NEW `realStaffList`
+state (real `GET /api/v1/staff`), deliberately separate from the
+existing, dead-endpoint `staffList` the legacy Staff Directory/Edit-Staff
+modal on both dashboards still uses — that legacy flow is untouched,
+same "don't half-repoint what wasn't asked" restraint this codebase
+already applies elsewhere.
+
+**A real, load-bearing interaction found live (browser click-through,
+not by inspection), not fixed here**: staff/fee-structure `create` is
+still gated `requireRole('principal')` (an unchanged, pre-existing
+placeholder from Modules 2/5), and the Principal is always a resolved
+approver in both chains (the terminal step for staff registrations, the
+only step for fee structures). A Principal who both creates AND submits
+the same record can never approve it themselves — ADR-005 correctly
+403s the attempt, with a clear toast, not a silent failure or a crash.
+Recoverable, not a dead end: `rejectRequest` has no self-check, so the
+same Principal can withdraw their own mistaken submission and have a
+different authenticated user submit instead (proven live: HOD approved
+step 1, a re-submission by the Faculty member's own account reached
+step 2, and Principal's terminal approval then succeeded — staff_code
+assigned, `realStaffList` no longer showing that row as unregistered).
+Fixing this for real means revisiting the create routes' RBAC
+placeholder — out of this slice's "no new service logic" scope, flagged
+in both `PrincipalDashboard.jsx`'s own comments and here.
+
+Verified live: full backend suite 430/430 (no regressions); a
+standalone backend (`PORT=5000`) + the real Vite dev server driven with
+a headless Chrome instance (`playwright-core` against a locally
+installed Chrome, scratch-installed for this one verification pass, not
+added to this repo's dependencies) through the actual login flow
+(college code → username/password) — submit as Faculty, approve as
+HOD (step 1 of 2, list correctly moves from HOD's queue to Principal's),
+approve as Principal (terminal: staff_code assigned, row disappears
+from "Staff Registrations"), the self-approval 403 proven with its real
+toast, and `console` free of runtime errors at every step.
+
 ## Known gaps / deferred
-- No API/UI for any of this yet.
+- No orchestration combining `submitStaffRegistration`/
+  `submitFeeStructureApproval` and the create screens into one flow —
+  a Principal must switch to the Pending Approvals tab to submit, a
+  separate step from creating the record. Acceptable for this slice
+  (create's own RBAC/UI is unchanged), not solved here.
+- The create-route-RBAC / ADR-005 self-approval interaction described
+  above — real, reproducible, recoverable via reject-and-resubmit, not
+  fixed this slice.
 - Who/what creates the *initial* `users` row a staff profile links to
   (before any registration chain starts) is still unbuilt — unchanged
   since the first Staff slice, still explicitly flagged.
@@ -152,4 +245,5 @@ notification delivery. Full suite: 430/430.
 ## Commits
 `9e6787d` schema+repositories · `2021eec` `workflowService.js` ·
 `45214b1` FinanceService/StaffService wiring · `de0f9a0`
-NotificationService + staff-activation cascade.
+NotificationService + staff-activation cascade · pending-approvals API
++ UI, closing Module 8 end to end (this slice).

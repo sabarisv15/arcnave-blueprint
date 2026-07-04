@@ -312,6 +312,21 @@ export default function HodDashboard() {
   const [editingStaff, setEditingStaff] = useState(null); // null means creating
   const [generatedCreds, setGeneratedCreds] = useState(null);
 
+  // Module 8 final slice — the pending-approvals flow
+  // (Architecture.md 2.4/2.5, CLAUDE.md rule 3, routes/workflowRequests.js).
+  // A generic list only here: HOD's role in the real Faculty->HOD->
+  // Principal / fee-structure chains is to approve/reject the current
+  // step, never to submit — see PrincipalDashboard.jsx's own comment on
+  // why the "Staff Registrations: Submit for Approval" trigger lives
+  // there instead (staff/fee-structure creation is itself still gated
+  // requireRole('principal') today).
+  const [pendingApprovals, setPendingApprovals] = useState([]);
+  const [workflowActionId, setWorkflowActionId] = useState(null);
+  // Real GET /api/v1/staff — used only to show a full_name next to a
+  // pending staff_registration entry below, distinct from the legacy,
+  // dead-endpoint staffList this file's Staff Directory still uses.
+  const [realStaffList, setRealStaffList] = useState([]);
+
   // Form & Review States
   const [remarks, setRemarks] = useState('');
   const [reviewLoading, setReviewLoading] = useState(false);
@@ -433,6 +448,27 @@ export default function HodDashboard() {
       if (monRes.ok) {
         const monData = await monRes.json();
         setMonitorData(monData.tutors_data);
+      }
+
+      // Module 8 final slice — this HOD's pending approvals (real API,
+      // requireAuth-gated — see routes/workflowRequests.js) and the
+      // real staff list (used only to display a full_name alongside a
+      // pending staff_registration entry, not the legacy Staff
+      // Directory above).
+      const pendingApprovalsRes = await fetch('/api/v1/workflow-requests/pending', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (handleAuthError(pendingApprovalsRes)) return;
+      if (pendingApprovalsRes.ok) {
+        setPendingApprovals((await pendingApprovalsRes.json()) || []);
+      }
+
+      const realStaffRes = await fetch('/api/v1/staff?limit=200', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (handleAuthError(realStaffRes)) return;
+      if (realStaffRes.ok) {
+        setRealStaffList((await realStaffRes.json()) || []);
       }
 
     } catch (e) {
@@ -613,6 +649,39 @@ export default function HodDashboard() {
     finally { setReviewLoading(false); }
   };
 
+  // Module 8 final slice — generic approve/reject. Dispatch by
+  // entity_type lives entirely on the backend
+  // (routes/workflowRequests.js: staffService.approveStaffRegistration/
+  // financeService.approveFeeStructure/rejectFeeStructure, falling back
+  // to workflowService directly), so this one call correctly triggers
+  // the real entity-specific cascade regardless of which kind of
+  // request this is — this screen never needs to branch on entity_type
+  // itself, only display it.
+  const handleWorkflowAction = async (requestId, action) => {
+    setWorkflowActionId(requestId);
+    try {
+      const res = await fetch(`/api/v1/workflow-requests/${requestId}/${action}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({}),
+      });
+      if (handleAuthError(res)) return;
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Failed to ${action} request`);
+      }
+      showToast(`Request ${action === 'approve' ? 'approved' : 'rejected'}!`, 'success');
+      loadData();
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setWorkflowActionId(null);
+    }
+  };
+
   // STAFF PROFILES MANAGEMENT FLOW
   const openAddStaff = () => {
     setEditingStaff(null);
@@ -770,6 +839,7 @@ export default function HodDashboard() {
 
   const menuItems = [
     { id: 'overview', label: 'Overview', icon: BarChart3 },
+    { id: 'pending_approvals', label: 'Pending Approvals', icon: FileCheck },
     { id: 'academic', label: 'Academic Dashboard', icon: Bot },
     { id: 'admin', label: 'Admin Suite & Approvals', icon: Settings }
   ];
@@ -1306,6 +1376,80 @@ export default function HodDashboard() {
             </div>
           </div>
         )}
+
+            {/* PENDING APPROVALS (Module 8 final slice) — generic list,
+                same card+list pattern PrincipalDashboard.jsx's Fee
+                Structures tab uses. Approve/reject dispatch by
+                entity_type on the backend; this screen only displays
+                whichever entity_type/current_step/approver_chain
+                workflowService.listPendingForApprover resolves for
+                this HOD right now. */}
+            {viewSection === 'pending_approvals' && (
+              <div className="space-y-8 animate-slide-up">
+                <div className="card p-6 space-y-4">
+                  <div className="flex justify-between items-center border-b pb-3 border-slate-50">
+                    <div>
+                      <h3 className="font-extrabold text-slate-805 text-sm flex items-center gap-1.5">
+                        <FileCheck className="w-4 h-4 text-amber-500" />
+                        Pending Approvals
+                        {pendingApprovals.length > 0 && <span className="badge badge-amber">{pendingApprovals.length}</span>}
+                      </h3>
+                      <p className="text-slate-450 text-[10px] font-semibold mt-0.5">
+                        Requests waiting on your approval at the current step of their chain.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2.5 max-h-[480px] overflow-y-auto pr-1">
+                    {(pendingApprovals || []).length === 0 ? (
+                      <p className="text-xs text-slate-400 italic py-6 text-center">Nothing pending your approval right now.</p>
+                    ) : (
+                      pendingApprovals.map((req) => {
+                        const relatedStaff = req.entity_type === 'staff_registration'
+                          ? realStaffList.find((s) => s.id === req.entity_id) : null;
+                        const isActing = workflowActionId === req.id;
+                        return (
+                          <div key={req.id} className="p-3 bg-white border border-slate-150 rounded-xl flex items-center justify-between hover:border-slate-350 transition-colors">
+                            <div className="flex items-center gap-2.5">
+                              <div className="w-8 h-8 rounded-full bg-amber-50 border border-amber-100 text-amber-600 flex items-center justify-center font-bold text-xs flex-shrink-0">
+                                <Clock className="w-4 h-4" />
+                              </div>
+                              <div>
+                                <p className="text-xs font-extrabold text-slate-805">
+                                  {req.entity_type === 'staff_registration' ? 'Staff Registration' : req.entity_type === 'fee_structure' ? 'Fee Structure' : req.entity_type}
+                                  {relatedStaff && <> · {relatedStaff.full_name}</>}
+                                </p>
+                                <p className="text-[9px] text-slate-400 font-semibold">
+                                  Step {req.current_step} of {req.approver_chain?.length || '?'}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => handleWorkflowAction(req.id, 'approve')}
+                                disabled={isActing}
+                                className="w-7 h-7 rounded-lg bg-emerald-50 border border-emerald-100 text-emerald-600 flex items-center justify-center hover:bg-emerald-100 disabled:opacity-50 transition-colors"
+                                title="Approve"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => handleWorkflowAction(req.id, 'reject')}
+                                disabled={isActing}
+                                className="w-7 h-7 rounded-lg bg-rose-50 border border-rose-100 text-rose-600 flex items-center justify-center hover:bg-rose-100 disabled:opacity-50 transition-colors"
+                                title="Reject"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {viewSection === 'academic' && (
               <>

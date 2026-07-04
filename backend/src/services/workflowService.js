@@ -280,6 +280,18 @@ async function rejectRequest(client, id, { actorUserId, remarks } = {}) {
   return updated;
 }
 
+// A plain read by the workflow_requests row's own id — needed by
+// routes/workflowRequests.js to resolve entity_type/entity_id before
+// dispatching approve/reject to the right entity-specific service
+// (staffService.approveStaffRegistration/financeService.approveFeeStructure
+// each take their OWN entity's id, not a workflow_requests id, so the
+// route has to learn which entity this row governs before it can call
+// either one). A pure read, not new approval logic — same "thin
+// wrapper" precedent findPendingForEntity below already set.
+async function getRequest(client, id) {
+  return workflowRepository.findById(client, id);
+}
+
 // The natural "what does this user need to act on next" read this
 // whole table's shape exists for — a thin wrapper, same as
 // financeService.listFeeStructuresForClassAndYear.
@@ -318,6 +330,7 @@ module.exports = {
   submitRequest,
   approveRequest,
   rejectRequest,
+  getRequest,
   listPendingForApprover,
   findPendingForEntity,
 };

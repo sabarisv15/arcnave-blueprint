@@ -4,6 +4,8 @@ const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requireRole } = require('../middleware/rbac');
 const financeService = require('../services/financeService');
+const staffService = require('../services/staffService');
+const workflowService = require('../services/workflowService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -94,6 +96,33 @@ function mapFinanceServiceError(err, res) {
     res.status(409).json({ detail: err.message });
     return true;
   }
+  if (err instanceof financeService.FeeStructureNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  // submitFeeStructureApproval's own error surface, per its file-level
+  // comment: resolves the Principal via staffService.findPrincipal
+  // (throws if none exists yet) then calls workflowService.submitRequest
+  // (throws if a Pending request already governs this fee structure, or
+  // if the resolved requestedByUserId/approverChain shape is somehow
+  // invalid) — none of these are financeService's own error classes,
+  // but this route is the one place they can actually surface.
+  if (err instanceof staffService.StaffPrincipalNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestConflictError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestUserNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -153,6 +182,37 @@ function createFinanceRouter() {
         return;
       }
       res.json(feeStructure);
+    } catch (err) {
+      if (mapFinanceServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // Module 8 final slice: submitFeeStructureApproval was built
+  // (Module 8 second slice) but never wired to a route — a fee
+  // structure created above stays 'Pending Approval' forever with no
+  // way to actually start the real approval chain. This is that
+  // trigger point.
+  //
+  // requireAuth, deliberately NOT requireRole('principal') like
+  // create/update above — same reasoning routes/staff.js's own
+  // submit-registration route now documents: this chain is single-step,
+  // Principal-only (financeService.js's own header comment). Gating
+  // submission to principal-only would mean requestedByUserId is
+  // always the Principal's own user_id, which is also the chain's only
+  // (and therefore final) step's resolved approver — ADR-005's
+  // self-approval rule would reject every submission outright. The
+  // workflow chain's own step-matching + self-approval checks are the
+  // real gate, not this route's RBAC.
+  router.post('/finance/fee-structures/:id/submit-approval', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const workflowRequest = await financeService.submitFeeStructureApproval(
+        req.dbClient,
+        req.params.id,
+        { requestedByUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(workflowRequest);
     } catch (err) {
       if (mapFinanceServiceError(err, res)) return;
       throw err;

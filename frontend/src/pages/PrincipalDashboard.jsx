@@ -207,6 +207,22 @@ export default function PrincipalDashboard() {
     amount: ''
   });
   const [feeStructureSubmitting, setFeeStructureSubmitting] = useState(false);
+  const [submittingFeeStructureId, setSubmittingFeeStructureId] = useState(null);
+
+  // Module 8 final slice — the pending-approvals flow (Architecture.md
+  // 2.4/2.5, CLAUDE.md rule 3, routes/workflowRequests.js). realStaffList
+  // is deliberately a SEPARATE state from staffList above: staffList
+  // still comes from the dead /api/hod/staff prototype endpoint (always
+  // 404s, per this file's own existing comments on Staff Directory/the
+  // Add-Staff modal) and has no real staff.id UUIDs to act on. This one
+  // is the real GET /api/v1/staff, used only by the "Staff
+  // Registrations" section below — the legacy Staff Directory/Edit-Staff
+  // modal are untouched, same "don't half-repoint what wasn't asked"
+  // restraint this file already applies elsewhere.
+  const [realStaffList, setRealStaffList] = useState([]);
+  const [pendingApprovals, setPendingApprovals] = useState([]);
+  const [workflowActionId, setWorkflowActionId] = useState(null);
+  const [submittingStaffId, setSubmittingStaffId] = useState(null);
 
   // Reports (Module 7) — real API throughout (routes/reports.js).
   // No report-history list yet (not asked for this slice) — just the
@@ -272,6 +288,23 @@ export default function PrincipalDashboard() {
       if (subRes.ok) {
         const subData = await subRes.json();
         setSubmissions(subData.submissions || []);
+      }
+
+      // 7. Module 8 final slice — real staff list (GET /api/v1/staff,
+      // distinct from the dead-endpoint staffList above) and this
+      // user's pending approvals (GET /api/v1/workflow-requests/pending).
+      const realStaffRes = await fetch('/api/v1/staff?limit=200', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (realStaffRes.ok) {
+        setRealStaffList((await realStaffRes.json()) || []);
+      }
+
+      const pendingApprovalsRes = await fetch('/api/v1/workflow-requests/pending', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (pendingApprovalsRes.ok) {
+        setPendingApprovals((await pendingApprovalsRes.json()) || []);
       }
     } catch (e) {
       console.error(e);
@@ -495,6 +528,101 @@ export default function PrincipalDashboard() {
     }
   };
 
+  // Module 8 final slice — the actual trigger point for
+  // financeService.submitFeeStructureApproval (previously service-only,
+  // unreachable from any route or screen). A fee structure created
+  // above starts, and stays, 'Pending Approval' until this fires — see
+  // this file's own handleFeeStructureFormSubmit comment above.
+  // Re-submitting one already in flight is not specially guarded
+  // client-side: the real 409 (workflow_requests' own partial unique
+  // index, surfaced through routes/finance.js's error mapping) is
+  // the actual backstop, same "let the DB be the backstop" restraint
+  // staffService.assignStaffCode's own comment already documents —
+  // it just surfaces here as a toast instead of silently no-op'ing.
+  const handleSubmitFeeStructureApproval = async (feeStructureId) => {
+    setSubmittingFeeStructureId(feeStructureId);
+    try {
+      const res = await fetch(`/api/v1/finance/fee-structures/${feeStructureId}/submit-approval`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to submit fee structure for approval');
+      }
+      showToast('Fee structure submitted for approval!', 'success');
+      loadData();
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setSubmittingFeeStructureId(null);
+    }
+  };
+
+  // The actual trigger point for staffService.submitStaffRegistration
+  // (same "previously service-only, unreachable" gap). Only shown for
+  // a real staff row with no staff_code yet (see the Pending Approvals
+  // section below) — once staff_code is assigned, the chain already
+  // resolved to Approved and there is nothing left to submit.
+  const handleSubmitStaffRegistration = async (staffId) => {
+    setSubmittingStaffId(staffId);
+    try {
+      const res = await fetch(`/api/v1/staff/${staffId}/submit-registration`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to submit staff registration for approval');
+      }
+      showToast('Staff registration submitted for approval!', 'success');
+      loadData();
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setSubmittingStaffId(null);
+    }
+  };
+
+  // Generic approve/reject — routes/workflowRequests.js's own dispatch
+  // (by entity_type, to staffService.approveStaffRegistration/
+  // financeService.approveFeeStructure/rejectFeeStructure, falling back
+  // to workflowService directly) means this one call correctly
+  // triggers the real entity-specific cascade (staff activation +
+  // credentials email, or fee_structures.status flipping) — this
+  // screen never needs to know which entity type it's acting on.
+  const handleWorkflowAction = async (requestId, action) => {
+    setWorkflowActionId(requestId);
+    try {
+      const res = await fetch(`/api/v1/workflow-requests/${requestId}/${action}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Failed to ${action} request`);
+      }
+      showToast(`Request ${action === 'approve' ? 'approved' : 'rejected'}!`, 'success');
+      loadData();
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setWorkflowActionId(null);
+    }
+  };
+
   // POST /api/v1/reports/student-export always creates a
   // generated_reports row (201) even when generation itself failed —
   // reportService.js resolves with a 'failed' row rather than
@@ -630,6 +758,7 @@ export default function PrincipalDashboard() {
 
   const menuItems = [
     { id: 'overview', label: 'Overview', icon: BarChart3 },
+    { id: 'pending_approvals', label: 'Pending Approvals', icon: FileCheck },
     { id: 'timetable_approvals', label: 'Timetable Approvals', icon: CalendarDays },
     { id: 'marksheet_approvals', label: 'Marksheet Approvals', icon: FileText },
     { id: 'admin', label: 'Workload & Staff', icon: Settings },
@@ -1445,6 +1574,151 @@ export default function PrincipalDashboard() {
           </div>
         )}
 
+        {/* PENDING APPROVALS (Module 8 final slice) — a generic list,
+            same card+list pattern the Fee Structures tab below already
+            uses, not a bespoke review modal like the Marksheet tab
+            above. Approve/Reject dispatch by entity_type on the
+            backend (routes/workflowRequests.js) — this screen just
+            shows whatever workflowService.listPendingForApprover
+            resolves for the authenticated Principal right now. */}
+        {viewSection === 'pending_approvals' && (
+          <div className="space-y-8 animate-slide-up">
+            <div className="card p-6 space-y-4">
+              <div className="flex justify-between items-center border-b pb-3 border-slate-50">
+                <div>
+                  <h3 className="font-extrabold text-slate-805 text-sm flex items-center gap-1.5">
+                    <FileCheck className="w-4 h-4 text-indigo-500" />
+                    Pending Approvals
+                    {pendingApprovals.length > 0 && <span className="badge badge-amber">{pendingApprovals.length}</span>}
+                  </h3>
+                  <p className="text-slate-450 text-[10px] font-semibold mt-0.5">
+                    Requests waiting on your approval at the current step of their chain.
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2.5 max-h-[480px] overflow-y-auto pr-1">
+                {(pendingApprovals || []).length === 0 ? (
+                  <p className="text-xs text-slate-400 italic py-6 text-center">Nothing pending your approval right now.</p>
+                ) : (
+                  pendingApprovals.map((req) => {
+                    const relatedFee = req.entity_type === 'fee_structure'
+                      ? feeStructures.find((fs) => fs.id === req.entity_id) : null;
+                    const relatedStaff = req.entity_type === 'staff_registration'
+                      ? realStaffList.find((s) => s.id === req.entity_id) : null;
+                    const isActing = workflowActionId === req.id;
+                    return (
+                      <div key={req.id} className="p-3 bg-white border border-slate-150 rounded-xl flex items-center justify-between hover:border-slate-350 transition-colors">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-8 h-8 rounded-full bg-amber-50 border border-amber-100 text-amber-600 flex items-center justify-center font-bold text-xs flex-shrink-0">
+                            <Clock className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <p className="text-xs font-extrabold text-slate-805">
+                              {req.entity_type === 'staff_registration' ? 'Staff Registration' : req.entity_type === 'fee_structure' ? 'Fee Structure' : req.entity_type}
+                              {relatedStaff && <> · {relatedStaff.full_name}</>}
+                            </p>
+                            <p className="text-[9px] text-slate-400 font-semibold">
+                              {relatedFee
+                                ? `${relatedFee.fee_category} · ${relatedFee.academic_year} · ₹${relatedFee.amount}`
+                                : `Step ${req.current_step} of ${req.approver_chain?.length || '?'}`}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleWorkflowAction(req.id, 'approve')}
+                            disabled={isActing}
+                            className="w-7 h-7 rounded-lg bg-emerald-50 border border-emerald-100 text-emerald-600 flex items-center justify-center hover:bg-emerald-100 disabled:opacity-50 transition-colors"
+                            title="Approve"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleWorkflowAction(req.id, 'reject')}
+                            disabled={isActing}
+                            className="w-7 h-7 rounded-lg bg-rose-50 border border-rose-100 text-rose-600 flex items-center justify-center hover:bg-rose-100 disabled:opacity-50 transition-colors"
+                            title="Reject"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            {/* STAFF REGISTRATIONS — the trigger point for
+                staffService.submitStaffRegistration, previously
+                service-only/unreachable. Only staff with no staff_code
+                yet are actionable; once assigned, that registration's
+                chain already resolved to Approved. Uses realStaffList
+                (real GET /api/v1/staff), not the legacy, dead-endpoint
+                staffList the Workload & Staff tab still shows.
+
+                Real interaction found live, not by inspection: staff
+                create is still gated requireRole('principal') (a
+                pre-existing placeholder, unchanged by this slice), and
+                the Principal is always the chain's terminal approver
+                (staffService.findPrincipal) -- so a Principal who both
+                creates AND submits the same registration here can never
+                approve it themselves (ADR-005 self-approval, correctly
+                enforced end-to-end: the attempt 403s with a clear
+                toast, not a silent failure). Recoverable, not a dead
+                end -- rejectRequest has no self-check, so the same
+                Principal can withdraw their own mistaken submission and
+                have a different authenticated user (HOD, a future
+                non-principal creator) submit instead. Flagged in
+                Module-08-Workflow-Notifications.md's Known Gaps, not
+                solved here -- fixing it for real means revisiting the
+                create routes' RBAC placeholder, out of this slice's
+                "no new service logic" scope. */}
+            <div className="card p-6 space-y-4">
+              <div className="flex justify-between items-center border-b pb-3 border-slate-50">
+                <div>
+                  <h3 className="font-extrabold text-slate-805 text-sm flex items-center gap-1.5">
+                    <UserPlus className="w-4 h-4 text-indigo-500" />
+                    Staff Registrations
+                  </h3>
+                  <p className="text-slate-450 text-[10px] font-semibold mt-0.5">
+                    Submit a newly-created staff profile into the real Faculty → HOD → Principal approval chain.
+                    Submit as a different account than whoever will give final approval — a Principal cannot approve their own submission.
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2.5 max-h-[360px] overflow-y-auto pr-1">
+                {(realStaffList || []).filter((s) => !s.staff_code).length === 0 ? (
+                  <p className="text-xs text-slate-400 italic py-6 text-center">No staff profiles awaiting registration.</p>
+                ) : (
+                  realStaffList.filter((s) => !s.staff_code).map((s) => (
+                    <div key={s.id} className="p-3 bg-white border border-slate-150 rounded-xl flex items-center justify-between hover:border-slate-350 transition-colors">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-full bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-xs flex-shrink-0">
+                          {(s.full_name || '').charAt(0).toUpperCase() || 'S'}
+                        </div>
+                        <div>
+                          <p className="text-xs font-extrabold text-slate-805">{s.full_name}</p>
+                          <p className="text-[9px] text-slate-400 font-semibold">{s.department || 'No department set'}</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleSubmitStaffRegistration(s.id)}
+                        disabled={submittingStaffId === s.id}
+                        className="btn-primary text-[10px] py-1.5 px-3 disabled:opacity-50"
+                      >
+                        {submittingStaffId === s.id ? 'Submitting…' : 'Submit for Approval'}
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* FEE STRUCTURES (Module 5, Finance) — create + list only, per
             this session's own scope. No edit/delete UI yet. */}
         {viewSection === 'finance' && (
@@ -1487,7 +1761,19 @@ export default function PrincipalDashboard() {
                             </p>
                           </div>
                         </div>
-                        <StatusBadge status={fs.status} />
+                        <div className="flex items-center gap-2">
+                          {fs.status === 'Pending Approval' && (
+                            <button
+                              onClick={() => handleSubmitFeeStructureApproval(fs.id)}
+                              disabled={submittingFeeStructureId === fs.id}
+                              className="btn-outline text-[9px] py-1 px-2.5 disabled:opacity-50"
+                              title="Submit into the real approval chain (Module 8) — a re-submit while one is already in flight is safely rejected with a conflict, not silently duplicated. Fee structures resolve a single Principal-only approval step: submitting as the Principal who will also approve it means that approval will 403 (ADR-005 self-approval) — reject and have a different account submit instead."
+                            >
+                              {submittingFeeStructureId === fs.id ? 'Submitting…' : 'Submit for Approval'}
+                            </button>
+                          )}
+                          <StatusBadge status={fs.status} />
+                        </div>
                       </div>
                     );
                   })
