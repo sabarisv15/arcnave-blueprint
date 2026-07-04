@@ -12,12 +12,19 @@ const { runner } = require('node-pg-migrate');
 
 const direction = process.argv[2] || 'up';
 
+// `down` defaults to reverting just the last-applied migration, not
+// the whole schema — an unbounded `down` count previously took a
+// single "revert the new migration" call all the way back to an empty
+// database. `up` stays unbounded: applying every pending migration is
+// the safe, expected default there.
+const count = direction === 'down' ? 1 : Infinity;
+
 runner({
   databaseUrl: process.env.MIGRATION_DATABASE_URL,
   dir: 'migrations',
   direction,
   migrationsTable: 'pgmigrations',
-  count: Infinity,
+  count,
   log: (msg) => console.log(msg),
 })
   .then(() => {
