@@ -1,51 +1,44 @@
 # TASK
 
-## Objective (Module 8 — Workflow & Notifications — first slice)
-ERD + migration + repository only. `workflow_requests` +
-`approval_history`. No service/API/UI yet.
+## Objective (Module 8 — Workflow & Notifications — second slice)
+`workflowService.js` only. No API/UI. Repositories only, no raw SQL.
 
-## Schema decisions
-- `workflow_requests`: `entity_type`/`entity_id` polymorphic (staff
-  registration, fee structure, future AI Act actions) — `entity_id` is
-  a bare UUID, no FK (can't reference more than one table). `origin`
-  ('human'|'ai') per ADR-005/AI-Governance: even AI-origin requests
-  carry a real `requested_by_user_id` (AI-Governance.md line 63 — tool
-  invocation is always tied to an authenticated user's session).
-- Approver chain: `approver_chain` JSONB, an ordered array of
-  `{step, role, user_id}` resolved by the calling service at creation
-  time (e.g. StaffService resolves the actual HOD for the named
-  department) — this slice only persists whatever chain it's given,
-  doesn't resolve org structure. `current_step` + `status`
-  ('Pending'|'Approved'|'Rejected') track overall progress, mirroring
-  `fee_structures.status`'s no-CHECK convention.
-- `approval_history`: append-only ledger (ADR-018 names this table by
-  name as a future ledger-shaped candidate) — one row per actual
-  approve/reject action taken at a step. Separate repository file from
-  `workflow_requests`, same split reasoning as `audit_log` vs.
-  `configurationRepository`.
-- Partial unique index blocking two concurrent `Pending` requests for
-  the same entity.
+## Methods
+- `submitRequest` — validates required fields + origin ('human'|'ai',
+  no DB CHECK) + `approverChain` shape (sequential, 1-indexed,
+  `{step, role, user_id}`, matching `workflowRepository`'s array-index
+  JSONB lookup). Maps `23505 workflow_requests_entity_pending_key` /
+  `23503 ..._requested_by_user_id_fkey` to domain errors. Audit-logs.
+- `approveRequest` / `rejectRequest` — load the row (404-equivalent if
+  missing, since approve/reject need the row's own `approver_chain`/
+  `current_step` to validate against, not an optional fetch), reject
+  if already resolved, validate `actorUserId` against
+  `approver_chain[current_step - 1].user_id`. `approveRequest` also
+  enforces **ADR-005's resolved open question**: actor cannot equal
+  `requested_by_user_id` — scoped to approve only (rejecting your own
+  request is a withdrawal, not a gate bypass). Approve advances
+  `current_step` or closes to `'Approved'` on the final step; reject
+  always closes to `'Rejected'` regardless of step. Both write to
+  `approval_history` before the `workflow_requests` update, then
+  audit-log.
+- `listPendingForApprover` — thin wrapper over the already-live-proven
+  `workflowRepository.findPendingForApprover`.
 
 ## Grounding
-- BusinessRules.md Staff: Faculty→HOD→Principal chain — modeled as a
-  2-step `approver_chain`, HOD resolved per the request's named
-  department.
-- `6957f02` (Finance fee-structure UI): confirmed `fee_structures`
-  still has no `approved_by`/`approved_at` — this table is what will
-  gate that transition later, not built here.
-- Staff registration-approval gap: `staff` migration explicitly deferred
-  the registration/approval chain to this module — confirmed via its
-  file-level comment.
+- ADR-005, CLAUDE.md rule 3, `workflowRepository.js`/
+  `approvalHistoryRepository.js` as committed (`9e6787d`).
+- `financeService.js` for house error-class/audit-log conventions;
+  `attendanceService.js` for the "required lookup throws NotFound,
+  optional fetch returns null" precedent used to decide
+  `WorkflowRequestNotFoundError`'s shape.
 
 ## Files
-- `backend/migrations/1752900000000_module-8-workflow-schema.js` (new)
-- `backend/src/repositories/workflowRepository.js` (new)
-- `backend/src/repositories/approvalHistoryRepository.js` (new)
-- `docs/modules/Module-08-Workflow-Notifications.md` (new)
+- `backend/src/services/workflowService.js` (new)
 
 ## Verification
-Live against docker-compose Postgres: migrate up, RLS + tenant
-isolation, FK enforcement, partial unique index, every repository
-function through `arcnave_app` with real `SET LOCAL`, migrate down/up
-reversibility. No committed test file — same precedent as every prior
-module's first slice (`326e8b5`, `31f5a8b`, `038f9e2`).
+Live against docker-compose Postgres: full HOD->Principal 2-step
+approve flow (correct actor advances/closes), self-approval rejected,
+wrong-step actor rejected, reject closes early, already-resolved
+re-action rejected, FK/conflict error mapping, cross-tenant isolation
+still holds through the service layer. No committed test file yet —
+same precedent as the first slice.

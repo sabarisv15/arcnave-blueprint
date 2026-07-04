@@ -1,6 +1,7 @@
 # Module 8 — Workflow & Notifications
 
-Status: In progress (first slice: schema + repositories only).
+Status: In progress (schema + repositories + WorkflowService; no
+API/UI yet).
 
 ## Tables
 `workflow_requests` — the approval request itself: polymorphic
@@ -41,18 +42,33 @@ Migration down/up reversibility confirmed. Full 409/409 backend suite
 passes (after rebuilding the `app` image, stale since Module 7 added
 pdfkit/exceljs/docx).
 
+## Service
+`workflowService.js` — `submitRequest` (validates `origin`/
+`approverChain` shape, maps FK/conflict errors, audit-logs),
+`approveRequest`/`rejectRequest` (validate actor against
+`current_step`'s resolved approver, write `approval_history` before
+updating `workflow_requests`, audit-log), `listPendingForApprover`
+(thin wrapper). ADR-005's open question resolved: `approveRequest`
+throws `WorkflowRequestSelfApprovalError` when the actor is the
+request's own `requested_by_user_id` — scoped to approve only;
+`rejectRequest` allows self-withdrawal.
+
+Verified live: full HOD→Principal 2-step chain (correct/wrong actor at
+each step), single-step reject closes immediately, self-approval
+rejected even when the actor is the genuinely-resolved step approver,
+already-resolved re-action rejected, malformed input mapped to the
+right domain error, cross-tenant isolation holds through the service
+layer.
+
 ## Known gaps / deferred
-- No `WorkflowService`/API/UI yet — next slices.
+- No API/UI yet — next slice.
 - Approver-chain *resolution* (who is the HOD of a given department)
-  is not this table's job — the calling service resolves real
-  `user_id`s before calling `create`.
-- ADR-005's open question (should a requester be blocked from
-  approving their own AI-drafted request) is unresolved — not
-  something the schema alone can enforce; a `WorkflowService` rule.
+  is not this service's job — the calling service resolves real
+  `user_id`s before calling `submitRequest`.
 - Finance's fee-structure approval gap and Staff's registration-
   approval gap both still point at this table but are not wired up
-  yet — that's `FinanceService`/`StaffService` calling
-  `WorkflowService`, a later slice.
+  yet — that's `FinanceService`/`StaffService` calling into
+  `workflowService`, a later slice.
 
 ## Commits
-Schema + repositories (this slice).
+Schema + repositories · `workflowService.js` (this slice).
