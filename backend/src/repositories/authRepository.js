@@ -44,6 +44,22 @@ async function updatePasswordHash(client, userId, passwordHash) {
   await client.query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
 }
 
+// Module 8: sets a fresh password_hash and flips is_active/activated_by
+// in one statement — the "activation" moment BusinessRules.md's Staff
+// registration chain describes ("login is enabled only once
+// credentials exist"). Returns null if userId doesn't exist (shouldn't
+// happen given staff.user_id's own FK, but this repository makes no
+// assumption about who's calling it).
+async function activateUser(client, userId, { passwordHash, activatedBy }) {
+  const result = await client.query(
+    `UPDATE users SET password_hash = $1, is_active = true, activated_by = $2
+     WHERE id = $3
+     RETURNING id, college_id, username, email, role, is_active, activated_by`,
+    [passwordHash, activatedBy, userId],
+  );
+  return result.rows[0] || null;
+}
+
 async function createRefreshToken(client, { collegeId, userId, tokenHash, expiresAt }) {
   await client.query(
     `INSERT INTO refresh_tokens (college_id, user_id, token_hash, expires_at)
@@ -70,6 +86,7 @@ module.exports = {
   getUserByUsername,
   getUserById,
   updatePasswordHash,
+  activateUser,
   createRefreshToken,
   getRefreshTokenByHash,
   revokeRefreshToken,

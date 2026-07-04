@@ -96,6 +96,18 @@ function generateRefreshToken() {
   return crypto.randomBytes(32).toString('base64url');
 }
 
+// A fresh, human-typeable temporary password — used exactly once, at
+// staff-activation time (authService.activateUser), to mint real
+// login credentials for emailing. Not a token: this has to be short
+// enough for someone to type in from an email, so 12 bytes of
+// base64url randomness (16 characters, no padding) rather than
+// generateRefreshToken's 32 — still far more entropy than any
+// human-chosen password, but sized for typing, not for living
+// server-side indefinitely like a refresh token does.
+function generateTemporaryPassword() {
+  return crypto.randomBytes(12).toString('base64url');
+}
+
 function hashRefreshToken(token) {
   // SHA-256, not argon2, is deliberate here: a refresh token is
   // already ~256 bits of server-generated randomness, not a low-
@@ -118,4 +130,5 @@ module.exports = {
   decodePlatformAccessToken,
   generateRefreshToken,
   hashRefreshToken,
+  generateTemporaryPassword,
 };

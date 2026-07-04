@@ -1,7 +1,10 @@
 # Module 8 — Workflow & Notifications
 
-Status: In progress (schema + repositories + WorkflowService + real
-FinanceService/StaffService callers wired in; no API/UI yet).
+Status: Complete for this build order's scope (schema, repositories,
+WorkflowService, real FinanceService/StaffService callers, minimal
+NotificationService, staff-approval → active login). No API/UI yet —
+Module 9 (AI) can build against this; a real UI slice can follow
+independently.
 
 ## Tables
 `workflow_requests` — the approval request itself: polymorphic
@@ -88,15 +91,65 @@ slice — the resolved Principal cannot approve their own submission, a
 genuinely different Principal can, and a direct `status` write via
 `updateFeeStructure` is now silently ignored. Full suite: 415/415.
 
+## Staff-approval → active login (final slice)
+`approveStaffRegistration`'s terminal `Approved` outcome (never a
+mid-chain step advance) now runs the rest of BusinessRules.md's own
+sentence — "Staff ID is generated automatically -> credentials are
+emailed -> login is enabled only once credentials exist":
+
+1. `assignStaffCode` — `STF-<year>-<6 hex>`, retried on a real UNIQUE-
+   constraint collision. No prior generation pattern existed anywhere
+   in this codebase (`roll_no`/`staff_code` are both caller-supplied) —
+   this is a fresh, minimal one.
+2. `authService.activateUser` (new) — `users` is AuthService's table,
+   not StaffService's. Generates a fresh temporary password
+   (`security.generateTemporaryPassword`), hashes it, sets
+   `password_hash`/`is_active`/`activated_by` in one statement, returns
+   the plaintext exactly once.
+3. `notificationService.sendStaffCredentialsEmail`.
+
+## NotificationService (new, minimal — Architecture.md 2.5)
+Compose-only, no repository of its own. One real channel: email via
+`nodemailer`/SMTP, `config.smtp.*` all optional — unset `SMTP_HOST`
+means `sendEmail` logs a stub instead of sending (the default, tested
+path in every environment today). A configured-but-failing send is
+caught and reported `status: 'failed'`, never thrown — delivery is
+best-effort, never rolls back the staff activation that triggered it.
+
+The full ledger-backed lifecycle (`notifications`/`notification_delivery`,
+Architecture.md 2.8, BusinessRules.md's draft→approved→dispatched
+model) is explicitly not built. This version sends directly instead —
+defensible only because its one caller fires exclusively after a real,
+already-completed WorkflowService approval (the Principal's own final
+sign-off); there is no free-form/AI-drafted notification path yet for
+it to gate separately. A future slice adding one must NOT reuse
+`sendEmail` directly without that real ledger.
+
+Verified live: the HOD-only step leaves `staff_code`/`is_active`/
+`password_hash` untouched; the Principal's terminal approval assigns a
+real `staff_code`, flips `is_active`, attributes `activated_by`,
+regenerates `password_hash` off its placeholder, writes a
+`staff_activated` audit row, and logs the real stub line with SMTP
+unconfigured — the cascade completes and commits regardless of
+notification delivery. Full suite: 430/430.
+
 ## Known gaps / deferred
-- No API/UI yet for any of this — next slice.
-- Turning an `Approved` staff registration into an active login
-  (Staff ID, credentials, `users.is_active`) is still unbuilt — a
-  separate, explicitly-flagged capability, not invented here.
+- No API/UI for any of this yet.
+- Who/what creates the *initial* `users` row a staff profile links to
+  (before any registration chain starts) is still unbuilt — unchanged
+  since the first Staff slice, still explicitly flagged.
 - `staffRepository`'s HOD/Principal lookups pick the earliest-created
   matching row if more than one exists — nothing enforces at most one
   HOD per department or one Principal per college today.
+- NotificationService's real SMTP send path is unit-tested with a
+  mocked transporter only — no real mail server exists in this dev
+  environment to prove an actual outbound send.
+- The full notification ledger (`notifications`/`notification_delivery`)
+  and any free-form/AI-drafted notification path are not built —
+  the next thing to add once something other than staff activation
+  needs to send a notification.
 
 ## Commits
 Schema + repositories · `workflowService.js` · FinanceService/
-StaffService wiring (this slice).
+StaffService wiring · NotificationService + staff-activation cascade
+(this slice).

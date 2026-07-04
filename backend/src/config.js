@@ -74,4 +74,22 @@ module.exports = {
   // a flagged gap, not solved by this default (see ADR-017's
   // Consequences).
   documentStorageRoot: process.env.DOCUMENT_STORAGE_ROOT || path.join(__dirname, '../storage'),
+
+  // NotificationService's real email channel (Module 8). Deliberately
+  // NOT required() like the connection strings/JWT secrets above:
+  // this session's own task asks for "a stub/log-only fallback if no
+  // provider is configured," so an unset SMTP_HOST must not crash
+  // startup — notificationService.js checks for this exact null and
+  // logs instead of attempting to send. host has no default at all
+  // (empty string/undefined both mean "unconfigured"); the rest have
+  // reasonable defaults so a caller only needs to set host+credentials
+  // to turn the real channel on.
+  smtp: {
+    host: process.env.SMTP_HOST || null,
+    port: Number(process.env.SMTP_PORT) || 587,
+    secure: process.env.SMTP_SECURE === 'true',
+    user: process.env.SMTP_USER || null,
+    password: process.env.SMTP_PASSWORD || null,
+    fromAddress: process.env.SMTP_FROM_ADDRESS || 'no-reply@arcnave.local',
+  },
 };

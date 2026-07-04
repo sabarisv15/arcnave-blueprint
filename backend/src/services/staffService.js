@@ -6,26 +6,48 @@
 // directly — this file is what makes that possible for staff).
 //
 // This slice assumes a `userId` for an already-existing `users` row
-// is handed in — it does not create accounts or generate credentials
-// (`generatedCreds` in HodDashboard.jsx/PrincipalDashboard.jsx). That
-// needs a users-row-creation step this codebase doesn't have yet —
-// still a real, flagged gap (see submitStaffRegistration's own comment
-// below), unchanged from the Module 2 first slice's .ai/TASK.md.
+// is handed in for createStaff — it does not create accounts from
+// scratch (`generatedCreds` in HodDashboard.jsx/PrincipalDashboard.jsx
+// shows the old prototype's own version of this same step). That
+// users-row-creation step is still a real, flagged gap — unchanged
+// from the Module 2 first slice's .ai/TASK.md.
 // "Only HOD/Principal may add staff" is an authorization rule, not
 // business logic — left to the route/RBAC layer once Module 2's API
 // exists, same reasoning studentService.js used for "only the class
 // tutor may edit."
 //
-// The HOD/Principal approval chain itself (Module 8's own second gap)
-// IS wired here now: submitStaffRegistration/approveStaffRegistration/
+// The HOD/Principal approval chain (Module 8's second gap) is wired
+// here: submitStaffRegistration/approveStaffRegistration/
 // rejectStaffRegistration route through workflowService, per ADR-005/
 // CLAUDE.md rule 3. findHodForDepartment/findPrincipal resolve real
 // approver identities from the `staff`+`users` tables (staffRepository's
-// own new JOIN queries) — never a placeholder/hardcoded user id.
+// own JOIN queries) — never a placeholder/hardcoded user id.
+//
+// Module 8's final slice: approveStaffRegistration's terminal Approved
+// outcome now does the rest of BusinessRules.md's own sentence —
+// "Staff ID is generated automatically -> credentials are emailed ->
+// login is enabled only once credentials exist" — via assignStaffCode
+// (this file), authService.activateUser (users is AuthService's table,
+// not this file's — Architecture.md 2.5), and
+// notificationService.sendStaffCredentialsEmail. This is the
+// users-row-creation gap's *activation* half finally closing, not the
+// whole gap: a `users` row (with SOME initial password_hash,
+// is_active = false) must already exist by the time a staff profile
+// exists at all (staff.user_id's own NOT NULL FK guarantees it) —
+// activateUser overwrites that placeholder with a real, freshly
+// generated password at the moment of approval, matching the old
+// prototype's own generatedCreds shape (a username + a real password,
+// shown/emailed at this exact step, not before). Who/what creates that
+// initial `users` row in the first place (bulk-provisioning per
+// BusinessRules' College Admin entry, presumably) is still not built —
+// unchanged, still flagged, not this slice's job either.
 
+const crypto = require('node:crypto');
 const staffRepository = require('../repositories/staffRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const workflowService = require('./workflowService');
+const authService = require('./authService');
+const notificationService = require('./notificationService');
 
 // Missing userId or fullName — staff.user_id and staff.full_name are
 // both NOT NULL at the DB level. Raised before any repository call,
@@ -272,17 +294,6 @@ async function findPrincipal(client, collegeId) {
 // hardcoded — CLAUDE.md rule 3/ADR-005: this is the same WorkflowService
 // gate every other approval routes through.
 //
-// Deliberately NOT built here: turning an Approved outcome into an
-// active login (Staff ID generation, credential emailing,
-// `users.is_active`/`activated_by`). This file's own module comment
-// already names that as a separate, unbuilt users-row-creation/
-// credentialing capability — wiring the approval chain itself doesn't
-// require inventing that too, and doing so here would silently expand
-// this slice's scope well past "wire callers." A future slice that
-// does build it can react to approveStaffRegistration's returned
-// status === 'Approved', same shape financeService.approveFeeStructure
-// reacts to its own workflowService.approveRequest result.
-//
 // requestedByUserId is the actor submitting on the named staff
 // member's behalf (per BusinessRules, "Faculty submits" — in this
 // codebase's current placeholder RBAC, every staff write route is
@@ -336,9 +347,87 @@ async function loadPendingRegistration(client, staffId) {
   return pending;
 }
 
+// Staff ID (staff_code) generation: no existing pattern to follow —
+// checked studentRepository (students.roll_no) and staff.staff_code
+// itself first, per this session's own task instruction; both are
+// caller-supplied free text today, never auto-generated anywhere in
+// this codebase. This is a fresh, minimal pattern:
+// `STF-<year>-<6 hex chars>`, retried on a real
+// staff_college_id_staff_code_key collision (the existing UNIQUE
+// constraint, not a pre-check — same "let the DB be the actual
+// backstop" discipline every other conflict error in this codebase
+// already follows) up to a few attempts.
+const STAFF_CODE_MAX_ATTEMPTS = 5;
+
+function generateStaffCode() {
+  const year = new Date().getFullYear();
+  const suffix = crypto.randomBytes(3).toString('hex').toUpperCase();
+  return `STF-${year}-${suffix}`;
+}
+
+async function assignStaffCode(client, staffId) {
+  for (let attempt = 0; attempt < STAFF_CODE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      return await staffRepository.update(client, staffId, { staffCode: generateStaffCode() });
+    } catch (err) {
+      const isLastAttempt = attempt === STAFF_CODE_MAX_ATTEMPTS - 1;
+      if (err.code === '23505' && err.constraint === 'staff_college_id_staff_code_key' && !isLastAttempt) {
+        continue; // eslint-disable-line no-continue
+      }
+      throw err;
+    }
+  }
+  return undefined; // unreachable — satisfies eslint's consistent-return
+}
+
+// The rest of BusinessRules.md's own sentence, fired only on the
+// workflow's TERMINAL Approved outcome (the Principal's own final
+// sign-off) — never on an intermediate step advance (e.g. the HOD's
+// own approval, which only ever advances current_step and leaves
+// status 'Pending'). resolved.status is what distinguishes "the chain
+// just advanced" from "the chain just closed"; loadPendingRegistration/
+// workflowService.approveRequest already guarantee ADR-005's
+// self-approval rule and the correct-actor-for-this-step check ran
+// before any of this executes.
+//
+// Order matters: staff_code first (a staffService-owned mutation),
+// then authService.activateUser (users is AuthService's table, not
+// this file's — Architecture.md 2.5), then the email — composing the
+// message needs both the fresh staffCode and the fresh plainPassword,
+// so it has to be last. A failed email (see notificationService.js's
+// own file-level comment) never rolls any of this back — activation is
+// the real business outcome; delivery is best-effort.
 async function approveStaffRegistration(client, staffId, { actorUserId, remarks } = {}) {
   const pending = await loadPendingRegistration(client, staffId);
-  return workflowService.approveRequest(client, pending.id, { actorUserId, remarks });
+  const resolved = await workflowService.approveRequest(client, pending.id, { actorUserId, remarks });
+
+  if (resolved.status !== 'Approved') {
+    // Still mid-chain (e.g. just the HOD's own step) — nothing to
+    // activate yet.
+    return { workflowRequest: resolved, staff: await staffRepository.findById(client, staffId) };
+  }
+
+  const staff = await assignStaffCode(client, staffId);
+  const { user, plainPassword } = await authService.activateUser(client, staff.user_id, { activatedBy: actorUserId });
+
+  await notificationService.sendStaffCredentialsEmail(client, {
+    to: user.email,
+    username: user.username,
+    password: plainPassword,
+    staffCode: staff.staff_code,
+  });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: staff.college_id,
+    userId: actorUserId,
+    action: 'staff_activated',
+    entity: 'staff',
+    entityId: staff.id,
+    metadata: null,
+  });
+
+  return { workflowRequest: resolved, staff };
 }
 
 async function rejectStaffRegistration(client, staffId, { actorUserId, remarks } = {}) {

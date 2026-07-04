@@ -20,6 +20,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const staffRepository = require('../src/repositories/staffRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
+const workflowService = require('../src/services/workflowService');
+const authService = require('../src/services/authService');
+const notificationService = require('../src/services/notificationService');
 const staffService = require('../src/services/staffService');
 
 test('StaffService validation and audit logging (no DB)', async (t) => {
@@ -249,5 +252,139 @@ test('StaffService validation and audit logging (no DB)', async (t) => {
     assert.equal(removeMock.mock.callCount(), 1);
     assert.equal(auditMock.mock.callCount(), 1);
     assert.equal(auditMock.mock.calls[0].arguments[1].action, 'staff_removed');
+  });
+});
+
+// Module 8 final slice: approveStaffRegistration's terminal Approved
+// cascade (staff_code assignment -> authService.activateUser ->
+// notificationService.sendStaffCredentialsEmail). Real HOD/Principal
+// resolution and the full multi-step workflow chain itself are already
+// live-verified (Module 8's third slice) against a real Postgres —
+// this file only covers the cascade's own new logic, mocked, same
+// technique as every other *-service.test.js in this codebase.
+test('StaffService registration-approval cascade (no DB)', async (t) => {
+  await t.test('approveStaffRegistration on a non-terminal (still Pending) resolution does not touch staff_code/activation/email', async () => {
+    const findMock = t.mock.method(staffRepository, 'findById', async (client, id) => ({ id, college_id: 'c1', user_id: 'user-1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Pending', current_step: 2 }));
+    const updateMock = t.mock.method(staffRepository, 'update');
+    const activateMock = t.mock.method(authService, 'activateUser');
+    const emailMock = t.mock.method(notificationService, 'sendStaffCredentialsEmail');
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+      activateMock.mock.restore();
+      emailMock.mock.restore();
+    });
+
+    const result = await staffService.approveStaffRegistration({}, 'staff-1', { actorUserId: 'hod-1' });
+
+    assert.equal(result.workflowRequest.status, 'Pending');
+    assert.equal(updateMock.mock.callCount(), 0);
+    assert.equal(activateMock.mock.callCount(), 0);
+    assert.equal(emailMock.mock.callCount(), 0);
+  });
+
+  await t.test('approveStaffRegistration on the terminal Approved resolution assigns a staff_code, activates the user, and emails credentials', async () => {
+    const findMock = t.mock.method(staffRepository, 'findById', async (client, id) => ({ id, college_id: 'c1', user_id: 'user-1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Approved', current_step: 2 }));
+    const updateMock = t.mock.method(staffRepository, 'update', async (client, id, fields) => ({ id, college_id: 'c1', user_id: 'user-1', staff_code: fields.staffCode }));
+    const activateMock = t.mock.method(authService, 'activateUser', async () => ({
+      user: { id: 'user-1', username: 'jdoe', email: 'jdoe@college.edu' },
+      plainPassword: 'temp-pass-123',
+    }));
+    const emailMock = t.mock.method(notificationService, 'sendStaffCredentialsEmail', async () => ({ status: 'stubbed' }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+      activateMock.mock.restore();
+      emailMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await staffService.approveStaffRegistration({}, 'staff-1', { actorUserId: 'principal-1' });
+
+    assert.match(result.staff.staff_code, /^STF-\d{4}-[0-9A-F]{6}$/);
+    assert.equal(updateMock.mock.callCount(), 1);
+
+    assert.equal(activateMock.mock.callCount(), 1);
+    assert.equal(activateMock.mock.calls[0].arguments[1], 'user-1');
+    assert.equal(activateMock.mock.calls[0].arguments[2].activatedBy, 'principal-1');
+
+    assert.equal(emailMock.mock.callCount(), 1);
+    const emailArgs = emailMock.mock.calls[0].arguments[1];
+    assert.equal(emailArgs.to, 'jdoe@college.edu');
+    assert.equal(emailArgs.username, 'jdoe');
+    assert.equal(emailArgs.password, 'temp-pass-123');
+    assert.equal(emailArgs.staffCode, result.staff.staff_code);
+
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'staff_activated');
+  });
+
+  await t.test('assignStaffCode (via approveStaffRegistration) retries past a staff_code collision', async () => {
+    const findMock = t.mock.method(staffRepository, 'findById', async (client, id) => ({ id, college_id: 'c1', user_id: 'user-1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Approved', current_step: 1 }));
+    let attempts = 0;
+    const updateMock = t.mock.method(staffRepository, 'update', async (client, id, fields) => {
+      attempts += 1;
+      if (attempts < 3) {
+        const err = new Error('duplicate key value violates unique constraint "staff_college_id_staff_code_key"');
+        err.code = '23505';
+        err.constraint = 'staff_college_id_staff_code_key';
+        throw err;
+      }
+      return { id, college_id: 'c1', user_id: 'user-1', staff_code: fields.staffCode };
+    });
+    const activateMock = t.mock.method(authService, 'activateUser', async () => ({
+      user: { id: 'user-1', username: 'jdoe', email: 'jdoe@college.edu' },
+      plainPassword: 'temp-pass-123',
+    }));
+    const emailMock = t.mock.method(notificationService, 'sendStaffCredentialsEmail', async () => ({ status: 'stubbed' }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+      activateMock.mock.restore();
+      emailMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await staffService.approveStaffRegistration({}, 'staff-1', { actorUserId: 'principal-1' });
+
+    assert.equal(attempts, 3);
+    assert.ok(result.staff.staff_code);
+  });
+
+  await t.test('approveStaffRegistration lets workflowService.approveRequest errors (e.g. self-approval) pass through unchanged, no cascade', async () => {
+    const findMock = t.mock.method(staffRepository, 'findById', async (client, id) => ({ id, college_id: 'c1', user_id: 'user-1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => {
+      throw new workflowService.WorkflowRequestSelfApprovalError('actor requested this workflow request');
+    });
+    const updateMock = t.mock.method(staffRepository, 'update');
+    const activateMock = t.mock.method(authService, 'activateUser');
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+      activateMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => staffService.approveStaffRegistration({}, 'staff-1', { actorUserId: 'requester-1' }),
+      workflowService.WorkflowRequestSelfApprovalError,
+    );
+    assert.equal(updateMock.mock.callCount(), 0);
+    assert.equal(activateMock.mock.callCount(), 0);
   });
 });

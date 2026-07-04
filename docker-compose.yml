@@ -51,6 +51,15 @@ services:
       # by signature alone. Back in the app's env now that the Super
       # Admin Portal API is rebuilt (ADR-016).
       PLATFORM_JWT_SECRET_KEY: ${PLATFORM_JWT_SECRET_KEY:?set PLATFORM_JWT_SECRET_KEY in .env}
+      # Optional — NotificationService's real email channel (Module 8).
+      # `:-` defaults, not `:?` like the secrets above: unset means the
+      # log-only stub fallback, not a startup failure. See config.js.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-no-reply@arcnave.local}
     ports:
       - "8000:8000"
     volumes:

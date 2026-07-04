@@ -1,7 +1,8 @@
 'use strict';
 
 // Business logic for tenant-side authentication: login, refresh-token
-// rotation, revoke, and a not-implemented stub for password reset.
+// rotation, revoke, activation (Module 8), and a not-implemented stub
+// for password reset.
 //
 // Platform Admin login (platform_admins table) is a deliberately
 // separate, not-yet-built concern — ADR-010 requires it never share
@@ -29,6 +30,13 @@ class AuthError extends Error {}
 // the same (401): this is a possible-theft signal, not a routine
 // rejection, and refresh() logs it accordingly before raising.
 class RefreshTokenReuseError extends Error {}
+
+// activateUser given a userId with no matching row. Shouldn't happen
+// in practice — every caller today (staffService.approveStaffRegistration)
+// reaches this via staff.user_id, a real FK to users(id) — but this
+// service makes no assumption about future callers, same "required
+// lookup" precedent every other *NotFoundError in this codebase sets.
+class UserNotFoundError extends Error {}
 
 async function issueTokenPair(client, { collegeId, userId, role }) {
   const accessToken = security.createAccessToken({ userId, collegeId, role });
@@ -107,19 +115,42 @@ async function revoke(client, rawRefreshToken) {
 }
 
 // Stub — Roadmap.md lists password reset in Module 0 scope, but it
-// needs NotificationService (email dispatch) and a reset-token flow,
-// neither of which exist yet. Throwing here is the whole
-// implementation; the route layer turns this into 501.
+// needs a reset-token flow that doesn't exist yet. notificationService
+// exists now (Module 8), but only for its one built use (staff
+// activation) — reusing it here without a real reset-token mechanism
+// would just email a password nobody asked to change. Throwing here is
+// the whole implementation; the route layer turns this into 501.
 // eslint-disable-next-line no-unused-vars
 function requestPasswordReset(email) {
   throw new Error('Password reset is not implemented in Module 0');
 }
 
+// Module 8: the "login is enabled only once credentials exist" moment
+// from BusinessRules.md's Staff registration chain. Generates a fresh
+// temporary password (security.generateTemporaryPassword — never
+// stored anywhere in plaintext except this one return value, used
+// exactly once by the caller to compose a credential email), hashes
+// it, and activates the user in one repository call. userId is always
+// a staff.user_id in practice today (a real FK to users(id)), but this
+// function doesn't assume that — any users row can be activated this
+// way.
+async function activateUser(client, userId, { activatedBy }) {
+  const plainPassword = security.generateTemporaryPassword();
+  const passwordHash = await security.hashPassword(plainPassword);
+  const user = await authRepository.activateUser(client, userId, { passwordHash, activatedBy });
+  if (user === null) {
+    throw new UserNotFoundError(`user ${JSON.stringify(userId)} does not exist`);
+  }
+  return { user, plainPassword };
+}
+
 module.exports = {
   AuthError,
   RefreshTokenReuseError,
+  UserNotFoundError,
   login,
   refresh,
   revoke,
   requestPasswordReset,
+  activateUser,
 };
