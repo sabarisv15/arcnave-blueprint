@@ -1,114 +1,152 @@
 # RESULT
 
 ## Files changed
-- `backend/src/routes/finance.js` (new)
-- `backend/src/tenantApp.js` (wired `createFinanceRouter()` in, after
-  `createAttendanceRouter()`)
-- `backend/tests/finance.test.js` (new)
+- `frontend/src/components/StudentEditorModal.jsx`
 
-No UI files touched — matches this slice's own API-only scope.
+No backend files touched — matches this slice's own UI-only scope.
+
+## The premise didn't match the codebase — surfaced before building anything
+This session's instruction assumed an existing "student profile
+screen" where Academic/Attendance had already added sections, "same
+pattern." That doesn't exist here:
+- `Profile.jsx` (`/profile`, `/profile/:username`) is a staff/tutor
+  profile (staff_id, department, workload) — no student fields at all.
+- `StudentEditorModal.jsx` is the only thing titled "Edit Student
+  Profile," but it's a create/edit wizard, not a read view, and its
+  existing "Academic" step means Module 1's prior-marks concept, not
+  Module 3's Academic module. It has no Attendance step.
+- No component anywhere shows a single student's profile with
+  drill-down sections fed from real APIs.
+
+Asked the user directly which surface to extend rather than guessing —
+a wrong guess here risks building an entire feature on the wrong
+screen. **Answer: `StudentEditorModal`'s step wizard.** Built there.
 
 ## What was built
-Five endpoints under `/api/v1/finance/...`:
+Added a conditionally-appended `'Finance'` step to
+`StudentEditorModal.jsx`'s wizard (`steps = isEditMode ? [...BASE_STEPS, { label: 'Finance' }] : BASE_STEPS`
+— never shown when creating a new student, since `fee_payments.student_id`
+needs a real id that doesn't exist yet).
 
-- `POST /finance/fee-structures` (`requireRole('principal')`) → `financeService.createFeeStructure`. 201.
-- `PUT /finance/fee-structures/:id` (`requireRole('principal')`) → `financeService.updateFeeStructure`. 200, or 404 for an unknown id.
-- `GET /finance/fee-structures` (`requireAuth`) → `class_id`+`academic_year` together (both required if either is given) calls `listFeeStructuresForClassAndYear`; neither given falls back to the plain paginated `listFeeStructures`.
-- `POST /finance/fee-payments` (`requireRole('principal')`) → `financeService.markFeePayment`. 200 (upsert, same reasoning `attendance.js` uses for `markAttendance`).
-- `GET /finance/fee-payments?student_id=...` (`requireAuth`, `student_id` required) → `financeService.listFeePaymentsForStudent`.
+The step itself:
+- Fetches (lazily, only when the step is actually viewed) both
+  `GET /api/v1/finance/fee-structures?limit=200` (the tenant's known
+  fee categories — name, academic year, amount) and
+  `GET /api/v1/finance/fee-payments?student_id=<id>` (this student's
+  own marks), then merges them client-side: a fee category with no
+  matching `fee_payments` row defaults to `not_paid`.
+- Renders each merged row as a card (category name, academic year,
+  amount) with a toggle button styled identically to this file's own
+  existing `phoneVerified`/`parentPhoneVerified` verified-toggle
+  buttons (emerald when "on," slate when "off") — no new visual
+  pattern introduced.
+- Toggling calls `POST /api/v1/finance/fee-payments` with
+  `{ student_id, fee_structure_id, status }`, then re-fetches — the
+  same upsert semantics `financeService.markFeePayment` already
+  guarantees (works whether this fee line has ever been marked for
+  this student before or not).
+- Guards on `student.id` specifically (not `student._id || student.id`,
+  the pattern `handleSave` uses elsewhere in this same file) — see
+  below for why.
 
-Every handler is a thin controller: field mapping (snake_case body →
-camelCase service fields), a call into `financeService`, and error-class
-→ HTTP-status mapping. No business logic, no repository calls, no raw
-SQL — verified by inspection (`finance.js` imports only
-`../services/financeService`, nothing from `../repositories/`).
+## Two reads, not one — a real API-shape constraint, not scope creep
+The instruction named only "the fee_payments list-by-student
+endpoint." That endpoint alone can't produce "fee categories... with
+paid/not-paid status": `fee_payments` rows carry only a
+`fee_structure_id` FK, no category name, no amount (`c1b7aac`'s ERD),
+and there is no `GET /finance/fee-structures/:id` to resolve one row at
+a time (`77dfcd0`'s own deliberate scope decision). The only way to get
+a human-readable category name from the current API surface is the
+existing plain `GET /finance/fee-structures` list (unscoped, since
+students carry no `class_id` to scope it by — restated gap, see below).
+Both calls already exist; nothing new was added to the backend.
 
-## The `/finance/...` sub-prefix — a deliberate deviation, not an oversight
-Every existing router (`classes.js`, `attendance.js`, `staff.js`,
-`students.js`, `facultyAllocation.js`, `timetablePeriods.js`) mounts
-flat (`/classes`, `/attendance`, no per-module path segment). This
-session's own instruction explicitly asked for routes "under
-`/api/v1/finance/...`," so `finance.js` mounts `/finance/fee-structures`
-and `/finance/fee-payments` rather than flattening to match the
-dominant convention. Called out in the router's own file-level comment
-so a future reader doesn't mistake it for an inconsistency to "fix."
-CLAUDE.md rule 5 is satisfied identically either way (app.js's outer
-`/api/v1` mount is unchanged).
-
-## Scope decision: no GET-by-id routes
-This session's instruction named exactly five endpoints and did not
-include a `GET /finance/fee-structures/:id` or
-`GET /finance/fee-payments/:id` lookup — the one thing every other
-router in this codebase has that this one doesn't. Not added
-deliberately: nothing consumes it yet (no Finance UI exists at all —
-restated from `326e8b5`), and the instruction was unusually specific
-and itemized rather than a general "same as classes.js" framing. Flagged
-here, not silently added as scope creep or silently omitted without
-comment.
+## `student.id` vs `student._id` — the real, load-bearing distinction
+Every real backend row carries `id` (every migration's PK column,
+verbatim). `_id` is specifically the prototype-era field name
+`FALLBACK_STUDENTS` and `/api/tutor-students`'s response shape still
+use — and `TutorClass.jsx`, this modal's only real caller, has never
+been repointed to `/api/v1/students` (checked: it still calls
+`/api/tutor-students`/`/api/tutor/class-settings`, falling back to
+`FALLBACK_STUDENTS` on any failure). So in practice, today, a student
+object passed into this modal almost never carries a real `id` — the
+Finance step's own guard (`!realStudentId` → "This student record
+isn't linked to a real backend profile yet") is not a defensive
+nicety, it's the expected, honest state of the world right now. Same
+"correct given the real API, not yet reachable with real data" shape
+`32f61bb`'s own StaffDashboard repoint already established for a
+different (attendance) reason.
 
 ## Verification
-1. **Integration tests** (`backend/tests/finance.test.js`, real HTTP
-   requests against the live `docker-compose` Postgres, same technique
-   as `classes.test.js`/`attendance.test.js`): 30 subtests, all passing —
-   - `fee_structures` create: 201 with correct snake_case fields and
-     the DB default `'Pending Approval'` status; 400 for a missing
-     required field and for an unknown `status`; a real 409 from the
-     live `fee_structures_college_year_class_category_key` constraint
-     on a genuine duplicate; a real 404 for a nonexistent `class_id`;
-     401 unauthenticated; 403 for a non-principal role.
-   - `fee_structures` update: 200 with changed fields; 400 for an
-     unknown `status`; 404 for a nonexistent id; 403 for a
-     non-principal role.
-   - `fee_structures` list: 400 when only one of `class_id`/
-     `academic_year` is given; correct scoped results when both are
-     given; the plain paginated fallback when neither is given; 401
-     unauthenticated; a second tenant's plain list is empty (RLS holds
-     end-to-end through the route).
-   - `fee_payments` mark: 200 with correct snake_case fields
-     (`marked_by_user_id` = the acting principal); re-marking the same
-     `(student_id, fee_structure_id)` updates the existing row (same
-     `id`), not a new one; 400 for a missing/unknown `status`; a real
-     404 for a nonexistent `student_id` and for a nonexistent
-     `fee_structure_id` (both live FK-violation mappings); 401
-     unauthenticated; 403 for a non-principal role.
-   - `fee_payments` list-by-student: 400 without `student_id`; correct
-     results with it; 401 unauthenticated; a second tenant querying the
-     first tenant's real `student_id` gets an empty list (RLS holds).
-   - Audit attribution: create+update writes exactly two `audit_log`
-     rows (`fee_structure_created`/`fee_structure_updated`, correct
-     `entity`/`user_id`); mark+re-mark writes exactly two
-     (`fee_payment_marked`/`fee_payment_remarked`).
-2. **Full backend test suite**: `npm test` — **351/351 pass** (320
-   prior + 31 new — the 30 finance subtests plus their one wrapping
-   `test()` block), 0 failures.
-3. Confirmed no leftover test data: `colleges`/`fee_structures`/
-   `fee_payments` all `0` rows in the live database after the run
-   (`t.after`'s `cleanupTenant` deletes `audit_log` →
-   `fee_payments` → `fee_structures` → `students` → `classes` →
-   `refresh_tokens` → `users` → `colleges`, respecting every FK
-   direction).
+1. **`npm run build`**: succeeds cleanly, all 1510 modules transform,
+   no errors.
+2. **Real app smoke, via headless Chrome**: started the actual Vite
+   dev server and loaded it with
+   `chrome.exe --headless --screenshot` — the app renders its real
+   login screen (not a blank/broken frame), confirming this change
+   didn't break the running app at a level a plain build check
+   wouldn't catch.
+3. **No interactive click-through of the Finance step itself** — two
+   independent, honest reasons, not one excuse standing in for the
+   other: (a) no Playwright/browser-automation tooling is installed in
+   this project (checked: no `chromium-cli`, no `playwright` in
+   `frontend/node_modules/.bin`), and (b) even with such tooling, the
+   real interactive path is upstream-blocked regardless —
+   `TutorClass.jsx` is still unrepointed, so there is no live route
+   today that opens this modal with a real `student.id` to click
+   through with. Recommending `/run-skill-generator` was considered
+   and skipped: the blocker here is the missing tooling plus an
+   upstream data gap, not a missing project-specific launch recipe.
+4. **Live API-shape proof instead**, mirroring `32f61bb`'s own
+   substitute technique: seeded a real tenant (via the admin pool) with
+   a real student and two real `fee_structures` rows (`Tuition`,
+   `Exam Fee`) against the live `docker-compose` Postgres, logged in as
+   a real principal via `POST /api/v1/auth/login`, then issued the
+   *exact* requests `fetchFeeData`/`handleToggleFeePayment` make (same
+   URLs, headers, body shapes) directly against the running backend:
+   - `GET /finance/fee-structures?limit=200` + `GET /finance/fee-payments?student_id=...`
+     both `200`; merging them client-side-equivalent logic correctly
+     defaults the unmarked `Tuition` row to `not_paid`.
+   - `POST /finance/fee-payments` with `{student_id, fee_structure_id, status: 'paid'}`
+     returns `200`; re-fetching and re-merging shows the row as `paid`.
+   - Toggling back to `not_paid` re-marks the **same** `fee_payments`
+     row (`id` unchanged) rather than creating a duplicate — proves the
+     upsert semantics the toggle button depends on hold for real.
+   - All seeded data cleaned up afterward (confirmed `0` rows in
+     `colleges` post-run).
+5. No backend files touched, no `npm test` run needed — this slice
+   changed nothing backend-side, and the prior slice's 351/351 backend
+   suite already covers the endpoints this UI calls.
 
-## Flags / open questions
-- **No real WorkflowService gate** — restated, unchanged from
-  `8e5a3d5`: `fee_structures.status` accepts any known literal via a
-  bare `PUT`, including a direct jump to `'Approved'`. This is the same
-  gap `classes.timetable_status` already has; the route layer adds
-  nothing new here, faithfully passing the service's own (documented)
-  limitation through.
-- **No `GET /finance/fee-structures/:id` or `GET /finance/fee-payments/:id`**
-  — see above; add in a later slice once a real screen needs single-row
-  fetches.
-- **RBAC is a conservative placeholder** — `requireRole('principal')`
-  for every write, same as every other not-yet-role-modeled write in
-  this codebase. The real actor for "who may create/edit a fee
-  structure" or "who may mark a student's fee paid" (accounts staff?
-  class tutor?) is unnamed in BusinessRules.md; revisit once a real
-  role model exists.
-- **No Finance UI yet** — this slice is API-only, per its own scope.
-- **Scholarship eligibility / `annual_income` field** — restated from
-  every prior Finance slice's own RESULT.md: still fully unbuilt, still
-  blocked on a Student-module migration that hasn't been asked for yet.
-- **`receipt_document_id`'s FK is still deferred** — restated from
-  `c1b7aac`: no `documents` table exists yet (Module 6 unbuilt). The
-  route accepts any UUID for it, same as the service and repository
-  layers already do.
+## Flag: fee-structure admin UI is a real, separate follow-up need
+Per this session's own explicit ask. `POST`/`PUT /finance/fee-structures`
+exist at the API layer (`77dfcd0`, `requireRole('principal')`-gated)
+but have **zero UI** anywhere in this application — there is currently
+no screen where a Principal (or anyone) can create or edit a fee
+category. This slice's Finance step only ever *reads*
+`fee_structures` to populate category names in the merge; it never
+creates or edits one, deliberately, per this session's own scope. A
+real admin screen is a genuine, separate future slice, not attempted
+here.
+
+## Other flags / open questions (restated or newly surfaced)
+- **The Finance step shows every tenant fee structure, not ones scoped
+  to this student's class** — because `students` carries no `class_id`
+  at all (restated gap from every prior Finance slice's own RESULT.md,
+  directly relevant here now: a real "which fees apply to this
+  specific student" view needs that FK to exist first).
+- **RBAC mismatch, not resolved here**: the mark endpoint is
+  Principal-only (`77dfcd0`'s own conservative placeholder), but the
+  realistic actor toggling "has this student paid" from a profile
+  screen is more plausibly a class tutor or accounts staff. Not
+  duplicated/pre-empted client-side — a non-principal user will get a
+  real 403 via the existing toast error path, same as any other fetch
+  failure in this file. Revisit once a real role model exists (same
+  flag `77dfcd0` already raised).
+- **`TutorClass.jsx` itself remains unrepointed** — restated, not
+  newly discovered (`32f61bb`'s own flag): until it calls
+  `/api/v1/students` for real, no student passed into this modal will
+  carry a real `id`, and the Finance step will show its "not
+  available" message for every real user of this app today.
+- **Scholarship eligibility / `annual_income` field** — restated,
+  unchanged: still fully unbuilt.

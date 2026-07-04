@@ -2,18 +2,37 @@ import React, { useState, useEffect } from 'react';
 import { useToast, useAuth } from '../App';
 import { X, Check, ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 
-const STEPS = [
+const BASE_STEPS = [
   { label: 'Upload Documents' },
   { label: 'Personal' },
   { label: 'Academic' },
   { label: 'Career Info' }
 ];
 
+// Finance only makes sense once a student row actually exists to mark
+// fee payments against (fee_payments.student_id is a real FK to
+// students.id) — same "no id yet, nothing to fetch" reasoning that
+// keeps every other step's data local form state instead of a server
+// fetch. Appended, not inserted, so index math for every existing step
+// (including the `index > 1` early-steps-locked check below) is
+// unaffected.
+
 export default function StudentEditorModal({ onClose, student, onSave }) {
 
   const { showToast } = useToast();
   const { accessToken } = useAuth();
   const isEditMode = !!student;
+  // Real backend rows always carry `id` (every repository's PK column,
+  // per every migration in this schema) — unlike the prototype-era
+  // `_id` field FALLBACK_STUDENTS/`/api/tutor-students` still use
+  // (TutorClass.jsx, this modal's only real caller, hasn't been
+  // repointed to `/api/v1/students` yet). Checking `student.id`
+  // specifically, not `student._id || student.id`, is what actually
+  // distinguishes "a real fee_payments.student_id FK target exists"
+  // from "this is still prototype data" — see the Finance step's own
+  // render branch below for what happens when it's null.
+  const realStudentId = student && student.id ? student.id : null;
+  const steps = isEditMode ? [...BASE_STEPS, { label: 'Finance' }] : BASE_STEPS;
   const [currentStep, setCurrentStep] = useState(0);
 
   // Form State
@@ -43,6 +62,24 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
   // Driving license & bike details
   const [licenseNumber, setLicenseNumber] = useState('');
   const [bikeNumber, setBikeNumber] = useState('');
+
+  // Finance step state — fee_structures (the tenant's known fee
+  // categories) and this student's own fee_payments marks, merged for
+  // display. Two real reads, not one, even though the task's own
+  // framing names only "the fee_payments list-by-student endpoint":
+  // fee_payments has no fee_category/amount columns of its own (only
+  // a fee_structure_id FK — see c1b7aac's ERD), and there is no
+  // GET-by-id for a single fee_structure (77dfcd0's own scope
+  // decision), so a human-readable category name can only come from
+  // also reading the fee_structures list. A fee category with no
+  // fee_payments row yet defaults to 'not_paid' in the merge below —
+  // fee_payments rows only exist once a mark has actually been made
+  // (financeService.js's own file comment), so "no row" and "marked
+  // not paid" are indistinguishable, and treating an unmarked fee the
+  // same as an explicitly-unpaid one is the correct default here.
+  const [feeRows, setFeeRows] = useState([]);
+  const [feeLoading, setFeeLoading] = useState(false);
+  const [markingFeeStructureId, setMarkingFeeStructureId] = useState(null);
 
   // Uploaded files list
   const [uploadedFiles, setUploadedFiles] = useState({
@@ -113,6 +150,83 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
     setCurrentStep(0);
   }, [student]);
 
+  // Fetches lazily, only once the Finance step is actually viewed —
+  // same "don't fetch what isn't on screen" restraint every other step
+  // here already follows by keeping its data as local form state
+  // populated once above, not refetched per render.
+  const fetchFeeData = async () => {
+    setFeeLoading(true);
+    try {
+      const headers = { Authorization: `Bearer ${accessToken}` };
+      const [structuresRes, paymentsRes] = await Promise.all([
+        fetch('/api/v1/finance/fee-structures?limit=200', { headers }),
+        fetch(`/api/v1/finance/fee-payments?student_id=${realStudentId}`, { headers }),
+      ]);
+      if (!structuresRes.ok || !paymentsRes.ok) {
+        throw new Error('Failed to load fee details');
+      }
+      const structures = await structuresRes.json();
+      const payments = await paymentsRes.json();
+      const merged = structures.map(fs => {
+        const payment = payments.find(p => p.fee_structure_id === fs.id);
+        return {
+          feeStructureId: fs.id,
+          category: fs.fee_category,
+          academicYear: fs.academic_year,
+          amount: fs.amount,
+          status: payment ? payment.status : 'not_paid',
+        };
+      });
+      setFeeRows(merged);
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setFeeLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isEditMode && realStudentId && steps[currentStep] && steps[currentStep].label === 'Finance') {
+      fetchFeeData();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep, realStudentId]);
+
+  // Toggles a fee line paid <-> not_paid via the real mark-or-re-mark
+  // upsert (POST /api/v1/finance/fee-payments) — works identically
+  // whether this fee category has ever been marked for this student
+  // before or not, same reasoning financeService.markFeePayment's own
+  // find-then-create/update shape already handles both cases without
+  // this component needing to know which one it is.
+  const handleToggleFeePayment = async (feeStructureId, currentStatus) => {
+    const nextStatus = currentStatus === 'paid' ? 'not_paid' : 'paid';
+    setMarkingFeeStructureId(feeStructureId);
+    try {
+      const res = await fetch('/api/v1/finance/fee-payments', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          student_id: realStudentId,
+          fee_structure_id: feeStructureId,
+          status: nextStatus,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || 'Failed to update fee status');
+      }
+      showToast(`Marked as ${nextStatus === 'paid' ? 'Paid' : 'Not Paid'}`, 'success');
+      await fetchFeeData();
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setMarkingFeeStructureId(null);
+    }
+  };
+
   const handleFileChange = (field, fileName) => {
     setUploadedFiles(prev => ({
       ...prev,
@@ -174,7 +288,7 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
       showToast('Roll number and Full Name are required.', 'danger');
       return;
     }
-    setCurrentStep(prev => Math.min(prev + 1, STEPS.length - 1));
+    setCurrentStep(prev => Math.min(prev + 1, steps.length - 1));
   };
 
   const handleBack = () => {
@@ -261,7 +375,7 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
 
         {/* Step Indicators */}
         <div className="px-6 py-3 border-b flex gap-2 overflow-x-auto" style={{ borderColor: 'rgba(0,0,0,0.06)', background: 'rgba(0,0,0,0.01)' }}>
-          {STEPS.map((step, index) => (
+          {steps.map((step, index) => (
             <button
               key={index}
               type="button"
@@ -641,13 +755,62 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">Tutor Observations & Remarks</label>
-                <textarea 
-                  value={notes} 
-                  onChange={e => setNotes(e.target.value)} 
-                  rows="4" 
+                <textarea
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  rows="4"
                   placeholder="Record observations, behavior notes, or counseling remarks..."
                 />
               </div>
+            </div>
+          )}
+
+          {/* STEP 4: FINANCE (edit mode only — see the `steps` computation above) */}
+          {isEditMode && steps[currentStep] && steps[currentStep].label === 'Finance' && (
+            <div className="space-y-6 animate-slide-up">
+              <div>
+                <h3 className="font-extrabold text-indigo-950 text-sm mb-1">Fee Status</h3>
+                <p className="text-xs text-slate-500 font-bold">Semester, exam, and other fee categories for this student — mark paid or not-paid.</p>
+              </div>
+
+              {!realStudentId ? (
+                <p className="text-xs text-slate-450 text-center py-6 font-medium">
+                  This student record isn't linked to a real backend profile yet, so fee data isn't available here.
+                </p>
+              ) : feeLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="w-8 h-8 border-2 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin" />
+                </div>
+              ) : feeRows.length === 0 ? (
+                <p className="text-xs text-slate-450 text-center py-6 font-medium">No fee categories configured yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {feeRows.map(row => (
+                    <div key={row.feeStructureId} className="flex items-center justify-between p-3 bg-slate-50 border border-slate-150 rounded-2xl">
+                      <div>
+                        <span className="text-xs font-black text-indigo-950 block">{row.category}</span>
+                        <span className="text-[10px] text-slate-455 font-semibold">{row.academicYear} · ₹{row.amount}</span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={markingFeeStructureId === row.feeStructureId}
+                        onClick={() => handleToggleFeePayment(row.feeStructureId, row.status)}
+                        className={`px-3 py-1.5 text-[10px] font-bold rounded-lg border flex items-center gap-1 transition-all ${
+                          row.status === 'paid'
+                            ? 'bg-emerald-100 border-emerald-200 text-emerald-600'
+                            : 'bg-slate-100 border-slate-200 text-slate-500'
+                        } ${markingFeeStructureId === row.feeStructureId ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                      >
+                        {markingFeeStructureId === row.feeStructureId
+                          ? 'Updating…'
+                          : row.status === 'paid'
+                            ? (<><Check className="w-3 h-3" /> Paid</>)
+                            : 'Not Paid'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -666,7 +829,7 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
           
           <div className="flex gap-2">
             <button type="button" onClick={onClose} className="btn-ghost text-xs">Cancel</button>
-            {currentStep < STEPS.length - 1 ? (
+            {currentStep < steps.length - 1 ? (
               <button type="button" onClick={handleNext} className="btn-primary text-xs flex items-center gap-1">
                 Next <ChevronRight className="w-4 h-4" />
               </button>
