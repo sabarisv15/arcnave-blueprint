@@ -68,22 +68,29 @@ new rule is decided, in the module that owns it.
   a role grant.
 - **Resolved (Module 2 kickoff)** — College Admin: a real, new
   tenant-level role (`users.role = 'college_admin'`), distinct from
-  Principal, but narrowly scoped to two things: (1) bulk-provisioning
+  Principal, but narrowly scoped to three things: (1) bulk-provisioning
   user accounts during a college's *initial onboarding* onto ARCNAVE
   — an already-running college can have 100+ existing faculty on day
   one, and requiring Principal to individually approve each one
   through the normal registration chain isn't realistic at that
   volume; (2) uploading/managing college document templates
-  (`DocumentService`-owned, per the Documents/Reports rule above).
-  College Admin does **not** replace or share Principal's approval
-  authority in the steady-state Staff/HOD registration chains below —
-  those are unchanged for anyone joining after initial onboarding.
-  College Admin is an onboarding/operational role, not a second apex
-  role competing with Principal. (Open follow-up, not blocking: the
-  actual bulk-provisioning mechanism — one-by-one repeated calls vs.
-  a real CSV/bulk-import capability — is a Module 2 build decision,
-  not a role-definition one; resolve it when that slice is built, not
-  here.)
+  (`DocumentService`-owned, per the Documents/Reports rule above);
+  (3) maintaining the college's own profile/details (departments,
+  total intake, and similar tenant-level facts) — unlike (1), this is
+  an ongoing operational duty, not a one-time onboarding step, and it
+  stays with College Admin rather than routing back through Principal
+  each time the college's details change. College Admin does **not**
+  replace or share Principal's approval authority in the steady-state
+  Staff/HOD registration chains below — those are unchanged for
+  anyone joining after initial onboarding. College Admin is an
+  onboarding/operational role, not a second apex role competing with
+  Principal. (Open follow-up, not blocking: the actual
+  bulk-provisioning mechanism — one-by-one repeated calls vs. a real
+  CSV/bulk-import capability — is a Module 2 build decision, not a
+  role-definition one; resolve it when that slice is built, not here.
+  Same treatment for college profile storage — which fields live on
+  a tenant/college table vs. a separate departments table — that's a
+  schema decision for whichever module owns it, not decided here.)
 
 ## Finance
 - Fee changes require approval before taking effect.
