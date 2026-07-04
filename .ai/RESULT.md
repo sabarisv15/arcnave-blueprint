@@ -1,113 +1,139 @@
 # RESULT
 
 ## Files changed
-- `frontend/src/pages/StaffDashboard.jsx`
+- `backend/migrations/1752300000000_module-5-finance-schema.js` (new)
+- `backend/src/repositories/financeRepository.js` (new)
 
-No backend files touched — this slice is UI-only, matching Module 3's
-own UI-slice precedent (`dbe8380`).
+No service/API/UI/`docs/` files touched — matches this slice's own
+migration+repository-only scope.
 
-## What changed
-- Added `accessToken` to the `useAuth()` destructure (wasn't pulled in
-  before — nothing in this file previously called a real, auth-checked
-  endpoint).
-- `handleMarkPeriodAttendance`'s fetch repointed: `/api/staff/mark-period-attendance`
-  -> `/api/v1/attendance`, with a real `Authorization: Bearer ${accessToken}`
-  header added. Body renamed: `tutor_id` -> `class_id`, `date_key` ->
-  `session_date` (value extraction unchanged), `absent_rolls` ->
-  `absent_student_ids`, plus `total_students` (already present under
-  that exact name on `selectedPeriod`, no rename needed). Error
-  handling switched `errData.error` -> `errData.detail`, matching
-  every prior UI repoint slice's precedent.
-- Nothing else in the file touched: `fetchSchedule`
-  (`GET /api/staff/my-schedule`), `fetchWorkload`, `fetchHistory`, and
-  the entire marksheet-submission form all remain on their old,
-  still-dead prototype endpoints.
+## What was built
+`fee_structures`: the fee **definition** table (one row per college /
+academic year / class / fee category), not the per-student
+transactional record — invoices/payments are a later Finance slice.
+Columns: `id`, `college_id` (FK `colleges`), `academic_year` (free
+TEXT), `class_id` (FK `classes`, NOT NULL), `fee_category` (free TEXT),
+`amount` (`NUMERIC(12,2)`), `status` (`'Pending Approval'` default,
+mirrors `classes.timetable_status`), `remarks`, `deleted_at`,
+`created_at`, `updated_at`.
 
-## Two blocked dependencies, named explicitly, not papered over
-- `selectedPeriod.class_id` does not exist in `GET /api/staff/my-schedule`'s
-  response shape (that endpoint doesn't exist in the Node backend
-  either — confirmed via grep, same situation `/api/hod/classes` was
-  in before Module 3's UI slice). The rename to `class_id` is correct
-  for the real API, but the value it reads is currently always
-  `undefined` — blocked on a future slice repointing that GET endpoint
-  (or building a real "my schedule" equivalent).
-- `absentRolls` holds `student.roll_number` strings, not real
-  `students.id` UUIDs the real `absent_student_ids` column expects —
-  same "prototype only ever had a human-facing identifier, the real
-  column needs a resolved id" gap `attendanceService.js`'s own design
-  decision already flagged for this exact column when the ERD was
-  built. Also blocked on the same future schedule-repoint slice
-  (`selectedPeriod.students` would need real ids, not just
-  `roll_number`, to fix this for real).
+Tenant-scoped like every other table: RLS enabled + forced,
+`tenant_isolation` policy on `college_id`. Soft-delete only (`deleted_at`,
+no DELETE grant) — resolved now rather than left open, because
+BusinessRules.md's AI section names "fees" explicitly alongside
+attendance/marks for soft-delete-only. Partial unique index on
+`(college_id, academic_year, class_id, fee_category) WHERE deleted_at
+IS NULL`.
 
-Net effect, identical in shape to Module 3's own UI slice: this
-repoint is correct given the real API, not yet reachable with real
-data. Both gaps are two separate, explicitly named blockers, not one
-vague one, and neither is invented or guessed at.
+`financeRepository.js`: `create`, `findById`,
+`findByCollegeClassYearCategory`, `findByClassAndYear`, `update`,
+`softDelete`, `list` — no `remove`/hard-delete function exists at all,
+same structural guarantee `attendanceRepository.js` established.
 
-## TutorClass.jsx deliberately untouched
-Named explicitly in `.ai/TASK.md` because the task's own framing
-invites the comparison: `attendanceService.js`'s own grounding notes
-(`82f8479`) already settled that `TutorClass.jsx`'s aggregate
-`present_today`/`present_this_hour` counter is a dead end for
-`attendance_sessions`'s real per-student shape — the individual
-students it lets a tutor check off are computed into a count and
-discarded, never transmitted anywhere. Nothing about closing
-`StaffDashboard.jsx`'s gap changes that; not repointed, not
-revisited.
+## No frontend grounding — confirmed, not assumed
+Grepped `frontend/src` and `backend/src` for
+`fee|scholarship|invoice|payment` before writing anything. Every hit
+was incidental (a canned AI-copilot demo reply, a document-upload
+category option, a suggested-question chip, or comments) — no real,
+working fee/invoice/payment screen exists anywhere in this codebase,
+unlike Module 3/4 which had `TutorClass.jsx`/`StaffDashboard.jsx` to
+ground against. The full ERD is sourced from `BusinessRules.md`'s
+Finance section (two rules) and `Architecture.md`'s data-model
+conventions, with every non-obvious shape decision flagged in the
+migration's own comments and in `.ai/TASK.md` rather than guessed at
+silently.
+
+## Flagged assumptions (open, not resolved by this slice)
+- `class_id` is NOT NULL — no "applies to all classes" row shape
+  exists; a truly college-wide fee would need one row per class today.
+- `academic_year`/`fee_category` are free TEXT, not FKs — no
+  `academic_years` or fee-category table exists, matching the existing
+  `classes.semester`/`faculty_allocation.subject` free-text precedent.
+- **Scholarship income threshold has no home yet.** BusinessRules'
+  "per-tenant config" threshold belongs in the existing `configurations`
+  JSONB table (already built, Module 0) once a FinanceService consumes
+  it — not added here, same restraint `configurationService.js` already
+  documents for every category it doesn't validate. More importantly:
+  **no income field exists anywhere in this schema** (checked
+  `students`' migration) — "students below a threshold" cannot be
+  computed at all until a later slice adds one, most likely to
+  `students`. Real, named gap, not worked around.
+- No `approved_by_user_id`/`approved_at` — deferred to WorkflowService
+  (Module 8), matching `classes.timetable_status`'s own precedent of
+  adding status+remarks only, ahead of a real approval mechanism.
 
 ## Verification
-1. **`npm run build` (frontend)** — succeeds cleanly, no errors, all
-   1510 modules transform.
-2. **Live end-to-end API shape proof** — started the real backend
-   against the already-running Docker Postgres, seeded a real tenant
-   with a tutor user and one real `'Approved'` class, logged in
-   through the real `POST /api/v1/auth/login`, then called
-   `POST /api/v1/attendance` with the **exact** body and headers
-   `handleMarkPeriodAttendance` now sends
-   (`{ class_id, session_date, hour_index, absent_student_ids,
-   total_students }` + `Authorization: Bearer <token>`). Confirmed a
-   real `200` with the created `attendance_sessions` row
-   (`marked_by_user_id` correctly the tutor, `class_id`/`hour_index`/
-   `total_students` all round-tripped correctly).
-3. **Failure-path proof** — the identical call with `class_id`
-   omitted returned a real `400` with `{"detail": "classId,
-   sessionDate, hourIndex, and totalStudents are required"}` —
-   confirms the `errData.detail` rename (not `errData.error`) is
-   correct, not just plausible. The identical call with no
-   `Authorization` header returned a real `401`
-   (`{"detail": "Authentication required"}`) — confirms the newly
-   added header is actually load-bearing, not a no-op.
-4. Cleaned up all seeded verification data afterward; stopped the
-   backend process.
+All performed live against the real `docker-compose` Postgres 16
+already running in this environment (`arcnave-blueprint-db-1`) — no
+embedded-postgres substitute needed this time.
 
-**Honest gap, same as every prior UI-repoint slice**: no browser
-click-through was performed (no browser automation available in this
-sandbox, consistent with every prior UI slice's own documented
-limitation) — the panel's visual rendering was not observed directly.
-Confidence here comes from the exact-shape live API proof above (the
-JSX consuming the response does only a `showToast` + `fetchSchedule()`
-on success, no complex parsing of the response body that could throw
-on the real shape) plus the fact that this panel cannot currently
-render with real data at all (its own data source is unrepointed),
-making a visual regression on the *currently observable* app
-impossible by construction.
+1. **Migration up**: ran cleanly via `node scripts/migrate.js up`
+   (`MIGRATION_DATABASE_URL` as `arcnave_admin`).
+2. **Schema shape** (via `docker exec ... psql`): confirmed column
+   types/defaults, the partial unique index's exact definition, both
+   FKs (`class_id -> classes(id)`, `college_id -> colleges`),
+   `relrowsecurity`/`relforcerowsecurity` both `t`, the `tenant_isolation`
+   policy text, and `arcnave_app`'s grant (`arw` — SELECT/INSERT/UPDATE,
+   no DELETE, confirmed via `\dp`).
+3. **Repository, exercised live** through the `arcnave_app` role with
+   real `SET LOCAL app.current_tenant` context (ephemeral script,
+   seeded two real tenants + classes via the admin role, deleted after):
+   - `create()` applies the `'Pending Approval'` DEFAULT when `status`
+     is omitted; `amount` round-trips through `NUMERIC` correctly.
+   - `findById`, `findByCollegeClassYearCategory`, `findByClassAndYear`
+     all correct.
+   - **Cross-tenant isolation**: college B's `findById` on college A's
+     row id returns `null` — RLS holds through the repository, not just
+     at the SQL level.
+   - **Partial unique index**: a duplicate `(college_id, academic_year,
+     class_id, fee_category)` insert while the first row is live is
+     rejected with a real Postgres `23505` (`unique_violation`); after
+     `softDelete`-ing the first row, the identical key can be
+     re-inserted successfully (new row id) — proving the `WHERE
+     deleted_at IS NULL` partial index actually excludes soft-deleted
+     rows rather than just being decorative.
+   - `update()` amends `status`/`amount` correctly.
+   - `softDelete()` hides the row from `findById` immediately, and is
+     idempotent against an already-deleted or missing id (returns
+     `null` on the second call, no error).
+   - **Real hard-DELETE rejected by Postgres itself**: an explicit
+     `DELETE FROM fee_structures ...` through the `arcnave_app`
+     connection failed with `42501` (`insufficient_privilege`) — proves
+     the no-hard-delete guarantee is a DB-permission fact, not just
+     "the repository happens not to expose it."
+   - **FK enforcement**: `create()` with a random UUID `class_id` fails
+     with `23503` (`foreign_key_violation`).
+4. **Migration reversibility**: node-pg-migrate's own `count` option
+   (not this project's `scripts/migrate.js`, whose `down` uses
+   `count: Infinity` and would revert the *entire* schema — learned
+   this the hard way mid-verification, immediately re-ran `up` to
+   restore state, confirmed via `docker exec ... psql` that all tables
+   were back and empty, i.e. no real data existed to lose in this
+   session). Used a one-off `count: 1` runner instead: `down` dropped
+   only `fee_structures`, leaving `faculty_allocation` (and everything
+   else) untouched; `up` restored `fee_structures` as final state.
+5. **Full backend test suite**: `npm test` — **285/285 pass**, 0
+   failures, confirming the new migration doesn't regress any existing
+   module.
+6. All seeded verification data and temporary scripts deleted
+   afterward; final DB state is the migrated-up schema with empty
+   tables, same as before this session started.
 
 ## Flags / open questions
-- **`GET /api/staff/my-schedule` remains unrepointed** — the natural
-  next step to make this whole panel reachable with real data at all;
-  not attempted here per this task's own precise scope (only the POST
-  flow named). Needs a real "my schedule" read path — no service
-  function for "sessions/periods for the currently authenticated
-  staff member" exists yet; `academicService.listFacultyAllocationsForStaff`
-  is the closest real building block, unconsumed by any route or UI
-  so far.
-- **`absent_student_ids` still carries roll numbers, not real ids,
-  once/if this panel ever becomes reachable** — same blocker, would
-  need the schedule endpoint's student roster to carry real
-  `students.id` too.
-- **`TutorClass.jsx`'s aggregate attendance widget remains
-  unrepointed and undecided** — deliberately out of scope, per the
-  grounding already established in `82f8479`.
-- **No backend files touched** — matches this slice's own UI-only
-  scope.
+- **No `academic_years` table** — `academic_year` stays free TEXT,
+  same as `classes.semester`. Revisit only if a later slice needs to
+  query/validate it structurally.
+- **Scholarship eligibility computation is fully unbuilt** — no income
+  field, no threshold-config category, no eligibility flag/table. This
+  is the single biggest open gap in Module 5's BusinessRules and needs
+  a real product answer (where does income get captured — student
+  self-reported? uploaded document via Module 6 DocumentService? a
+  College Admin bulk import?) before the next Finance slice can build
+  it, not guessed at here.
+- **Invoices/payments (the per-student transactional side of
+  FinanceService) not started** — this slice is the fee definition
+  only, same sequencing Module 3 (classes) used before Module 4
+  (attendance_sessions).
+- **`fee_structures.status` can't be end-to-end gated yet** —
+  WorkflowService (Module 8) doesn't exist, same restated gap Module 3
+  flagged for `timetable_status` and Module 4 restated for attendance.
