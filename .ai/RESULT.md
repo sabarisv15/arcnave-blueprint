@@ -1,133 +1,145 @@
 # RESULT
 
 ## Files changed
-- `backend/migrations/1752200000000_module-3-timetable-normalization-schema.js` (new)
-- `backend/src/repositories/timetablePeriodRepository.js` (new)
-- `backend/src/repositories/facultyAllocationRepository.js` (new)
+- `backend/src/services/academicService.js` (extended)
+- `backend/tests/academic-service.test.js` (extended)
 
 ## What changed, per file
-- `1752200000000_module-3-timetable-normalization-schema.js`: creates
-  `timetable_periods` (the shared, college-wide bell schedule — `id`,
-  `college_id` FK, `day_of_week`, `hour_index`, `start_time`,
-  `end_time`, `UNIQUE (college_id, day_of_week, hour_index)`) and
-  `faculty_allocation` (the real join — `id`, `college_id` FK,
-  `class_id` FK -> `classes`, `period_id` FK -> `timetable_periods`,
-  `subject` (still free text), `staff_user_id` FK -> `users`
-  (nullable), `UNIQUE (class_id, period_id)`,
-  `UNIQUE (period_id, staff_user_id)`). RLS enabled + forced on both
-  with a `tenant_isolation` policy, identical to every prior table.
-  `GRANT SELECT, INSERT, UPDATE, DELETE` to `arcnave_app` on both — the
-  same open-question placeholder students/staff/classes got, not
-  `attendance_sessions`'s resolved soft-delete treatment (neither
-  table is named by BusinessRules.md's AI hard-delete restriction).
-  `classes.timetable_data` is completely untouched. `down` drops
-  `faculty_allocation` then `timetable_periods` (FK order).
-- `timetablePeriodRepository.js`: `create`, `findById`,
-  `findByCollegeDayAndHour`, `update`, `remove` (hard delete), `list`
-  — mirrors `classRepository.js`'s shape.
-- `facultyAllocationRepository.js`: `create`, `findById`,
-  `findByClassAndPeriod`, `findByClassId`, `findByStaffUserId`,
-  `update`, `remove` (hard delete), `list` — same shape, never calls
-  `timetablePeriodRepository.js` or `classRepository.js` (CLAUDE.md
-  rule 4). `findByStaffUserId` is the real, structured link a future
-  AttendanceService slice needs to finally verify "the staff member
-  scheduled for that period" — not consumed by anything yet, only
-  enabled, per this slice's own scope (ERD + repository, no
-  service/API).
+- `academicService.js`: added `require('../repositories/facultyAllocationRepository')`,
+  six new error classes (`FacultyAllocationValidationError`,
+  `FacultyAllocationClassNotFoundError`,
+  `FacultyAllocationPeriodNotFoundError`,
+  `FacultyAllocationStaffNotFoundError`,
+  `FacultyAllocationPeriodTakenError`,
+  `FacultyAllocationStaffConflictError`), and five new functions:
+  `assignFacultyAllocation`, `getFacultyAllocation`,
+  `listFacultyAllocationsForClass`, `listFacultyAllocationsForStaff`,
+  `removeFacultyAllocation`. Extended the existing file rather than
+  creating a new service — Architecture.md 2.5's Business Services
+  table already lists "faculty allocation" as part of what
+  AcademicService owns, in the same row as "timetable"; no new
+  boundary to invent.
+  - `assignFacultyAllocation` validates `classId`/`periodId`/`subject`/
+    `staffUserId` are all present (deliberately requiring
+    `staffUserId` even though the DB column is nullable — this
+    function is specifically "assign *a staff member's* allocation";
+    recording a non-teaching slot with no staff is a different,
+    unaddressed operation), then maps all five constraint violations
+    the prior slice's migration already guarantees to their named
+    domain errors, and writes a `faculty_allocation_assigned` audit
+    entry.
+  - No `updateFacultyAllocation` — the task named exactly
+    "assign/list/remove." Changing an allocation is remove-then-assign,
+    live-verified as a genuinely working path (see Tests below), not
+    just asserted to be one.
+  - No authorization check — unlike `attendanceService.markAttendance`
+    (which built one because the task explicitly named eligible
+    actors to enforce), BusinessRules.md names no actor at all for
+    "who may assign faculty to a period." Left to the route/RBAC layer
+    once an API exists, same deferral every other `classes` write in
+    this same file already carries.
+- `academic-service.test.js`: added a second top-level `test()` block
+  (14 new subtests) covering validation, all five constraint mappings,
+  the three thin-passthrough reads, and `removeFacultyAllocation`'s
+  no-op/audit behavior — same no-DB, stubbed-repository technique as
+  every existing test in this file.
 
 ## Tests
-No test file added — matches every prior first-of-a-slice-family (no
-service or API exists yet to test against). Live-verified against the
-real, already-running Docker Postgres instead, through the real
-`arcnave_app` role inside real `SET LOCAL app.current_tenant`
-transactions, seeding two real tenants with real `colleges`/`users`/
-`classes` rows:
+Two layers, matching the discipline established since Module 3's
+second slice (`70b6e68`) and continued through
+`attendanceService.js`/`facultyAllocationRepository.js`:
 
-1. **`up`** — applied cleanly (one new migration).
-2. **Schema inspection** (`\d timetable_periods`, `\d
-   faculty_allocation`) — every column, FK, UNIQUE constraint, and RLS
-   policy match the migration exactly.
-3. **Repository checks, all PASS**:
-   - `timetablePeriodRepository.create`/`findByCollegeDayAndHour`/
-     `update` — correct.
-   - `UNIQUE (college_id, day_of_week, hour_index)` — a real duplicate
-     insert raised `timetable_periods_college_id_day_of_week_hour_index_key`.
-   - **The "shared" design decision, proven concretely**: the exact
-     same `timetable_periods` row (Monday, Hour 1) was referenced by
-     two *different* classes' `faculty_allocation` rows — not just
-     asserted in a comment, actually exercised.
-   - A non-teaching slot (`subject: 'Lunch'`, no `staff_user_id`) —
-     representable, as designed.
-   - `UNIQUE (class_id, period_id)` — a second allocation for the same
-     class+period raised `faculty_allocation_class_id_period_id_key`.
-   - `UNIQUE (period_id, staff_user_id)` — proven against a genuinely
-     *different* class (not the same class/period pair, which would
-     hit the other constraint first): assigning the same staff member
-     to a third class during an already-occupied period raised
-     `faculty_allocation_period_id_staff_user_id_key` — real
-     double-booking prevention.
-   - Two different classes with `staff_user_id IS NULL` at the same
-     period coexisted without error — the NULL-distinctness proof,
-     same technique as `classes_tutor_user_id_key`'s in Module 3's
-     first slice.
-   - `findByClassAndPeriod`/`findByClassId`/`findByStaffUserId` — all
-     correct; `findByStaffUserId` returned exactly the one real
-     allocation for that staff member, concrete proof this is now a
-     genuinely queryable "this person's teaching schedule" link.
-   - FK enforcement — real, on all three: nonexistent `class_id`
-     raised `faculty_allocation_class_id_fkey`, nonexistent `period_id`
-     raised `faculty_allocation_period_id_fkey`, nonexistent
-     `staff_user_id` raised `faculty_allocation_staff_user_id_fkey`.
-   - **FK `RESTRICT` proof**: attempting to `remove()` a
-     `timetable_periods` row still referenced by a `faculty_allocation`
-     row was rejected with a real `23503` on
-     `faculty_allocation_period_id_fkey` — confirms the deliberate
-     absence of any `ON DELETE` override behaves as intended. Removing
-     the dependent allocation first, then the period, succeeded.
-   - **Cross-tenant RLS isolation** — PASS on both new tables: a
-     period/allocation created under tenant A was invisible to tenant
-     B via both `findById()` (`null`) and `list()` (returned only
-     tenant B's own rows).
-4. **`down` reverts only the two new tables** — PASS, explicit
-   `count: 1`. `to_regclass('public.timetable_periods')` and
-   `to_regclass('public.faculty_allocation')` both -> `null`;
-   `classes`, `attendance_sessions`, `staff` all still resolved.
-5. **Re-applied `up`, final state** — PASS, both tables exist again,
-   empty.
-6. **Full backend suite** (`npm test`, 203 tests) — PASS, no
-   regressions.
-7. `node --check` on all three new files — PASS.
-8. All seeded verification data cleaned up afterward.
+**Unit tests** (extended `academic-service.test.js`, no DB —
+`node:test`'s `t.mock.method` stubs `facultyAllocationRepository`/
+`auditLogRepository`): 14 new subtests, all passing — two missing-field
+validation cases (including the deliberately-required `staffUserId`),
+successful create with audit attribution, all five constraint
+violations mapped from hand-thrown `err.code`/`err.constraint`, a
+non-conflict error passthrough, the three thin-passthrough reads, and
+`removeFacultyAllocation`'s no-op-on-missing-id / real-delete-with-audit
+cases. What's deliberately not here: the five constraint violations
+reaching their domain errors through genuine Postgres errors — that
+needs a real database, done instead in the live verification below
+(the prior slice's own `.ai/RESULT.md` already proved these exact
+constraint names fire correctly against a real database; this file
+trusts that grounding for the unit-test layer, same reasoning
+`academic-service.test.js`'s original header comment already states
+for `classes`' own constraints).
 
-Note: this session's Docker container (`arcnave-blueprint-db-1`) had
-stopped since the prior session (as it did between the two Module 4
-slices too) — `docker start` brought it back with all data intact on
-its persistent volume, no re-seeding of Module 0-4's schema needed.
+**Live verification** against the real, already-running Docker
+Postgres (`arcnave-blueprint-db-1` — had stopped since the last
+session yet again; `docker start` brought it back with all Module 0-4
+data intact on its persistent volume). Seeded a real tenant with two
+staff users, two classes, and two shared timetable periods:
+
+- **Real create + audit** — PASS: a genuine `faculty_allocation` row
+  created through the service, with exactly one `audit_log` row,
+  `action: 'faculty_allocation_assigned'`, `entity: 'faculty_allocation'`,
+  correctly attributed to the actor.
+- **Real `faculty_allocation_class_id_period_id_key` conflict** —
+  PASS: re-assigning a different subject/staff to the same
+  `(classId, periodId)` raised a genuine Postgres `23505`, mapped to
+  `FacultyAllocationPeriodTakenError`.
+- **Real `faculty_allocation_period_id_staff_user_id_key` conflict** —
+  PASS: assigning an already-teaching staff member to a *different*
+  class during the same period raised a genuine `23505`, mapped to
+  `FacultyAllocationStaffConflictError`.
+- **Real FK violations, all three** — PASS: nonexistent `classId`,
+  `periodId`, and `staffUserId` each raised the correct named FK
+  constraint, mapped to `FacultyAllocationClassNotFoundError`/
+  `FacultyAllocationPeriodNotFoundError`/
+  `FacultyAllocationStaffNotFoundError` respectively.
+- **Shared-period design proven through the service** — PASS: a
+  *second* class was successfully assigned a *different* staff member
+  for the exact same period row — the "shared bell schedule" design
+  from the prior slice, working end-to-end through this service layer,
+  not just at the repository layer.
+- **`staffUserId` required here even though the DB allows `NULL`** —
+  PASS: calling `assignFacultyAllocation` with a `subject` but no
+  `staffUserId` was rejected with `FacultyAllocationValidationError`
+  before reaching the database at all.
+- **Reads** — PASS: `getFacultyAllocation`/
+  `listFacultyAllocationsForClass`/`listFacultyAllocationsForStaff` all
+  returned correct data against the live rows — `listFacultyAllocationsForStaff`
+  in particular returned exactly that staff member's one real
+  allocation, concrete (if still unconsumed) proof this is the link a
+  future `attendanceService` slice can use.
+- **`removeFacultyAllocation`** — PASS: deleted a real row, wrote a
+  correctly-attributed `faculty_allocation_removed` audit entry
+  (`audit_log` now had exactly two rows for that allocation id — the
+  `assigned` one from creation, then `removed`), and was idempotent on
+  a second call (returned `null`, no second audit entry).
+- **Remove-then-assign proven as a real, working path** — PASS: after
+  removing an allocation, assigning a fresh subject/staff to the exact
+  same `(classId, periodId)` succeeded with a new row id — confirms
+  the "no update function" design decision doesn't leave the slot
+  permanently stuck.
+- All seeded data cleaned up afterward.
+
+Ran the full backend suite (`npm test`): **218/218 pass** (203
+pre-existing + 15 new — 14 new subtests plus a second top-level
+`test()` block in `academic-service.test.js`, which `node:test`'s
+summary line counts alongside its subtests), no regressions.
 
 ## Flags / open questions
-- **Not consumed yet** — `faculty_allocation`/`timetable_periods` are
-  pure additive structure. Nothing in `academicService.js` or
-  `attendanceService.js` reads from them yet; closing the "scheduled
-  staff member" authorization gap flagged in `82f8479` needs a future
-  Attendance (or Academic) slice to actually call
-  `facultyAllocationRepository.findByClassAndPeriod`/
-  `findByStaffUserId` and wire the result into
-  `attendanceService.assertCanMark`. Not attempted here — this slice's
-  scope is ERD + repository only.
-- **No CSV-upload-to-normalized-rows population path** — the real,
-  working frontend's timetable upload (`TutorClass.jsx`'s
-  `handleTimetableUpload`) still only writes to
-  `classes.timetable_data`. A future slice will need to decide how (or
-  whether) uploading a timetable also populates `faculty_allocation` —
-  real `AcademicService` business logic, not decided or guessed at
-  here.
-- **No normalized `subjects` table** — unchanged from Module 3's
-  original first-slice decision; `faculty_allocation.subject` stays
-  free text, matching the task's own explicit column list.
-- **No soft-delete on either table** — same open-question treatment as
-  students/staff/classes; revisit only if a future rule names these
-  tables the way BusinessRules.md's AI section names
-  `attendance_sessions`.
-- **No service, API route, UI, or `docs/modules/` file touched in this
-  slice** — matches every prior module's first-of-a-slice-family scope
-  exactly.
+- **`listFacultyAllocationsForStaff` still isn't wired into
+  `attendanceService.assertCanMark`** — this slice only exposes the
+  link; closing the "scheduled staff member" authorization gap
+  (`82f8479`) needs a future Attendance (or Academic) slice to actually
+  call it and use the result. Not attempted here — this slice's scope
+  is business logic over `facultyAllocationRepository` only.
+- **No CSV-upload-to-normalized-rows population path** — unchanged
+  from the prior slice's own flag: `TutorClass.jsx`'s timetable upload
+  still only writes `classes.timetable_data`; deciding how (or
+  whether) an upload also populates `faculty_allocation` is real
+  `AcademicService` business logic for a later slice.
+- **No update function** — deliberate, see design decision above;
+  revisit only if a real future consumer's usage pattern shows
+  remove-then-assign is genuinely insufficient (e.g. audit-log noise,
+  or a need to preserve the row's original id across a reassignment).
+- **No authorization check** — deferred to the route/RBAC layer once
+  an API exists, same as every other `classes`/`staff`/`students`
+  write in this codebase; BusinessRules.md names no specific actor for
+  this action, unlike Class Tutor assignment.
+- **No API route, UI, or `docs/modules/` file touched in this slice**
+  — matches every prior service-layer slice's own scope exactly.

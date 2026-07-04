@@ -20,8 +20,25 @@
 // authorization rule, left to the route/RBAC layer once Module 3's API
 // exists, matching staffService.js's precedent for "only HOD/Principal
 // may add staff."
+//
+// Faculty allocation (assignFacultyAllocation and friends, added in a
+// later slice) lives in this same file, not a new service: Architecture.md
+// 2.5's own Business Services table lists "faculty allocation" as part
+// of what AcademicService owns, alongside "timetable" — not inferred,
+// stated outright. facultyAllocationRepository.js/timetablePeriodRepository.js
+// were added purely additively (classes.timetable_data untouched — see
+// that slice's .ai/TASK.md) specifically to give AttendanceService's
+// "scheduled staff member" gap (attendanceService.js, 82f8479) a real,
+// structured link to eventually use; this slice is the business-logic
+// layer over that link, surfacing the migration's own uniqueness rules
+// as domain errors, same pattern as classRepository's own constraints
+// above. No authorization check here either: BusinessRules.md names no
+// specific actor for "who may assign faculty," unlike "Class Tutor is
+// assigned only by HOD" — left to the route/RBAC layer once an API
+// exists, not invented here.
 
 const classRepository = require('../repositories/classRepository');
+const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 
 // Missing className — classes.class_name is NOT NULL at the DB level.
@@ -58,6 +75,45 @@ class ClassTutorConflictError extends Error {}
 // caller-supplied free text), so any 23503 here unambiguously means
 // this.
 class ClassTutorNotFoundError extends Error {}
+
+// Missing classId, periodId, subject, or staffUserId —
+// faculty_allocation.class_id/period_id/subject are NOT NULL at the
+// DB level; staffUserId is nullable at the DB level (a non-teaching
+// slot like "Lunch"/"Library" can have a subject with no staff), but
+// this function is specifically "assign *a staff member's*
+// allocation" (per this slice's own task) — recording a non-teaching
+// slot with no staff is a different, unaddressed operation, not built
+// here, so staffUserId is required at this layer even though the DB
+// itself would accept NULL.
+class FacultyAllocationValidationError extends Error {}
+
+// faculty_allocation_class_id_fkey violated (Postgres 23503) — the
+// given classId doesn't exist. Same precedent as ClassTutorNotFoundError.
+class FacultyAllocationClassNotFoundError extends Error {}
+
+// faculty_allocation_period_id_fkey violated (Postgres 23503) — the
+// given periodId doesn't exist in timetable_periods.
+class FacultyAllocationPeriodNotFoundError extends Error {}
+
+// faculty_allocation_staff_user_id_fkey violated (Postgres 23503) —
+// the given staffUserId doesn't exist in users.
+class FacultyAllocationStaffNotFoundError extends Error {}
+
+// UNIQUE (class_id, period_id) violated (Postgres 23505,
+// faculty_allocation_class_id_period_id_key) — this class already has
+// a subject/staff assignment for this period. A class can't have two
+// simultaneous subjects in one hour, the same real-world fact the
+// free-text timetable grid already enforced implicitly (one cell, one
+// value) — see the migration's own .ai/TASK.md.
+class FacultyAllocationPeriodTakenError extends Error {}
+
+// UNIQUE (period_id, staff_user_id) violated (Postgres 23505,
+// faculty_allocation_period_id_staff_user_id_key) — this staff member
+// is already teaching a different class during this exact period. The
+// same "one row can't represent two conflicting real-world facts"
+// reasoning ClassTutorConflictError already applies to tutor
+// assignment, extended here to double-booking a teacher.
+class FacultyAllocationStaffConflictError extends Error {}
 
 // Known real timetable_status values, per the migration's own comment
 // and .ai/TASK.md's grounding against TutorClass.jsx/
@@ -217,15 +273,130 @@ async function listClasses(client, { limit, offset } = {}) {
   return classRepository.list(client, { limit, offset });
 }
 
+// Assigns a staff member to teach a subject during a specific
+// (class, period) slot. No update variant is exposed here — this
+// slice's own task names exactly "assign/list/remove," not "update";
+// changing an existing allocation is remove-then-assign, not an
+// in-place edit, even though facultyAllocationRepository.update exists
+// and classRepository's own precedent has a full update path. Nothing
+// asked for reassignment-in-place, so it isn't built.
+async function assignFacultyAllocation(client, { collegeId, classId, periodId, subject, staffUserId }, { actorUserId } = {}) {
+  if (!classId || !periodId || !subject || !staffUserId) {
+    throw new FacultyAllocationValidationError('classId, periodId, subject, and staffUserId are required');
+  }
+
+  let allocation;
+  try {
+    allocation = await facultyAllocationRepository.create(client, {
+      collegeId,
+      classId,
+      periodId,
+      subject,
+      staffUserId,
+    });
+  } catch (err) {
+    if (err.code === '23505' && err.constraint === 'faculty_allocation_class_id_period_id_key') {
+      throw new FacultyAllocationPeriodTakenError(
+        `class ${JSON.stringify(classId)} already has an allocation for period ${JSON.stringify(periodId)}`,
+      );
+    }
+    if (err.code === '23505' && err.constraint === 'faculty_allocation_period_id_staff_user_id_key') {
+      throw new FacultyAllocationStaffConflictError(
+        `staffUserId ${JSON.stringify(staffUserId)} is already teaching another class during period ${JSON.stringify(periodId)}`,
+      );
+    }
+    if (err.code === '23503' && err.constraint === 'faculty_allocation_class_id_fkey') {
+      throw new FacultyAllocationClassNotFoundError(`classId ${JSON.stringify(classId)} does not exist`);
+    }
+    if (err.code === '23503' && err.constraint === 'faculty_allocation_period_id_fkey') {
+      throw new FacultyAllocationPeriodNotFoundError(`periodId ${JSON.stringify(periodId)} does not exist`);
+    }
+    if (err.code === '23503' && err.constraint === 'faculty_allocation_staff_user_id_fkey') {
+      throw new FacultyAllocationStaffNotFoundError(`staffUserId ${JSON.stringify(staffUserId)} does not exist`);
+    }
+    throw err;
+  }
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId,
+    userId: actorUserId,
+    action: 'faculty_allocation_assigned',
+    entity: 'faculty_allocation',
+    entityId: allocation.id,
+    metadata: null,
+  });
+
+  return allocation;
+}
+
+// null means no allocation exists with this id — not an error. The
+// route turns that into 404, same as getClass.
+async function getFacultyAllocation(client, id) {
+  return facultyAllocationRepository.findById(client, id);
+}
+
+// A class's full teaching schedule — every period it has a real
+// subject/staff assignment for.
+async function listFacultyAllocationsForClass(client, classId) {
+  return facultyAllocationRepository.findByClassId(client, classId);
+}
+
+// A staff member's full teaching schedule — the real, structured link
+// AttendanceService's own "scheduled staff member" gap needs (see
+// attendanceService.js, 82f8479); not wired into that check yet, only
+// exposed here for whichever slice does that next.
+async function listFacultyAllocationsForStaff(client, staffUserId) {
+  return facultyAllocationRepository.findByStaffUserId(client, staffUserId);
+}
+
+// Looks the allocation up first, both to get collegeId for the audit
+// entry (this function takes no collegeId of its own, matching
+// removeClass's signature) and to avoid logging a removal for an id
+// that never existed. Hard DELETE, not soft-delete: neither
+// faculty_allocation nor timetable_periods is named by
+// BusinessRules.md's AI hard-delete restriction the way
+// attendance_sessions is — same open-question treatment
+// students/staff/classes already got.
+async function removeFacultyAllocation(client, id, { actorUserId } = {}) {
+  const allocation = await facultyAllocationRepository.findById(client, id);
+  if (allocation === null) {
+    return null;
+  }
+
+  await facultyAllocationRepository.remove(client, id);
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: allocation.college_id,
+    userId: actorUserId,
+    action: 'faculty_allocation_removed',
+    entity: 'faculty_allocation',
+    entityId: id,
+    metadata: null,
+  });
+
+  return allocation;
+}
+
 module.exports = {
   ClassValidationError,
   ClassTimetableStatusError,
   ClassNameConflictError,
   ClassTutorConflictError,
   ClassTutorNotFoundError,
+  FacultyAllocationValidationError,
+  FacultyAllocationClassNotFoundError,
+  FacultyAllocationPeriodNotFoundError,
+  FacultyAllocationStaffNotFoundError,
+  FacultyAllocationPeriodTakenError,
+  FacultyAllocationStaffConflictError,
   createClass,
   getClass,
   updateClass,
   removeClass,
   listClasses,
+  assignFacultyAllocation,
+  getFacultyAllocation,
+  listFacultyAllocationsForClass,
+  listFacultyAllocationsForStaff,
+  removeFacultyAllocation,
 };

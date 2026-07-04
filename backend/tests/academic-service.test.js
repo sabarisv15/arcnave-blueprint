@@ -21,6 +21,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const classRepository = require('../src/repositories/classRepository');
+const facultyAllocationRepository = require('../src/repositories/facultyAllocationRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const academicService = require('../src/services/academicService');
 
@@ -303,5 +304,223 @@ test('AcademicService validation and audit logging (no DB)', async (t) => {
     assert.equal(removeMock.mock.callCount(), 1);
     assert.equal(auditMock.mock.callCount(), 1);
     assert.equal(auditMock.mock.calls[0].arguments[1].action, 'class_removed');
+  });
+});
+
+// What's deliberately NOT here: an actual
+// faculty_allocation_class_id_period_id_key /
+// faculty_allocation_period_id_staff_user_id_key /
+// faculty_allocation_class_id_fkey / faculty_allocation_period_id_fkey /
+// faculty_allocation_staff_user_id_fkey violation reaching its domain
+// error end-to-end through a real Postgres constraint. The
+// timetable-normalization slice's own .ai/RESULT.md already
+// live-verified every one of those constraint names against a real
+// database; this file trusts that grounding rather than re-running a
+// live database for a service layer that adds no new SQL of its own.
+test('AcademicService faculty allocation validation and audit logging (no DB)', async (t) => {
+  await t.test('assignFacultyAllocation rejects a missing staffUserId without touching the DB', async () => {
+    const createMock = t.mock.method(facultyAllocationRepository, 'create');
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.assignFacultyAllocation({}, {
+        collegeId: 'c1', classId: 'class-1', periodId: 'period-1', subject: 'DBMS',
+      }),
+      academicService.FacultyAllocationValidationError,
+    );
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('assignFacultyAllocation rejects a missing subject without touching the DB', async () => {
+    const createMock = t.mock.method(facultyAllocationRepository, 'create');
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.assignFacultyAllocation({}, {
+        collegeId: 'c1', classId: 'class-1', periodId: 'period-1', staffUserId: 'staff-1',
+      }),
+      academicService.FacultyAllocationValidationError,
+    );
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('assignFacultyAllocation creates an allocation and attributes the audit entry', async () => {
+    const createMock = t.mock.method(facultyAllocationRepository, 'create', async (client, fields) => ({
+      id: 'alloc-1',
+      ...fields,
+    }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      createMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const allocation = await academicService.assignFacultyAllocation(
+      {},
+      { collegeId: 'c1', classId: 'class-1', periodId: 'period-1', subject: 'DBMS', staffUserId: 'staff-1' },
+      { actorUserId: 'actor-user' },
+    );
+
+    assert.equal(allocation.id, 'alloc-1');
+    assert.equal(auditMock.mock.calls[0].arguments[1].userId, 'actor-user');
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'faculty_allocation_assigned');
+    assert.equal(auditMock.mock.calls[0].arguments[1].entity, 'faculty_allocation');
+  });
+
+  await t.test('assignFacultyAllocation maps a class_id_period_id_key violation to FacultyAllocationPeriodTakenError', async () => {
+    const createMock = t.mock.method(facultyAllocationRepository, 'create', async () => {
+      const err = new Error('duplicate key value violates unique constraint "faculty_allocation_class_id_period_id_key"');
+      err.code = '23505';
+      err.constraint = 'faculty_allocation_class_id_period_id_key';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.assignFacultyAllocation({}, {
+        collegeId: 'c1', classId: 'class-1', periodId: 'period-1', subject: 'DBMS', staffUserId: 'staff-1',
+      }),
+      academicService.FacultyAllocationPeriodTakenError,
+    );
+  });
+
+  await t.test('assignFacultyAllocation maps a period_id_staff_user_id_key violation to FacultyAllocationStaffConflictError', async () => {
+    const createMock = t.mock.method(facultyAllocationRepository, 'create', async () => {
+      const err = new Error('duplicate key value violates unique constraint "faculty_allocation_period_id_staff_user_id_key"');
+      err.code = '23505';
+      err.constraint = 'faculty_allocation_period_id_staff_user_id_key';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.assignFacultyAllocation({}, {
+        collegeId: 'c1', classId: 'class-1', periodId: 'period-1', subject: 'DBMS', staffUserId: 'already-teaching',
+      }),
+      academicService.FacultyAllocationStaffConflictError,
+    );
+  });
+
+  await t.test('assignFacultyAllocation maps a class_id_fkey violation to FacultyAllocationClassNotFoundError', async () => {
+    const createMock = t.mock.method(facultyAllocationRepository, 'create', async () => {
+      const err = new Error('insert or update on table "faculty_allocation" violates foreign key constraint "faculty_allocation_class_id_fkey"');
+      err.code = '23503';
+      err.constraint = 'faculty_allocation_class_id_fkey';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.assignFacultyAllocation({}, {
+        collegeId: 'c1', classId: 'missing-class', periodId: 'period-1', subject: 'DBMS', staffUserId: 'staff-1',
+      }),
+      academicService.FacultyAllocationClassNotFoundError,
+    );
+  });
+
+  await t.test('assignFacultyAllocation maps a period_id_fkey violation to FacultyAllocationPeriodNotFoundError', async () => {
+    const createMock = t.mock.method(facultyAllocationRepository, 'create', async () => {
+      const err = new Error('insert or update on table "faculty_allocation" violates foreign key constraint "faculty_allocation_period_id_fkey"');
+      err.code = '23503';
+      err.constraint = 'faculty_allocation_period_id_fkey';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.assignFacultyAllocation({}, {
+        collegeId: 'c1', classId: 'class-1', periodId: 'missing-period', subject: 'DBMS', staffUserId: 'staff-1',
+      }),
+      academicService.FacultyAllocationPeriodNotFoundError,
+    );
+  });
+
+  await t.test('assignFacultyAllocation maps a staff_user_id_fkey violation to FacultyAllocationStaffNotFoundError', async () => {
+    const createMock = t.mock.method(facultyAllocationRepository, 'create', async () => {
+      const err = new Error('insert or update on table "faculty_allocation" violates foreign key constraint "faculty_allocation_staff_user_id_fkey"');
+      err.code = '23503';
+      err.constraint = 'faculty_allocation_staff_user_id_fkey';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.assignFacultyAllocation({}, {
+        collegeId: 'c1', classId: 'class-1', periodId: 'period-1', subject: 'DBMS', staffUserId: 'missing-user',
+      }),
+      academicService.FacultyAllocationStaffNotFoundError,
+    );
+  });
+
+  await t.test('assignFacultyAllocation lets a non-conflict repository error pass through unchanged', async () => {
+    const boom = new Error('connection lost');
+    const createMock = t.mock.method(facultyAllocationRepository, 'create', async () => { throw boom; });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.assignFacultyAllocation({}, {
+        collegeId: 'c1', classId: 'class-1', periodId: 'period-1', subject: 'DBMS', staffUserId: 'staff-1',
+      }),
+      (err) => err === boom,
+    );
+  });
+
+  await t.test('getFacultyAllocation is a thin passthrough to findById', async () => {
+    const findMock = t.mock.method(facultyAllocationRepository, 'findById', async (client, id) => ({ id }));
+    t.after(() => findMock.mock.restore());
+
+    const result = await academicService.getFacultyAllocation({}, 'alloc-9');
+    assert.equal(result.id, 'alloc-9');
+  });
+
+  await t.test('listFacultyAllocationsForClass is a thin passthrough to findByClassId', async () => {
+    const findMock = t.mock.method(facultyAllocationRepository, 'findByClassId', async (client, classId) => ([{ classId }]));
+    t.after(() => findMock.mock.restore());
+
+    const result = await academicService.listFacultyAllocationsForClass({}, 'class-1');
+    assert.deepEqual(result, [{ classId: 'class-1' }]);
+  });
+
+  await t.test('listFacultyAllocationsForStaff is a thin passthrough to findByStaffUserId', async () => {
+    const findMock = t.mock.method(facultyAllocationRepository, 'findByStaffUserId', async (client, staffUserId) => ([{ staffUserId }]));
+    t.after(() => findMock.mock.restore());
+
+    const result = await academicService.listFacultyAllocationsForStaff({}, 'staff-1');
+    assert.deepEqual(result, [{ staffUserId: 'staff-1' }]);
+  });
+
+  await t.test('removeFacultyAllocation on a nonexistent id is a no-op, no audit entry', async () => {
+    const findMock = t.mock.method(facultyAllocationRepository, 'findById', async () => null);
+    const removeMock = t.mock.method(facultyAllocationRepository, 'remove', async () => {});
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      removeMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await academicService.removeFacultyAllocation({}, 'missing-id', { actorUserId: 'u1' });
+
+    assert.equal(result, null);
+    assert.equal(removeMock.mock.callCount(), 0);
+    assert.equal(auditMock.mock.callCount(), 0);
+  });
+
+  await t.test('removeFacultyAllocation on an existing id deletes and writes an audit entry', async () => {
+    const findMock = t.mock.method(facultyAllocationRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const removeMock = t.mock.method(facultyAllocationRepository, 'remove', async () => {});
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      removeMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await academicService.removeFacultyAllocation({}, 'alloc-1', { actorUserId: 'u1' });
+
+    assert.deepEqual(result, { id: 'alloc-1', college_id: 'c1' });
+    assert.equal(removeMock.mock.callCount(), 1);
+    assert.equal(auditMock.mock.callCount(), 1);
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'faculty_allocation_removed');
   });
 });
