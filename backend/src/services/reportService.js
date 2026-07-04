@@ -18,17 +18,18 @@
 // report_type/format/document_id/error_message), not something that
 // also needs a duplicate entry alongside it (see ADR-018).
 //
-// Only one report type this slice — student_export, now with two
-// output formats (csv/pdf, ADR-019). Excel/Word generators and any
-// second report type are still deferred until a real screen asks for
-// them, same restraint every other module's first slice applies to
-// unbuilt capability.
+// Only one report type this slice — student_export, now with three
+// output formats (csv/pdf/xlsx). Word generation and any second report
+// type are still deferred until a real screen asks for them, same
+// restraint every other module's first slice applies to unbuilt
+// capability.
 
 const studentService = require('./studentService');
 const documentService = require('./documentService');
 const generatedReportRepository = require('../repositories/generatedReportRepository');
 const csvGenerator = require('../generators/csvGenerator');
 const pdfGenerator = require('../generators/pdfGenerator');
+const excelGenerator = require('../generators/excelGenerator');
 
 // Missing collegeId or actorUserId — nothing downstream (documentService,
 // the ledger write) can proceed without either, same guard shape every
@@ -40,11 +41,16 @@ class ReportValidationError extends Error {}
 // DocumentReviewStatusError already uses for reviewDocument's status.
 class ReportFormatError extends Error {}
 
-// Both generators return Promise<Buffer> (ADR-019) so this map can
-// await either identically regardless of format.
+// All three generators return Promise<Buffer> (ADR-019) so this map
+// can await any of them identically regardless of format.
 const GENERATORS = {
   csv: { generate: csvGenerator.generate, mimeType: 'text/csv', extension: 'csv' },
   pdf: { generate: pdfGenerator.generate, mimeType: 'application/pdf', extension: 'pdf' },
+  xlsx: {
+    generate: excelGenerator.generate,
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    extension: 'xlsx',
+  },
 };
 
 // students table columns worth exporting, real column names (not

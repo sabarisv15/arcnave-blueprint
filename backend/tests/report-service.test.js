@@ -19,6 +19,7 @@ const documentService = require('../src/services/documentService');
 const generatedReportRepository = require('../src/repositories/generatedReportRepository');
 const csvGenerator = require('../src/generators/csvGenerator');
 const pdfGenerator = require('../src/generators/pdfGenerator');
+const excelGenerator = require('../src/generators/excelGenerator');
 const reportService = require('../src/services/reportService');
 
 test('csvGenerator.generate (pure function)', async (t) => {
@@ -59,6 +60,40 @@ test('pdfGenerator.generate (pure function)', async (t) => {
     // pdfkit wrote, not an assumption about its internals.
     const pageCount = (bytes.toString('latin1').match(/\/Type\s*\/Page[^s]/g) || []).length;
     assert.ok(pageCount >= 2, `expected multiple pages, found ${pageCount}`);
+  });
+});
+
+test('excelGenerator.generate (pure function)', async (t) => {
+  await t.test('produces a real, readable .xlsx workbook with a header row and data rows', async () => {
+    const ExcelJS = require('exceljs');
+    const bytes = await excelGenerator.generate({
+      title: 'Test Report',
+      columns: [{ id: 'a', label: 'Col A' }, { id: 'b', label: 'Col B' }],
+      rows: [{ a: 'v1', b: 42 }, { a: 'v2', b: 7 }],
+    });
+    assert.ok(Buffer.isBuffer(bytes));
+    assert.equal(bytes.subarray(0, 2).toString('latin1'), 'PK'); // .xlsx is a zip archive
+
+    // Read it back for real, not just sniff magic bytes — same rigor
+    // pdfGenerator's own test applies via the PDF's own object table.
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(bytes);
+    const sheet = workbook.worksheets[0];
+    assert.deepEqual(sheet.getRow(1).values.slice(1), ['Col A', 'Col B']);
+    assert.deepEqual(sheet.getRow(2).values.slice(1), ['v1', 42]);
+    assert.deepEqual(sheet.getRow(3).values.slice(1), ['v2', 7]);
+  });
+
+  await t.test('truncates a title longer than Excel\'s 31-char sheet-name limit', async () => {
+    const ExcelJS = require('exceljs');
+    const bytes = await excelGenerator.generate({
+      title: 'A'.repeat(50),
+      columns: [{ id: 'a', label: 'Col A' }],
+      rows: [],
+    });
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(bytes);
+    assert.ok(workbook.worksheets[0].name.length <= 31);
   });
 });
 
@@ -128,7 +163,7 @@ test('ReportService.generateStudentExportReport (no DB, no filesystem)', async (
     t.after(() => { listMock.mock.restore(); createMock.mock.restore(); });
 
     await assert.rejects(
-      () => reportService.generateStudentExportReport({}, { collegeId: 'c1', format: 'xlsx' }, { actorUserId: 'u1' }),
+      () => reportService.generateStudentExportReport({}, { collegeId: 'c1', format: 'docx' }, { actorUserId: 'u1' }),
       reportService.ReportFormatError,
     );
     assert.equal(listMock.mock.callCount(), 0);
@@ -151,5 +186,23 @@ test('ReportService.generateStudentExportReport (no DB, no filesystem)', async (
 
     assert.equal(report.status, 'completed');
     assert.equal(report.format, 'pdf');
+  });
+
+  await t.test('format: "xlsx" uses the real excelGenerator and uploads the correct spreadsheet mimeType', async () => {
+    const students = [{ roll_no: 'R1', full_name: 'Alice' }];
+    const listMock = t.mock.method(studentService, 'listStudents', async () => students);
+    const uploadMock = t.mock.method(documentService, 'uploadDocument', async () => ({ id: 'doc-xlsx' }));
+    const createMock = t.mock.method(generatedReportRepository, 'create', async (client, fields) => ({ id: 'report-xlsx', ...fields }));
+    t.after(() => { listMock.mock.restore(); uploadMock.mock.restore(); createMock.mock.restore(); });
+
+    const report = await reportService.generateStudentExportReport({}, { collegeId: 'c1', format: 'xlsx' }, { actorUserId: 'u1' });
+
+    const [, uploadFields] = uploadMock.mock.calls[0].arguments;
+    assert.equal(uploadFields.mimeType, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    assert.match(uploadFields.fileName, /\.xlsx$/);
+    assert.equal(uploadFields.fileBuffer.subarray(0, 2).toString('latin1'), 'PK');
+
+    assert.equal(report.status, 'completed');
+    assert.equal(report.format, 'xlsx');
   });
 });

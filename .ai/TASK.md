@@ -1,41 +1,35 @@
 # TASK
 
-## Objective (Module 7 — Reports — third slice)
-`pdfGenerator.js` (2.6) + wire it into `reportService.js` as a second
-`format` option for `student_export`. No new report types, no API/UI.
+## Objective (Module 7 — Reports — fourth slice)
+`excelGenerator.js` (2.6, `Promise<Buffer>` contract) + third
+`GENERATORS` entry (`xlsx`) in `reportService.js`. No new report types,
+no API/UI.
 
-## Library: pdfkit (ADR-019)
-Resolves TechStack.md's named ReportLab-equivalent gap. Pure JS, no
-native deps (same criterion ADR-017 used for storage), most widely
-used Node PDF library for exactly this "build a document top-down"
-job. pdf-lib/jsPDF/a headless-browser renderer considered and rejected
-— see the ADR.
+## Library: exceljs, no ADR
+Matches TechStack.md's named gap ("Node equivalent of openpyxl") by
+the same pure-JS/no-native-deps criteria ADR-017/019 already used —
+the expected default, not a deviation, so no ADR (per the task's own
+instruction: ADR only if deviating).
 
-## Contract change: csvGenerator.generate is now async
-pdfkit is stream-based — `pdfGenerator.generate` must return
-`Promise<Buffer>`. Made `csvGenerator.generate` `async` too (trivially;
-no real async work) so `reportService.js` awaits either generator
-identically regardless of format.
-
-## reportService.js: format is now a parameter
-`generateStudentExportReport(client, { collegeId, format = 'csv' }, ...)`.
-A `GENERATORS` map keys `csv`/`pdf` to `{generate, mimeType, extension}`.
-Unknown format -> `ReportFormatError` (new, mirrors the "known-value,
-service-enforced" shape `DocumentReviewStatusError` already uses) —
-thrown before anything runs, same as the existing `collegeId`/
-`actorUserId` guard.
+One flagged, accepted gap: exceljs@4.4.0 (latest) transitively depends
+on a `uuid` version with a moderate advisory (buffer-bounds check,
+only reachable if a caller passes uuid v3/v5/v6 an explicit buffer —
+exceljs doesn't). `npm audit fix --force` only offers downgrading to
+exceljs@3.4.0, worse. Not fixed, flagged in `excelGenerator.js`'s own
+comment.
 
 ## Files
-- `docs/adr/ADR-019-PDF-Generator-Library.md` (new)
-- `backend/package.json` (+pdfkit)
-- `backend/src/generators/pdfGenerator.js` (new)
-- `backend/src/generators/csvGenerator.js` (generate -> async)
-- `backend/src/services/reportService.js` (format param + GENERATORS map)
-- `backend/tests/report-service.test.js` (format cases)
+- `backend/package.json` (+exceljs)
+- `backend/src/generators/excelGenerator.js` (new)
+- `backend/src/services/reportService.js` (`GENERATORS.xlsx`)
+- `backend/tests/report-service.test.js` (xlsx cases; fixed the
+  now-stale "unsupported format" test, which used to assert on
+  `'xlsx'` itself)
 
 ## Verification
-- Throwaway script: `generateStudentExportReport` with `format: 'pdf'`
-  against live DB/filesystem — real PDF bytes (`%PDF` header) stored,
-  correct `mime_type`, ledger row has `format: 'pdf'`.
-- Existing csv path still green (contract change didn't break it).
+- Throwaway script: live DB/filesystem round-trip, `format: 'xlsx'` —
+  real bytes stored, readable back via `ExcelJS.Workbook.load`.
+- Committed tests: `excelGenerator` output re-read via exceljs itself
+  (header + rows match, not just magic-byte sniffing); `reportService`
+  xlsx-format wiring through the real generator.
 - Full `npm test` regression.
