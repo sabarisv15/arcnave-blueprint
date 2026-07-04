@@ -1,35 +1,33 @@
 # TASK
 
-## Objective (Module 7 — Reports — fourth slice)
-`excelGenerator.js` (2.6, `Promise<Buffer>` contract) + third
-`GENERATORS` entry (`xlsx`) in `reportService.js`. No new report types,
-no API/UI.
+## Objective (Module 7 — Reports — fifth slice)
+`wordGenerator.js` (2.6, `Promise<Buffer>` contract) + fourth
+`GENERATORS` entry (`docx`) in `reportService.js`. No new report
+types, no API/UI. Completes the tabular Generator lineup
+(csv/pdf/xlsx/docx) — PPT stays parked.
 
-## Library: exceljs, no ADR
-Matches TechStack.md's named gap ("Node equivalent of openpyxl") by
-the same pure-JS/no-native-deps criteria ADR-017/019 already used —
-the expected default, not a deviation, so no ADR (per the task's own
-instruction: ADR only if deviating).
+## Library: docx, no ADR
+Matches TechStack.md's named gap ("Node equivalent of python-docx") by
+the same pure-JS/no-native-deps criteria ADR-017/019/excelGenerator.js
+already used — expected default, no alternatives weighed, no ADR (same
+treatment exceljs got). `npm audit` unchanged after install (4
+vulnerabilities, all pre-existing — `docx` added nothing new).
 
-One flagged, accepted gap: exceljs@4.4.0 (latest) transitively depends
-on a `uuid` version with a moderate advisory (buffer-bounds check,
-only reachable if a caller passes uuid v3/v5/v6 an explicit buffer —
-exceljs doesn't). `npm audit fix --force` only offers downgrading to
-exceljs@3.4.0, worse. Not fixed, flagged in `excelGenerator.js`'s own
-comment.
+Unlike `pdfGenerator.js`, no manual column-width/pagination math
+needed: a docx `Table` wraps/paginates on its own in Word, so
+`student_export`'s 22 columns don't need PDF's landscape/small-font
+workaround.
 
 ## Files
-- `backend/package.json` (+exceljs)
-- `backend/src/generators/excelGenerator.js` (new)
-- `backend/src/services/reportService.js` (`GENERATORS.xlsx`)
-- `backend/tests/report-service.test.js` (xlsx cases; fixed the
-  now-stale "unsupported format" test, which used to assert on
-  `'xlsx'` itself)
+- `backend/package.json` (+docx)
+- `backend/src/generators/wordGenerator.js` (new)
+- `backend/src/services/reportService.js` (`GENERATORS.docx`)
+- `backend/tests/report-service.test.js` (docx cases)
 
 ## Verification
-- Throwaway script: live DB/filesystem round-trip, `format: 'xlsx'` —
-  real bytes stored, readable back via `ExcelJS.Workbook.load`.
-- Committed tests: `excelGenerator` output re-read via exceljs itself
-  (header + rows match, not just magic-byte sniffing); `reportService`
-  xlsx-format wiring through the real generator.
+- Throwaway script: live DB/filesystem round-trip, `format: 'docx'` —
+  real bytes stored, correct mime type, `student_id IS NULL`.
+- Committed tests: `wordGenerator` output structurally verified (real
+  docx/zip archive, contains the expected text), `reportService`
+  `docx`-format wiring through the real generator.
 - Full `npm test` regression.

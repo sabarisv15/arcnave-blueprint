@@ -20,6 +20,7 @@ const generatedReportRepository = require('../src/repositories/generatedReportRe
 const csvGenerator = require('../src/generators/csvGenerator');
 const pdfGenerator = require('../src/generators/pdfGenerator');
 const excelGenerator = require('../src/generators/excelGenerator');
+const wordGenerator = require('../src/generators/wordGenerator');
 const reportService = require('../src/services/reportService');
 
 test('csvGenerator.generate (pure function)', async (t) => {
@@ -97,6 +98,29 @@ test('excelGenerator.generate (pure function)', async (t) => {
   });
 });
 
+test('wordGenerator.generate (pure function)', async (t) => {
+  await t.test('produces a real .docx (OOXML zip) containing the title and row text', async () => {
+    const JSZip = require('jszip'); // devDependency, test-only — see .ai/RESULT.md
+    const bytes = await wordGenerator.generate({
+      title: 'Test Report',
+      columns: [{ id: 'a', label: 'Col A' }, { id: 'b', label: 'Col B' }],
+      rows: [{ a: 'v1', b: 42 }, { a: null, b: 'v2' }],
+    });
+    assert.ok(Buffer.isBuffer(bytes));
+    assert.equal(bytes.subarray(0, 2).toString('latin1'), 'PK'); // .docx is a zip archive
+
+    // Unzip for real and read the actual document XML — not just
+    // sniffing magic bytes, same rigor excelGenerator's test applies
+    // via a real ExcelJS.Workbook.load.
+    const zip = await JSZip.loadAsync(bytes);
+    assert.ok(zip.file('word/document.xml'), 'a real docx has a word/document.xml part');
+    const xml = await zip.file('word/document.xml').async('string');
+    assert.ok(xml.includes('Test Report'), 'document.xml contains the report title');
+    assert.ok(xml.includes('Col A') && xml.includes('Col B'), 'document.xml contains the column headers');
+    assert.ok(xml.includes('v1') && xml.includes('v2'), 'document.xml contains the row values');
+  });
+});
+
 test('ReportService.generateStudentExportReport (no DB, no filesystem)', async (t) => {
   await t.test('rejects missing collegeId/actorUserId without touching any service', async () => {
     const listMock = t.mock.method(studentService, 'listStudents');
@@ -157,13 +181,13 @@ test('ReportService.generateStudentExportReport (no DB, no filesystem)', async (
     assert.equal(report.errorMessage, 'disk full');
   });
 
-  await t.test('rejects an unsupported format before touching any service', async () => {
+  await t.test('rejects an unsupported format before touching any service (pptx stays parked)', async () => {
     const listMock = t.mock.method(studentService, 'listStudents');
     const createMock = t.mock.method(generatedReportRepository, 'create');
     t.after(() => { listMock.mock.restore(); createMock.mock.restore(); });
 
     await assert.rejects(
-      () => reportService.generateStudentExportReport({}, { collegeId: 'c1', format: 'docx' }, { actorUserId: 'u1' }),
+      () => reportService.generateStudentExportReport({}, { collegeId: 'c1', format: 'pptx' }, { actorUserId: 'u1' }),
       reportService.ReportFormatError,
     );
     assert.equal(listMock.mock.callCount(), 0);
@@ -204,5 +228,23 @@ test('ReportService.generateStudentExportReport (no DB, no filesystem)', async (
 
     assert.equal(report.status, 'completed');
     assert.equal(report.format, 'xlsx');
+  });
+
+  await t.test('format: "docx" uses the real wordGenerator and uploads the correct Word mimeType', async () => {
+    const students = [{ roll_no: 'R1', full_name: 'Alice' }];
+    const listMock = t.mock.method(studentService, 'listStudents', async () => students);
+    const uploadMock = t.mock.method(documentService, 'uploadDocument', async () => ({ id: 'doc-docx' }));
+    const createMock = t.mock.method(generatedReportRepository, 'create', async (client, fields) => ({ id: 'report-docx', ...fields }));
+    t.after(() => { listMock.mock.restore(); uploadMock.mock.restore(); createMock.mock.restore(); });
+
+    const report = await reportService.generateStudentExportReport({}, { collegeId: 'c1', format: 'docx' }, { actorUserId: 'u1' });
+
+    const [, uploadFields] = uploadMock.mock.calls[0].arguments;
+    assert.equal(uploadFields.mimeType, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    assert.match(uploadFields.fileName, /\.docx$/);
+    assert.equal(uploadFields.fileBuffer.subarray(0, 2).toString('latin1'), 'PK');
+
+    assert.equal(report.status, 'completed');
+    assert.equal(report.format, 'docx');
   });
 });

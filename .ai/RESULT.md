@@ -1,40 +1,39 @@
 # RESULT
 
 ## Files changed
-- `backend/package.json` (+exceljs)
-- `backend/src/generators/excelGenerator.js` (new)
-- `backend/src/services/reportService.js` (`GENERATORS.xlsx`)
-- `backend/tests/report-service.test.js` (xlsx cases; fixed the
-  now-stale unsupported-format test, previously asserting on `'xlsx'`
-  itself — now uses `'docx'`)
+- `backend/package.json` (+docx, +jszip devDependency)
+- `backend/src/generators/wordGenerator.js` (new)
+- `backend/src/services/reportService.js` (`GENERATORS.docx`)
+- `backend/tests/report-service.test.js` (docx cases; fixed the
+  unsupported-format test again — it had drifted from `'xlsx'` to
+  `'docx'` last slice, now uses `'pptx'`, which stays genuinely
+  unsupported)
 
-## Library: exceljs, no ADR
-Matches TechStack.md's gap by ADR-017/019's own criteria (pure JS, no
-native deps) — the expected default, not a deviation, so no new ADR.
-`sheet.columns`' `key` maps straight onto ReportModel rows' own keys —
-no manual per-cell extraction needed, unlike csv/pdf.
+## Library: docx, no ADR
+Matches TechStack.md's gap by ADR-017/019/excelGenerator.js's own
+criteria — expected default, no alternatives weighed, no ADR. `npm
+audit` unchanged after install (4 pre-existing vulnerabilities, `docx`
+added none). No manual layout math needed (unlike `pdfGenerator.js`):
+a docx `Table` wraps/paginates on its own in Word.
 
-One flagged, accepted gap: exceljs@4.4.0 (latest) transitively depends
-on a `uuid` version with a moderate advisory (buffer-bounds check, only
-reachable if a caller passes uuid an explicit buffer — exceljs
-doesn't). `npm audit fix --force` only offers downgrading to
-exceljs@3.4.0, a worse outcome. Not fixed; noted in
-`excelGenerator.js`'s own comment.
+Added `jszip` as a **devDependency** (test-only) to unzip generated
+`.docx` output for real content verification in the committed test —
+`docx` itself has no reader API. `npm audit` unchanged after this too.
 
 ## Verification
-- Live throwaway script (deleted after use): `format: 'xlsx'` end to
-  end against real DB + filesystem — real zip/xlsx bytes on disk,
-  re-opened via `ExcelJS.Workbook.load` (not just magic-byte sniffing),
-  header + both seeded students' rows confirmed. 7/7 checks passed.
-- Committed tests: `excelGenerator` output re-read via exceljs itself
-  (exact header/row values, plus the 31-char sheet-name truncation);
-  `reportService`'s `xlsx` wiring through the real (unmocked)
+- Live throwaway script (deleted after use): `format: 'docx'` end to
+  end against real DB + filesystem — real zip/docx bytes, unzipped via
+  `jszip`, `word/document.xml` confirmed to contain the report title,
+  both column headers, and both seeded students' names. 9/9 checks.
+- Committed tests: `wordGenerator` output unzipped and its
+  `document.xml` checked for real text content (not magic-byte
+  sniffing); `reportService`'s `docx` wiring through the real
   generator.
-- Full suite: 397/397 (393 + 4 net new).
+- Full suite: 400/400 (397 + 3 net new).
 
 ## Flags
 - No API/UI yet.
-- Word generator, any second report type: still unbuilt.
-- `student_export` is now the only report type wired to all three
-  formats (csv/pdf/xlsx) — the full 2.6 Generator Module lineup this
-  slice's scope covers.
+- Generator Module's tabular lineup is now complete: csv/pdf/xlsx/docx,
+  all wired to `student_export`. PPT stays parked (no real ask) —
+  confirmed still rejected via `ReportFormatError`.
+- Any second report type: still unbuilt.
