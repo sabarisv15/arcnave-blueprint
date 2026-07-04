@@ -28,9 +28,31 @@ CREATE TABLE colleges (
     subdomain           TEXT UNIQUE NOT NULL,       -- e.g. 'gpct' -> gpct.arcnave.com
     subscription_status TEXT NOT NULL DEFAULT 'trial',  -- trial | active | suspended | cancelled
     created_by          UUID REFERENCES platform_admins(id),
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- College Admin profile (Module 2 BusinessRules.md resolution),
+    -- added by 1753000000000_college-admin-profile-schema.js. Nullable
+    -- — every college created before this migration has no value to
+    -- backfill. Single-valued facts only; a college's departments are
+    -- a separate table below, not columns here.
+    affiliating_university TEXT,
+    year_established        INT,
+    address                  TEXT
 );
 ```
+
+`affiliating_university`/`year_established`/`address` are the only
+columns on this Platform-owned table that `arcnave_app` (the tenant
+runtime role) can ever write — via a column-level `GRANT UPDATE
+(affiliating_university, year_established, address) ON colleges`, not
+a table-wide grant. See `collegeProfileRepository.js` and the
+migration's own comment: `colleges` structurally cannot carry the
+usual `tenant_isolation` RLS policy (Tenant Middleware reads this
+table *before* `app.current_tenant` is set, to discover the
+`college_id` in the first place — the same bootstrapping reason
+`principal_invitations` below has none), so this column-scoped grant
+is the substitute defense-in-depth mechanism, and the repository's own
+`WHERE college_id = $1` is the sole thing scoping *which* row an
+update reaches.
 
 `colleges.college_id` is the value that ends up in
 `SET LOCAL app.current_tenant = '<college_id>'` on every tenant
@@ -112,6 +134,30 @@ CREATE TABLE configurations (
     UNIQUE (college_id, category)
 );
 ```
+
+### Departments (College Admin profile, added post-Module-2)
+
+```sql
+CREATE TABLE departments (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    college_id      TEXT NOT NULL REFERENCES colleges(college_id),
+    name            TEXT NOT NULL,
+    approved_intake INT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (college_id, name)
+);
+```
+
+A real tenant table, standard RLS (below) — not columns on `colleges`,
+because AICTE-style department data is inherently per-department (a
+college has more than one, each with its own `approved_intake`); it
+can't flatten onto one row the way `colleges.affiliating_university`/
+`year_established`/`address` above can. `staff.department` (Module 2)
+and Academic's own `department` TEXT column are **not** FK'd to this
+table yet — both stay free-text as they are today; normalizing them is
+a real, separate future gap, not solved by introducing this table. See
+`backend/migrations/1753000000000_college-admin-profile-schema.js`.
 
 ## RLS policy pattern (apply to every tenant table)
 

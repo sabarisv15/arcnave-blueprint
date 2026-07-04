@@ -88,9 +88,18 @@ new rule is decided, in the module that owns it.
   bulk-provisioning mechanism — one-by-one repeated calls vs. a real
   CSV/bulk-import capability — is a Module 2 build decision, not a
   role-definition one; resolve it when that slice is built, not here.
-  Same treatment for college profile storage — which fields live on
-  a tenant/college table vs. a separate departments table — that's a
-  schema decision for whichever module owns it, not decided here.)
+  **Resolved (College Admin profile kickoff)** — college profile
+  storage: single-valued college-level facts (affiliating university,
+  year established, address, and similar one-per-college facts) live
+  as columns on `colleges` itself. Departments are a separate
+  `departments` table, not columns — a college has more than one, and
+  AICTE-style profile data is inherently per-department (each with its
+  own approved intake), so it can't flatten onto one row the way the
+  single-valued facts can. `staff.department` and the Academic module's
+  own `department` TEXT column are NOT migrated to a `departments` FK
+  in this slice — both stay free-text as they are today; normalizing
+  them to reference the new table is a real, separate future gap, not
+  solved by introducing the table.)
 
 ## Finance
 - Fee changes require approval before taking effect.
