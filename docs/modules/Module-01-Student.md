@@ -1,30 +1,45 @@
 # Module 1 — Student Management
 
-Status: Not started. This doc exists to carry forward frontend
-grounding done in a prior Cowork session before implementation begins,
-so a fresh chat/session doesn't have to re-derive it.
+Status: Complete (migration → repository → service → API → UI, plus
+one follow-up schema fix).
 
-## Existing frontend to repoint (already read in full)
+## Table
+`students` — fields grounded directly against the real
+`StudentEditorModal.jsx` (roll_no, full_name, gender, entry_type,
+emis_number, umis_number, email, phone (+verified), parent_name,
+parent_phone (+verified), address, pincode, mark_10th/12th/iti,
+accommodation, club, internship, career_plan, notes, license_number,
+bike_number). `UNIQUE(college_id, roll_no)` stands in for a
+"register number" BusinessRules describes but never names a field for
+— flagged assumption, not a silent rename. No Aadhaar column.
 
-`frontend/src/components/StudentEditorModal.jsx` — the real, existing
-student editor UI. Backend schema/API should be designed to satisfy
-these actual fields, not invented ones:
+Follow-up fix (`9e527ea`): `mark_10th`/`mark_12th`/`mark_iti` changed
+NUMERIC → TEXT — the real UI invites both "92%" and "460/500" input
+conventions, neither of which NUMERIC can store losslessly, and no
+business rule exists yet for which canonical form to collapse them to.
 
-roll_no, full_name, gender, entry_type, emis_number, umis_number,
-email, phone, phone_verified, parent_name, parent_phone,
-parent_phone_verified, address, pincode, mark_10th, mark_12th,
-mark_iti, accommodation, club, internship, career_plan, notes,
-license_number, bike_number.
+## Service
+`studentService.js` — validation + audit logging over
+`studentRepository.js` (CLAUDE.md rule 1). "Only the class tutor may
+edit" (BusinessRules.md Staff) is left to the route/RBAC layer, not
+enforced here — same split `configurationService.js` uses for its own
+principal-only gate. No WorkflowService call (doesn't exist yet) —
+BusinessRules' HOD-override exception for student-profile edits is a
+named, deliberate gap.
 
-- **No Aadhaar field** — consistent with `BusinessRules.md`'s
-  Aadhaar prohibition (CLAUDE.md rule 8). Don't add one.
-- The modal has a fake/randomized "AI OCR extraction" demo button —
-  that's Module 6 (Documents & OCR) territory, not Module 1's. Ignore
-  it when building Module 1; don't try to wire it up now.
+## API
+`backend/src/routes/students.js` — `/api/v1/students`.
 
-## Not yet done
+## UI
+`StudentEditorModal.jsx` repointed to the real API (`c9b6248`).
 
-Schema, migration, repository, service, API, real tests — none of
-this exists yet. Start per `Roadmap.md`'s vertical-slice order (ERD →
-Migration → Repository → Service → API → UI → tests), same discipline
-Module 0 used, in Node/Express per `docs/architecture/TechStack.md`.
+## Known gaps / deferred
+- `annual_income` field still missing — blocks Finance's
+  scholarship-eligibility computation (BusinessRules: income-threshold
+  eligibility), flagged in Module 5's own docs, not built here.
+- BusinessRules' HOD-override exception on student-profile edits —
+  needs WorkflowService (Module 8).
+
+## Commits
+`fbfd1c9` migration+repo · `5436460` service · `a562147` API ·
+`c9b6248` UI · `9e527ea` marks NUMERIC→TEXT fix

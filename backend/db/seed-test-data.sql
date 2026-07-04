@@ -45,13 +45,25 @@
 --                Approved timetable, see BusinessRules.md)
 --   Module 5   — 4 fee structures (mixed Approved/Pending Approval),
 --                4 fee payments (mixed paid/not_paid)
+--
+--   Modules 6 (Documents & OCR) and 7 (Reports) exist in the schema
+--   (documents, generated_reports) but have no sample rows here yet —
+--   this file predates both; the cleanup block below still accounts
+--   for them (in correct FK order) so re-running this file stays safe
+--   even after a manual document/report gets created against the
+--   'demo' tenant by hand.
 
 BEGIN;
 
 -- --- Cleanup (idempotent re-run) — same dependency order every
 -- integration test's own cleanupTenant() already uses in this repo.
+-- generated_reports and fee_payments both FK into documents
+-- (document_id / receipt_document_id respectively), so both must be
+-- deleted before documents.
 DELETE FROM audit_log            WHERE college_id = 'demo';
 DELETE FROM fee_payments         WHERE college_id = 'demo';
+DELETE FROM generated_reports    WHERE college_id = 'demo';
+DELETE FROM documents            WHERE college_id = 'demo';
 DELETE FROM fee_structures       WHERE college_id = 'demo';
 DELETE FROM attendance_sessions  WHERE college_id = 'demo';
 DELETE FROM faculty_allocation   WHERE college_id = 'demo';
