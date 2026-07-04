@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useToast, useAuth } from '../App';
-import { X, Check, ChevronLeft, ChevronRight } from 'lucide-react';
+import { X, Check, ChevronLeft, ChevronRight, FileText } from 'lucide-react';
 import DocumentPanel from './DocumentPanel';
 
 const BASE_STEPS = [
@@ -86,6 +86,17 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
   // itself reduces this to "latest per doc_type" — see its own comment.
   const [documents, setDocuments] = useState([]);
   const [documentsLoading, setDocumentsLoading] = useState(false);
+
+  // Template-fill (Module 6/College Admin) — templates are college-
+  // wide (GET /api/v1/documents/templates lists every one, not scoped
+  // to this student), fetched alongside this student's own documents.
+  // No fixed tag list on this side either: whatever {{fields}} a
+  // template defines are whatever get filled from this real student
+  // record below, via mergeTemplate's own nullGetter for anything this
+  // record doesn't have.
+  const [templates, setTemplates] = useState([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [generatingTemplate, setGeneratingTemplate] = useState(false);
 
   // Populate fields if edit mode
   useEffect(() => {
@@ -194,15 +205,85 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
     }
   };
 
+  const fetchTemplates = async () => {
+    try {
+      const headers = { Authorization: `Bearer ${accessToken}` };
+      const res = await fetch('/api/v1/documents/templates', { headers });
+      if (!res.ok) throw new Error('Failed to load templates');
+      setTemplates(await res.json());
+    } catch (err) {
+      showToast(err.message, 'danger');
+    }
+  };
+
   useEffect(() => {
     if (isEditMode && realStudentId && steps[currentStep] && steps[currentStep].label === 'Finance') {
       fetchFeeData();
     }
     if (isEditMode && realStudentId && steps[currentStep] && steps[currentStep].label === 'Documents') {
       fetchDocuments();
+      fetchTemplates();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep, realStudentId]);
+
+  // The real caller this slice names: merge whatever fields this
+  // student record actually has into the chosen template and download
+  // the result — same Blob/object-URL pattern DocumentPanel.jsx's own
+  // handleDownload already uses for a stored document, just against
+  // the merge route's bytes instead. `fields` is the flat, real
+  // student data already loaded into this form's own state (not a
+  // hardcoded subset) — CLAUDE.md rule 9: every one of these values is
+  // untrusted, human-entered data, inserted into the template as
+  // literal text by mergeTemplate, never interpreted as instructions.
+  const handleGenerateFromTemplate = async () => {
+    if (!selectedTemplateId) return;
+    setGeneratingTemplate(true);
+    try {
+      const fields = {
+        roll_number: rollNo,
+        name: fullName,
+        gender,
+        entry_type: entryType,
+        umis_number: umisNumber,
+        emis_number: emisNumber,
+        email,
+        phone,
+        parent_name: parentName,
+        parent_phone: parentPhone,
+        address,
+        pincode,
+        mark_10th: mark10th,
+        mark_12th: mark12th,
+        mark_iti: markIti,
+        accommodation,
+        club,
+        internship,
+        career_plan: careerPlan,
+      };
+      const res = await fetch(`/api/v1/documents/${selectedTemplateId}/merge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ fields }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to generate document');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${fullName || 'student'}-${templates.find((t) => t.id === selectedTemplateId)?.file_name || 'generated.docx'}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Document generated!', 'success');
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setGeneratingTemplate(false);
+    }
+  };
 
   // Toggles a fee line paid <-> not_paid via the real mark-or-re-mark
   // upsert (POST /api/v1/finance/fee-payments) — works identically
@@ -565,14 +646,52 @@ export default function StudentEditorModal({ onClose, student, onSave }) {
                   <div className="w-8 h-8 border-2 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin" />
                 </div>
               ) : (
-                <DocumentPanel
-                  studentId={realStudentId}
-                  documents={documents}
-                  accessToken={accessToken}
-                  onDocumentUpdate={fetchDocuments}
-                  canUpload={user?.role === 'principal'}
-                  canVerify={user?.role === 'principal'}
-                />
+                <>
+                  <DocumentPanel
+                    studentId={realStudentId}
+                    documents={documents}
+                    accessToken={accessToken}
+                    onDocumentUpdate={fetchDocuments}
+                    canUpload={user?.role === 'principal'}
+                    canVerify={user?.role === 'principal'}
+                  />
+
+                  {/* Generate from Template — the one real caller this
+                      slice names. Fields come from this student's own
+                      real data (above), never a fixed tag list. */}
+                  <div className="pt-4 mt-4 border-t border-slate-100">
+                    <h4 className="font-extrabold text-indigo-950 text-xs mb-1 flex items-center gap-1.5">
+                      <FileText className="w-3.5 h-3.5" /> Generate from Template
+                    </h4>
+                    <p className="text-[11px] text-slate-500 font-bold mb-2">
+                      Fill a college template with this student's real data.
+                    </p>
+                    {templates.length === 0 ? (
+                      <p className="text-xs text-slate-400 italic py-2">No templates uploaded yet (College Admin uploads these).</p>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={selectedTemplateId}
+                          onChange={(e) => setSelectedTemplateId(e.target.value)}
+                          className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs font-semibold focus:outline-none focus:border-indigo-400"
+                        >
+                          <option value="">Select a template…</option>
+                          {templates.map((t) => (
+                            <option key={t.id} value={t.id}>{t.file_name}</option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={handleGenerateFromTemplate}
+                          disabled={!selectedTemplateId || generatingTemplate}
+                          className="btn-primary text-xs py-2 px-3 disabled:opacity-50"
+                        >
+                          {generatingTemplate ? 'Generating…' : 'Generate'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </>
               )}
             </div>
           )}

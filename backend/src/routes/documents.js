@@ -63,6 +63,14 @@ function mapDocumentServiceError(err, res) {
     res.status(404).json({ detail: err.message });
     return true;
   }
+  if (err instanceof documentService.DocumentNotATemplateError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof documentService.TemplateMergeError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -95,6 +103,72 @@ function createDocumentsRouter() {
         { actorUserId: req.jwtClaims.sub },
       );
       res.status(201).json(document);
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // Template-fill: upload is college_admin only (BusinessRules.md's
+  // College Admin resolution, item 2 — "uploading/managing college
+  // document templates"), unlike the requireRole('principal') every
+  // other write on this router uses. Calls uploadTemplate specifically
+  // (not the general POST /documents above), which fixes
+  // doc_type='template'/student_id=null structurally — a caller here
+  // cannot forge a template row with a student_id, or a student
+  // document silently tagged as a template.
+  router.post('/documents/templates', requireRole('college_admin'), express.json({ limit: '15mb' }), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const { file_base64: fileBase64, file_name: fileName, mime_type: mimeType } = req.body || {};
+    if (typeof fileBase64 !== 'string' || fileBase64.length === 0) {
+      res.status(400).json({ detail: 'file_base64 is required' });
+      return;
+    }
+
+    try {
+      const document = await documentService.uploadTemplate(
+        req.dbClient,
+        { collegeId: req.collegeId, fileName, mimeType, fileBuffer: Buffer.from(fileBase64, 'base64') },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(document);
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // requireAuth, not college_admin-only: picking a template to
+  // generate a document from (the student-profile "Generate from
+  // template" caller) is a read, needed by whoever is looking at a
+  // student's profile — same "reads are requireAuth, writes are the
+  // gated action" split every other router in this codebase already
+  // draws.
+  router.get('/documents/templates', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const templates = await documentService.listTemplates(req.dbClient);
+    res.json(templates);
+  }));
+
+  // The one real caller this slice names: merge arbitrary
+  // caller-supplied fields (e.g. a real student record) into a stored
+  // template and stream the result back — same real-bytes response
+  // shape as GET /documents/:id/download just below, not a stored
+  // document (nothing here calls uploadDocument; the merged bytes
+  // exist only in this one response). requireAuth: generating a
+  // document from a template is a read of existing data, not a write
+  // to any row.
+  router.post('/documents/:id/merge', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const result = await documentService.mergeDocumentTemplate(req.dbClient, req.params.id, (req.body && req.body.fields) || {});
+      if (result === null) {
+        res.status(404).json({ detail: `No document found with id ${JSON.stringify(req.params.id)}` });
+        return;
+      }
+      res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      res.set('Content-Disposition', `attachment; filename="merged-${safeHeaderFileName(result.document.file_name)}"`);
+      res.send(result.buffer);
     } catch (err) {
       if (mapDocumentServiceError(err, res)) return;
       throw err;

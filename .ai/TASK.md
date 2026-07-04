@@ -1,29 +1,37 @@
 # TASK
 
-## Objective (College Admin profile, next slice)
-Service + API + UI. `collegeProfileService` (get/update the 3
-`colleges` columns, CRUD on `departments`) — `college_admin` role only.
-Routes under `/api/v1/college-profile`, `/api/v1/departments`. UI: new
-"College Profile" tab, same dashboard conventions as Fee Structures.
+## Objective (Template-fill: service + API + UI + one real caller)
+`POST /api/v1/documents/:id/merge` (template id + fields -> merged
+`.docx` via the existing download response shape), calling
+`uploadTemplate`/`mergeTemplate`. UI: template upload under College
+Admin; "Generate from template" on student profile, fields from real
+student data, no fixed tag list.
 
 ## Scope
-Built on the already-committed migration/repositories
-(`collegeProfileRepository.js`/`departmentRepository.js`,
-`1753000000000_college-admin-profile-schema.js`). No schema change.
-`college_admin` is a brand-new role with no existing dashboard — added
-one (`CollegeAdminDashboard.jsx`), routed at `/dashboard/college-admin`.
+`documentService.mergeDocumentTemplate` composes `downloadDocument` +
+`mergeTemplate` (with a `doc_type === 'template'` identity check
+before any disk read). New `documentRepository.findByDocType` +
+`documentService.listTemplates` back the picker UI. Three routes:
+`POST`/`GET /documents/templates`, `POST /documents/:id/merge`. No
+schema change.
 
 ## Constraints
-- BusinessRules.md's College Admin resolution, item 3: this is this
-  role's own ongoing duty, not shared with Principal.
-- `requireRole('college_admin')` on every route, both reads and
-  writes — unlike finance.js/staff.js's requireAuth-for-reads
-  placeholder, this whole resource belongs to one role.
+- Module-06-Documents.md, CLAUDE.md rules 2/9, `templateMerger.js`
+  (`0cf46e3`) — merge field values stay untrusted, literal text only.
+- Template upload is `college_admin`-only
+  (`BusinessRules.md`'s College Admin resolution, item 2); the merge
+  read is `requireAuth` (whoever's viewing a student profile).
 
 ## Verification
-Live: full backend suite + an HTTP round-trip script (RBAC 403 for a
-non-college_admin role, GET/PUT profile, department create/conflict/
-validation/list/update/get/delete/404-after-delete) — then a real
-browser (headless Chrome via `playwright-core`, same scratch install
-as the prior slice) through the actual login flow, filling the
-profile form and adding a department.
+Live: full backend suite + an HTTP round-trip script (RBAC, real
+`.docx` upload/list, merge substitution, rule-9 hostile-value proof,
+non-template 400, missing-id 404) — then a real browser (headless
+Chrome via `playwright-core`) for the College Admin upload UI. The
+student-profile "Generate from template" UI could not be exercised
+live: found a pre-existing, unrelated bug (`TutorClass.jsx`'s only
+real edit-mode caller of `StudentEditorModal.jsx` hangs forever for
+any real backend user, because `GET /api/v1/auth/me` never returns
+`username`, which that page's tutor-identity logic assumes exists).
+Fixed one narrow symptom (`Header.jsx`'s crash on it) in passing;
+flagged the deeper gap, did not fix it (real, separate work, out of
+this slice's scope).

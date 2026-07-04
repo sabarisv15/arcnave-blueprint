@@ -161,6 +161,50 @@ async function getLatestDocumentForStudentAndType(client, studentId, docType) {
   return documentRepository.findLatestByStudentAndType(client, studentId, docType);
 }
 
+// The natural "what templates can I generate from" listing a picker
+// UI needs — every non-deleted row tagged TEMPLATE_DOC_TYPE, same
+// thin-wrapper shape listDocumentsForStudent already has.
+async function listTemplates(client) {
+  return documentRepository.findByDocType(client, TEMPLATE_DOC_TYPE);
+}
+
+// templateId names something that isn't actually a template (a
+// student certificate, a generated report, etc.) — mergeDocumentTemplate
+// refuses rather than silently merging arbitrary document bytes.
+class DocumentNotATemplateError extends Error {}
+
+// Composes the two pieces this slice's own build brief names
+// separately (downloadDocument -> mergeTemplate) into the one real
+// caller a route needs. The doc_type check runs BEFORE any disk read
+// (findById, not downloadDocument, resolves the row first) -- checking
+// identity first means a caller who passes some other document's id
+// (a photo, a generated report) gets a clean DocumentNotATemplateError
+// regardless of whatever bytes that row's storage_path happens to
+// point at, rather than a raw disk-read error surfacing first for the
+// wrong reason. Only once the row is confirmed to really be a
+// template does this read its bytes (fileStorage.readFile, the same
+// path downloadDocument itself uses -- no second storage mechanism).
+// `fields` is whatever flat object the caller sends (e.g. a real
+// student record) -- CLAUDE.md rule 9 still holds here exactly as
+// templateMerger.js's own file comment describes: every value is
+// inserted as literal text, never interpreted as instructions,
+// regardless of where it came from.
+async function mergeDocumentTemplate(client, templateId, fields) {
+  const document = await documentRepository.findById(client, templateId);
+  if (document === null) {
+    return null;
+  }
+  if (document.doc_type !== TEMPLATE_DOC_TYPE) {
+    throw new DocumentNotATemplateError(
+      `document ${JSON.stringify(templateId)} is not a template (doc_type is ${JSON.stringify(document.doc_type)})`,
+    );
+  }
+
+  const templateBuffer = await fileStorage.readFile(document.storage_path);
+  const buffer = templateMerger.mergeTemplate(templateBuffer, fields);
+  return { document, buffer };
+}
+
 // The only path that mutates an existing document row. Stamps
 // verifiedByUserId/verifiedAt from the actor/clock, never
 // caller-supplied — same "the actor is who did it right now" reasoning
@@ -223,10 +267,13 @@ module.exports = {
   DocumentStudentNotFoundError,
   DocumentReviewStatusError,
   TemplateMergeError: templateMerger.TemplateMergeError,
+  DocumentNotATemplateError,
   TEMPLATE_DOC_TYPE,
   uploadDocument,
   uploadTemplate,
   mergeTemplate: templateMerger.mergeTemplate,
+  mergeDocumentTemplate,
+  listTemplates,
   getDocument,
   downloadDocument,
   listDocumentsForStudent,

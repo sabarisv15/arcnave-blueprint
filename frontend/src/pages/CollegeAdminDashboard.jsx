@@ -1,16 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import SidebarLayout from '../components/SidebarLayout';
 import { useToast, useAuth } from '../App';
-import { Building, Plus, Edit3, Trash2, Save } from 'lucide-react';
+import { Building, Plus, Edit3, Trash2, Save, FileText, Upload } from 'lucide-react';
 
 // College Admin's own dashboard — BusinessRules.md's College Admin
-// resolution, item 3: maintaining the college's own profile/details is
-// this role's ongoing operational duty. One tab this slice: "College
-// Profile" (the 3 colleges columns + departments CRUD), same
+// resolution: "College Profile" (item 3 — the 3 colleges columns +
+// departments CRUD) and template upload (item 2 —
+// "uploading/managing college document templates"), same
 // card+list+modal convention PrincipalDashboard.jsx's Fee Structures
-// tab already uses. Bulk-provisioning (item 1) and template management
-// (item 2) are separate, not-yet-built slices of this same role — not
-// guessed at here.
+// tab already uses. Bulk-provisioning (item 1) is a separate,
+// not-yet-built slice of this same role — not guessed at here.
 export default function CollegeAdminDashboard() {
   const { accessToken } = useAuth();
   const { showToast } = useToast();
@@ -25,6 +24,9 @@ export default function CollegeAdminDashboard() {
   const [editingDept, setEditingDept] = useState(null);
   const [deptForm, setDeptForm] = useState({ name: '', approved_intake: '' });
   const [savingDept, setSavingDept] = useState(false);
+
+  const [templates, setTemplates] = useState([]);
+  const [uploadingTemplate, setUploadingTemplate] = useState(false);
 
   const authHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` };
 
@@ -44,6 +46,9 @@ export default function CollegeAdminDashboard() {
 
       const deptRes = await fetch('/api/v1/departments', { headers: authHeaders });
       if (deptRes.ok) setDepartments((await deptRes.json()) || []);
+
+      const templatesRes = await fetch('/api/v1/documents/templates', { headers: authHeaders });
+      if (templatesRes.ok) setTemplates((await templatesRes.json()) || []);
     } catch (e) {
       showToast('Error loading college profile', 'danger');
     } finally {
@@ -113,6 +118,41 @@ export default function CollegeAdminDashboard() {
       showToast(err.message, 'danger');
     } finally {
       setSavingDept(false);
+    }
+  };
+
+  // Template-fill: upload is the one write POST /documents/templates
+  // gates to college_admin (routes/documents.js's own comment) — real
+  // bytes, base64-in-JSON, same "no multipart parser exists yet"
+  // convention routes/documents.js's own UPLOAD_BODY_FIELDS comment
+  // already documents for the general upload route.
+  const handleTemplateUpload = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploadingTemplate(true);
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const res = await fetch('/api/v1/documents/templates', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ file_base64: base64, file_name: file.name, mime_type: file.type }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to upload template');
+      }
+      showToast('Template uploaded!', 'success');
+      loadData();
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setUploadingTemplate(false);
+      e.target.value = '';
     }
   };
 
@@ -210,6 +250,43 @@ export default function CollegeAdminDashboard() {
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div className="card p-6 space-y-4">
+              <div className="flex justify-between items-center border-b pb-3 border-slate-50">
+                <div>
+                  <h3 className="font-extrabold text-slate-805 text-sm flex items-center gap-1.5">
+                    <FileText className="w-4 h-4 text-indigo-500" /> Document Templates
+                  </h3>
+                  <p className="text-slate-450 text-[10px] font-semibold mt-0.5">
+                    Upload a .docx with {'{{field}}'} placeholders — any field name, filled from real data when generated.
+                  </p>
+                </div>
+                <label className="btn-primary text-[10px] py-1.5 px-3 flex items-center gap-1 cursor-pointer">
+                  <Upload className="w-3.5 h-3.5" /> {uploadingTemplate ? 'Uploading…' : 'Upload Template'}
+                  <input
+                    type="file"
+                    accept=".docx"
+                    className="hidden"
+                    disabled={uploadingTemplate}
+                    onChange={handleTemplateUpload}
+                  />
+                </label>
+              </div>
+              <div className="space-y-2.5 max-h-[300px] overflow-y-auto pr-1">
+                {(templates || []).length === 0 ? (
+                  <p className="text-xs text-slate-400 italic py-6 text-center">No templates uploaded yet.</p>
+                ) : (
+                  templates.map((t) => (
+                    <div key={t.id} className="p-3 bg-white border border-slate-150 rounded-xl flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-full bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center flex-shrink-0">
+                        <FileText className="w-4 h-4" />
+                      </div>
+                      <p className="text-xs font-extrabold text-slate-805">{t.file_name}</p>
                     </div>
                   ))
                 )}

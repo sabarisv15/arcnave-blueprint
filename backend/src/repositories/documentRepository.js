@@ -85,6 +85,22 @@ async function findLatestByStudentAndType(client, studentId, docType) {
   return result.rows[0] || null;
 }
 
+// The natural "every template this college has uploaded" listing —
+// same shape as findByStudentId, scoped by doc_type instead of
+// student_id. RLS is the tenant backstop (see the file-level comment);
+// no explicit college_id filter is needed here since, unlike
+// findByStaffCode-style lookups elsewhere, doc_type isn't part of any
+// per-tenant uniqueness key this query needs to document.
+async function findByDocType(client, docType) {
+  const result = await client.query(
+    `SELECT * FROM documents
+     WHERE doc_type = $1 AND deleted_at IS NULL
+     ORDER BY created_at DESC`,
+    [docType],
+  );
+  return result.rows;
+}
+
 async function update(client, id, fields) {
   const entries = COLUMNS.filter(([key]) => fields[key] !== undefined);
   if (entries.length === 0) {
@@ -131,6 +147,7 @@ module.exports = {
   findById,
   findByStudentId,
   findLatestByStudentAndType,
+  findByDocType,
   update,
   softDelete,
   list,
