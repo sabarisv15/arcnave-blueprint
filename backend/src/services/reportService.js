@@ -18,20 +18,34 @@
 // report_type/format/document_id/error_message), not something that
 // also needs a duplicate entry alongside it (see ADR-018).
 //
-// Only one report type this slice — student_export, CSV only. Every
-// other Generator (Excel/PDF/Word) and report type is deferred until a
-// real screen asks for it, same restraint every other module's first
-// slice applies to unbuilt capability.
+// Only one report type this slice — student_export, now with two
+// output formats (csv/pdf, ADR-019). Excel/Word generators and any
+// second report type are still deferred until a real screen asks for
+// them, same restraint every other module's first slice applies to
+// unbuilt capability.
 
 const studentService = require('./studentService');
 const documentService = require('./documentService');
 const generatedReportRepository = require('../repositories/generatedReportRepository');
 const csvGenerator = require('../generators/csvGenerator');
+const pdfGenerator = require('../generators/pdfGenerator');
 
 // Missing collegeId or actorUserId — nothing downstream (documentService,
 // the ledger write) can proceed without either, same guard shape every
 // other service's own top-level validation error gives.
 class ReportValidationError extends Error {}
+
+// format isn't one of GENERATORS' known keys — same "known-value,
+// service-enforced, no DB CHECK" shape documentService's
+// DocumentReviewStatusError already uses for reviewDocument's status.
+class ReportFormatError extends Error {}
+
+// Both generators return Promise<Buffer> (ADR-019) so this map can
+// await either identically regardless of format.
+const GENERATORS = {
+  csv: { generate: csvGenerator.generate, mimeType: 'text/csv', extension: 'csv' },
+  pdf: { generate: pdfGenerator.generate, mimeType: 'application/pdf', extension: 'pdf' },
+};
 
 // students table columns worth exporting, real column names (not
 // frontend/src/components/CsvExportModal.jsx's own stale MongoDB-era
@@ -83,21 +97,25 @@ function buildStudentExportReportModel(students) {
   };
 }
 
-async function generateStudentExportReport(client, { collegeId }, { actorUserId } = {}) {
+async function generateStudentExportReport(client, { collegeId, format = 'csv' }, { actorUserId } = {}) {
   if (!collegeId || !actorUserId) {
     throw new ReportValidationError('collegeId and actorUserId are required');
+  }
+  const generator = GENERATORS[format];
+  if (!generator) {
+    throw new ReportFormatError(`format ${JSON.stringify(format)} is not supported`);
   }
 
   try {
     const students = await studentService.listStudents(client, { limit: STUDENT_EXPORT_LIMIT });
-    const csvBytes = csvGenerator.generate(buildStudentExportReportModel(students));
+    const bytes = await generator.generate(buildStudentExportReportModel(students));
 
     // studentId omitted — this file belongs to no single student
     // (documents.student_id is nullable as of 1752800000000, exactly
     // for this case).
     const document = await documentService.uploadDocument(
       client,
-      { collegeId, docType: 'generated_report', fileName: `student_export_${Date.now()}.csv`, mimeType: 'text/csv', fileBuffer: csvBytes },
+      { collegeId, docType: 'generated_report', fileName: `student_export_${Date.now()}.${generator.extension}`, mimeType: generator.mimeType, fileBuffer: bytes },
       { actorUserId },
     );
 
@@ -105,13 +123,13 @@ async function generateStudentExportReport(client, { collegeId }, { actorUserId 
       collegeId,
       requestedByUserId: actorUserId,
       reportType: 'student_export',
-      format: 'csv',
+      format,
       parameters: {},
       status: 'completed',
       documentId: document.id,
     });
   } catch (err) {
-    if (err instanceof ReportValidationError) {
+    if (err instanceof ReportValidationError || err instanceof ReportFormatError) {
       throw err;
     }
     // Returned, not re-thrown: this whole function runs inside the
@@ -128,7 +146,7 @@ async function generateStudentExportReport(client, { collegeId }, { actorUserId 
       collegeId,
       requestedByUserId: actorUserId,
       reportType: 'student_export',
-      format: 'csv',
+      format,
       parameters: {},
       status: 'failed',
       errorMessage: err.message,
@@ -138,5 +156,6 @@ async function generateStudentExportReport(client, { collegeId }, { actorUserId 
 
 module.exports = {
   ReportValidationError,
+  ReportFormatError,
   generateStudentExportReport,
 };

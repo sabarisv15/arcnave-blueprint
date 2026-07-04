@@ -14,9 +14,14 @@
 // looks like the same kind of file that modal already produces
 // client-side, not a new one invented from scratch.
 //
-// CSV only, this slice — Excel/PDF/Word generators are deferred until
-// a real screen needs them (see .ai/TASK.md), same restraint every
-// other module's first slice applies to unbuilt capability.
+// Excel/Word generators are still deferred until a real screen needs
+// them; pdfGenerator.js (ADR-019) is the second format now built.
+//
+// generate() is async (trivially — no real async work happens) so
+// reportService.js can await this and pdfGenerator.generate
+// identically regardless of format: pdfkit is stream-based and has no
+// synchronous "give me the bytes now" API, so the Generator Module's
+// contract is Promise<Buffer> across formats, not just this one.
 
 const UTF8_BOM = '﻿';
 
@@ -25,7 +30,7 @@ function csvEscape(value) {
   return `"${String(value).replace(/"/g, '""')}"`;
 }
 
-function generate(reportModel) {
+async function generate(reportModel) {
   const { columns, rows } = reportModel;
   const lines = [columns.map((c) => csvEscape(c.label)).join(',')];
   for (const row of rows) {

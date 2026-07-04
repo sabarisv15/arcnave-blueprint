@@ -18,11 +18,12 @@ const studentService = require('../src/services/studentService');
 const documentService = require('../src/services/documentService');
 const generatedReportRepository = require('../src/repositories/generatedReportRepository');
 const csvGenerator = require('../src/generators/csvGenerator');
+const pdfGenerator = require('../src/generators/pdfGenerator');
 const reportService = require('../src/services/reportService');
 
 test('csvGenerator.generate (pure function)', async (t) => {
-  await t.test('produces a UTF-8-BOM-prefixed, quoted, header+rows CSV', () => {
-    const bytes = csvGenerator.generate({
+  await t.test('produces a UTF-8-BOM-prefixed, quoted, header+rows CSV', async () => {
+    const bytes = await csvGenerator.generate({
       columns: [{ id: 'a', label: 'Col "A"' }, { id: 'b', label: 'Col B' }],
       rows: [{ a: 'v1', b: null }, { a: 'has "quotes"', b: 42 }],
     });
@@ -32,6 +33,32 @@ test('csvGenerator.generate (pure function)', async (t) => {
     assert.equal(lines[0], '"Col ""A""","Col B"');
     assert.equal(lines[1], '"v1",""');
     assert.equal(lines[2], '"has ""quotes""","42"');
+  });
+});
+
+test('pdfGenerator.generate (pure function)', async (t) => {
+  await t.test('produces real PDF bytes for a small ReportModel', async () => {
+    const bytes = await pdfGenerator.generate({
+      title: 'Test Report',
+      columns: [{ id: 'a', label: 'Col A' }, { id: 'b', label: 'Col B' }],
+      rows: [{ a: 'v1', b: 42 }, { a: null, b: 'v2' }],
+    });
+    assert.ok(Buffer.isBuffer(bytes));
+    assert.equal(bytes.subarray(0, 5).toString('latin1'), '%PDF-');
+  });
+
+  await t.test('paginates when rows exceed one page', async () => {
+    const rows = Array.from({ length: 200 }, (_, i) => ({ a: `row${i}`, b: i }));
+    const bytes = await pdfGenerator.generate({
+      title: 'Big Report',
+      columns: [{ id: 'a', label: 'Col A' }, { id: 'b', label: 'Col B' }],
+      rows,
+    });
+    // A real second page shows up as a second "/Type /Page" object in
+    // the PDF's own object table — a mechanical property of the file
+    // pdfkit wrote, not an assumption about its internals.
+    const pageCount = (bytes.toString('latin1').match(/\/Type\s*\/Page[^s]/g) || []).length;
+    assert.ok(pageCount >= 2, `expected multiple pages, found ${pageCount}`);
   });
 });
 
@@ -93,5 +120,36 @@ test('ReportService.generateStudentExportReport (no DB, no filesystem)', async (
     const report = await reportService.generateStudentExportReport({}, { collegeId: 'c1' }, { actorUserId: 'u1' });
     assert.equal(report.status, 'failed');
     assert.equal(report.errorMessage, 'disk full');
+  });
+
+  await t.test('rejects an unsupported format before touching any service', async () => {
+    const listMock = t.mock.method(studentService, 'listStudents');
+    const createMock = t.mock.method(generatedReportRepository, 'create');
+    t.after(() => { listMock.mock.restore(); createMock.mock.restore(); });
+
+    await assert.rejects(
+      () => reportService.generateStudentExportReport({}, { collegeId: 'c1', format: 'xlsx' }, { actorUserId: 'u1' }),
+      reportService.ReportFormatError,
+    );
+    assert.equal(listMock.mock.callCount(), 0);
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('format: "pdf" uses the real pdfGenerator and uploads application/pdf bytes', async () => {
+    const students = [{ roll_no: 'R1', full_name: 'Alice' }];
+    const listMock = t.mock.method(studentService, 'listStudents', async () => students);
+    const uploadMock = t.mock.method(documentService, 'uploadDocument', async () => ({ id: 'doc-pdf' }));
+    const createMock = t.mock.method(generatedReportRepository, 'create', async (client, fields) => ({ id: 'report-pdf', ...fields }));
+    t.after(() => { listMock.mock.restore(); uploadMock.mock.restore(); createMock.mock.restore(); });
+
+    const report = await reportService.generateStudentExportReport({}, { collegeId: 'c1', format: 'pdf' }, { actorUserId: 'u1' });
+
+    const [, uploadFields] = uploadMock.mock.calls[0].arguments;
+    assert.equal(uploadFields.mimeType, 'application/pdf');
+    assert.match(uploadFields.fileName, /\.pdf$/);
+    assert.equal(uploadFields.fileBuffer.subarray(0, 5).toString('latin1'), '%PDF-');
+
+    assert.equal(report.status, 'completed');
+    assert.equal(report.format, 'pdf');
   });
 });
