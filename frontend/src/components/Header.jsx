@@ -139,10 +139,10 @@ export default function Header() {
                 fontSize: 11, fontWeight: 800, color: 'white',
                 boxShadow: '0 2px 8px rgba(0,122,255,0.28)',
               }}>
-                {user.username.charAt(0).toUpperCase()}
+                {(user.username || user.role || '?').charAt(0).toUpperCase()}
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1 }}>
-                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--label,#000)', letterSpacing: '-0.015em' }}>{user.name || user.username}</span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--label,#000)', letterSpacing: '-0.015em' }}>{user.name || user.username || user.role}</span>
                 <span className={`badge ${getRoleColor(user.role)}`} style={{ fontSize: '0.59rem', padding: '0.1rem 0.5rem', marginTop: 3 }}>
                   {getRoleLabel(user.role)}
                 </span>
