@@ -1,143 +1,114 @@
 # RESULT
 
 ## Files changed
-- `backend/src/services/financeService.js` (new)
-- `backend/tests/finance-service.test.js` (new)
+- `backend/src/routes/finance.js` (new)
+- `backend/src/tenantApp.js` (wired `createFinanceRouter()` in, after
+  `createAttendanceRouter()`)
+- `backend/tests/finance.test.js` (new)
 
-No API/UI/`docs/` files touched — matches this slice's own
-service-only scope.
+No UI files touched — matches this slice's own API-only scope.
 
 ## What was built
-`financeService.js` — business logic for both `fee_structures` and
-`fee_payments`, calling only `financeRepository`/`feePaymentRepository`/
-`auditLogRepository` (CLAUDE.md rule 1; never raw SQL, never storage).
+Five endpoints under `/api/v1/finance/...`:
 
-**`fee_structures`**: `createFeeStructure`, `getFeeStructure`,
-`updateFeeStructure`, `removeFeeStructure`, `listFeeStructuresForClassAndYear`,
-`listFeeStructures`. Validates required fields (`academicYear`,
-`classId`, `feeCategory`, `amount`) and that `status` is one of
-`'Pending Approval'`/`'Approved'`/`'Rejected'` — same shape as
-`academicService.createClass`/`updateClass`'s own `timetableStatus`
-handling. Maps `fee_structures_college_year_class_category_key`
-(23505) to `FeeStructureConflictError` and `fee_structures_class_id_fkey`
-(23503) to `FeeStructureClassNotFoundError`. `removeFeeStructure` calls
-`financeRepository.softDelete` — no hard-delete path exists, since the
-repository itself exposes none.
+- `POST /finance/fee-structures` (`requireRole('principal')`) → `financeService.createFeeStructure`. 201.
+- `PUT /finance/fee-structures/:id` (`requireRole('principal')`) → `financeService.updateFeeStructure`. 200, or 404 for an unknown id.
+- `GET /finance/fee-structures` (`requireAuth`) → `class_id`+`academic_year` together (both required if either is given) calls `listFeeStructuresForClassAndYear`; neither given falls back to the plain paginated `listFeeStructures`.
+- `POST /finance/fee-payments` (`requireRole('principal')`) → `financeService.markFeePayment`. 200 (upsert, same reasoning `attendance.js` uses for `markAttendance`).
+- `GET /finance/fee-payments?student_id=...` (`requireAuth`, `student_id` required) → `financeService.listFeePaymentsForStudent`.
 
-**`fee_payments`**: `markFeePayment` (an upsert — find-then-create/update
-by `(studentId, feeStructureId)`, same shape as
-`attendanceService.markAttendance`), `getFeePayment`,
-`listFeePaymentsForStudent`, `listFeePayments`, `removeFeePayment`.
-`status` is a **required** parameter (unlike `fee_structures`, which
-has a real unattended default) — omitting it on a "mark paid/not-paid"
-call is a caller bug, not something to paper over with a silent
-default. Maps `fee_payments_student_id_fkey`/`fee_payments_fee_structure_id_fkey`
-(23503) and the `fee_payments_student_fee_structure_key` create-race
-(23505) to their own domain errors, same shape
-`attendanceService.markAttendance` uses for
-`attendance_sessions_class_date_hour_key`. `removeFeePayment` is
-soft-delete only, same as `removeFeeStructure`.
+Every handler is a thin controller: field mapping (snake_case body →
+camelCase service fields), a call into `financeService`, and error-class
+→ HTTP-status mapping. No business logic, no repository calls, no raw
+SQL — verified by inspection (`finance.js` imports only
+`../services/financeService`, nothing from `../repositories/`).
 
-## The core design question: what does "mirror WorkflowService, same pattern" actually mean here?
-This session's instruction asked to route `fee_structures` create/
-update "through WorkflowService approval... mirror how Academic/
-Attendance route their approval-gated writes through WorkflowService."
-Before writing anything, re-read `academicService.js` and
-`attendanceService.js` and grepped `backend/src` for `WorkflowService` —
-**neither service actually calls one.** `academicService.js`'s own
-file-level comment says so outright: WorkflowService (Module 8)
-doesn't exist yet, Roadmap.md builds it after Finance, and this is
-"the same 'out of scope here, not stubbed' reasoning" used elsewhere.
-`attendanceService.js` restates the identical gap for its own
-`timetable_status === 'Approved'` check.
+## The `/finance/...` sub-prefix — a deliberate deviation, not an oversight
+Every existing router (`classes.js`, `attendance.js`, `staff.js`,
+`students.js`, `facultyAllocation.js`, `timetablePeriods.js`) mounts
+flat (`/classes`, `/attendance`, no per-module path segment). This
+session's own instruction explicitly asked for routes "under
+`/api/v1/finance/...`," so `finance.js` mounts `/finance/fee-structures`
+and `/finance/fee-payments` rather than flattening to match the
+dominant convention. Called out in the router's own file-level comment
+so a future reader doesn't mistake it for an inconsistency to "fix."
+CLAUDE.md rule 5 is satisfied identically either way (app.js's outer
+`/api/v1` mount is unchanged).
 
-So "the same pattern" is: validate the known status literal (mirroring
-`classes.timetable_status` exactly — no DB CHECK, service-layer
-enforcement only), and explicitly do **not** build, stub, or fake a
-WorkflowService call, because there is nothing real to route through
-yet. Building one here — even a minimal in-process approximation —
-would be inventing infrastructure this codebase has deliberately and
-repeatedly deferred, which contradicts "mirror the pattern" rather than
-honoring it. This reasoning is spelled out in `financeService.js`'s own
-file-level comment specifically so a future reader (or a future
-session extending this file) doesn't mistake the missing gate for an
-oversight.
-
-## Other notable design decisions
-- **`marked_by_user_id` is never mapped to its own "not found" error.**
-  It's always `actorUserId`, the authenticated caller — never
-  caller-supplied free text naming a different user (unlike
-  `tutorUserId` on `classes`, which genuinely is caller-supplied and
-  does get `ClassTutorNotFoundError`). `attendance_sessions.marked_by_user_id`
-  set this exact precedent already: no `AttendanceMarkedByNotFoundError`
-  class exists there either.
-- **`collegeId` is a direct parameter to `markFeePayment`**, not
-  derived from a lookup. Every other `createX` in this codebase
-  (`createClass`, `createStudent`, `createFeeStructure`) takes
-  `collegeId` directly from the tenant-scoped request context.
-  `attendanceService.markAttendance` reusing `cls.college_id` is the
-  one exception, and it's justified there by a class lookup
-  `markAttendance` already needs for authorization — `markFeePayment`
-  has no equivalent lookup to piggyback on, so it follows the dominant
-  convention instead.
-- **`removeFeeStructure`/`removeFeePayment` have no way to reach a hard
-  delete**, structurally: `financeRepository`/`feePaymentRepository`
-  expose no `remove` function at all (verified in both services' own
-  test files via `assert.equal('remove' in <repo>, false)`), so there
-  is nothing for the service layer to accidentally call even if it
-  tried.
+## Scope decision: no GET-by-id routes
+This session's instruction named exactly five endpoints and did not
+include a `GET /finance/fee-structures/:id` or
+`GET /finance/fee-payments/:id` lookup — the one thing every other
+router in this codebase has that this one doesn't. Not added
+deliberately: nothing consumes it yet (no Finance UI exists at all —
+restated from `326e8b5`), and the instruction was unusually specific
+and itemized rather than a general "same as classes.js" framing. Flagged
+here, not silently added as scope creep or silently omitted without
+comment.
 
 ## Verification
-1. **Unit tests** (`backend/tests/finance-service.test.js`, no live
-   DB — same `node:test` mock technique as `academic-service.test.js`/
-   `attendance-service.test.js`): 35 assertions covering —
-   - Every required-field validation error, for both `fee_structures`
-     and `fee_payments`, confirmed to short-circuit before touching
-     the repository.
-   - Every known-status literal accepted; every unknown literal
-     rejected (`FeeStructureStatusError`/`FeePaymentStatusError`).
-   - Unrecognized fields dropped before reaching the repository
-     (`aadhaarNumber` probe, same as `academic-service.test.js`'s own).
-   - Audit-log attribution to `actorUserId`/`userId`, correct
-     `action`/`entity` on every write path.
-   - `updateFeeStructure`'s no-op cases (no recognized fields;
-     nonexistent id) correctly skip the audit entry.
-   - Every constraint-violation mapping for both tables
-     (`fee_structures_college_year_class_category_key`,
-     `fee_structures_class_id_fkey`,
-     `fee_payments_student_id_fkey`,
-     `fee_payments_fee_structure_id_fkey`,
-     `fee_payments_student_fee_structure_key`), trusting the
-     constraint names already live-verified against a real Postgres in
-     `326e8b5`/`c1b7aac` rather than re-verifying them here.
-   - `markFeePayment`'s upsert branching: creates when no existing row,
-     updates (re-stamping `markedByUserId`/`status`/`receiptDocumentId`)
-     when one exists, with the correct `fee_payment_marked` vs.
-     `fee_payment_remarked` audit action in each case.
-   - Both `removeX` functions: no-op + no audit entry on a missing/
-     already-soft-deleted id; soft-delete + audit entry on a real one;
-     confirmed neither repository exposes a `remove` function to fall
-     back to.
-   - A non-conflict repository error passes through unchanged, for
-     both `createFeeStructure` and `markFeePayment`.
-2. **Full backend test suite**: `npm test` — **320/320 pass** (285
-   prior + 35 new), 0 failures.
+1. **Integration tests** (`backend/tests/finance.test.js`, real HTTP
+   requests against the live `docker-compose` Postgres, same technique
+   as `classes.test.js`/`attendance.test.js`): 30 subtests, all passing —
+   - `fee_structures` create: 201 with correct snake_case fields and
+     the DB default `'Pending Approval'` status; 400 for a missing
+     required field and for an unknown `status`; a real 409 from the
+     live `fee_structures_college_year_class_category_key` constraint
+     on a genuine duplicate; a real 404 for a nonexistent `class_id`;
+     401 unauthenticated; 403 for a non-principal role.
+   - `fee_structures` update: 200 with changed fields; 400 for an
+     unknown `status`; 404 for a nonexistent id; 403 for a
+     non-principal role.
+   - `fee_structures` list: 400 when only one of `class_id`/
+     `academic_year` is given; correct scoped results when both are
+     given; the plain paginated fallback when neither is given; 401
+     unauthenticated; a second tenant's plain list is empty (RLS holds
+     end-to-end through the route).
+   - `fee_payments` mark: 200 with correct snake_case fields
+     (`marked_by_user_id` = the acting principal); re-marking the same
+     `(student_id, fee_structure_id)` updates the existing row (same
+     `id`), not a new one; 400 for a missing/unknown `status`; a real
+     404 for a nonexistent `student_id` and for a nonexistent
+     `fee_structure_id` (both live FK-violation mappings); 401
+     unauthenticated; 403 for a non-principal role.
+   - `fee_payments` list-by-student: 400 without `student_id`; correct
+     results with it; 401 unauthenticated; a second tenant querying the
+     first tenant's real `student_id` gets an empty list (RLS holds).
+   - Audit attribution: create+update writes exactly two `audit_log`
+     rows (`fee_structure_created`/`fee_structure_updated`, correct
+     `entity`/`user_id`); mark+re-mark writes exactly two
+     (`fee_payment_marked`/`fee_payment_remarked`).
+2. **Full backend test suite**: `npm test` — **351/351 pass** (320
+   prior + 31 new — the 30 finance subtests plus their one wrapping
+   `test()` block), 0 failures.
+3. Confirmed no leftover test data: `colleges`/`fee_structures`/
+   `fee_payments` all `0` rows in the live database after the run
+   (`t.after`'s `cleanupTenant` deletes `audit_log` →
+   `fee_payments` → `fee_structures` → `students` → `classes` →
+   `refresh_tokens` → `users` → `colleges`, respecting every FK
+   direction).
 
 ## Flags / open questions
-- **No real WorkflowService gate on `fee_structures.status`** — see
-  above. Restated, not newly discovered: `academicService.js` flagged
-  this for `timetable_status`, `attendanceService.js` restated it, this
-  file restates it a third time for the same underlying reason
-  (Module 8 doesn't exist yet).
-- **Scholarship eligibility remains fully unbuilt** — restated from
-  both prior Finance slices' own RESULT.md entries: no income field
-  exists anywhere in this schema yet.
+- **No real WorkflowService gate** — restated, unchanged from
+  `8e5a3d5`: `fee_structures.status` accepts any known literal via a
+  bare `PUT`, including a direct jump to `'Approved'`. This is the same
+  gap `classes.timetable_status` already has; the route layer adds
+  nothing new here, faithfully passing the service's own (documented)
+  limitation through.
+- **No `GET /finance/fee-structures/:id` or `GET /finance/fee-payments/:id`**
+  — see above; add in a later slice once a real screen needs single-row
+  fetches.
+- **RBAC is a conservative placeholder** — `requireRole('principal')`
+  for every write, same as every other not-yet-role-modeled write in
+  this codebase. The real actor for "who may create/edit a fee
+  structure" or "who may mark a student's fee paid" (accounts staff?
+  class tutor?) is unnamed in BusinessRules.md; revisit once a real
+  role model exists.
+- **No Finance UI yet** — this slice is API-only, per its own scope.
+- **Scholarship eligibility / `annual_income` field** — restated from
+  every prior Finance slice's own RESULT.md: still fully unbuilt, still
+  blocked on a Student-module migration that hasn't been asked for yet.
 - **`receipt_document_id`'s FK is still deferred** — restated from
-  `c1b7aac`: no `documents` table exists yet (Module 6 unbuilt).
-- **No API/UI yet for either table** — this slice is service-only, per
-  its own scope. A future slice wires `/api/v1/fee-structures` and
-  `/api/v1/fee-payments` routes (with RBAC — BusinessRules.md names no
-  specific actor for "who may create a fee structure" or "who may mark
-  a payment," left to the route/RBAC layer once those routes exist,
-  same treatment `academicService.js` gives its own unauthorized
-  operations).
+  `c1b7aac`: no `documents` table exists yet (Module 6 unbuilt). The
+  route accepts any UUID for it, same as the service and repository
+  layers already do.

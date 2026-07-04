@@ -1,95 +1,91 @@
 # TASK
 
 ## Objective
-Module 5 (Finance), third vertical slice: `FinanceService` only — no
-API/UI. DB + repository already done for `fee_structures` (`326e8b5`)
-and `fee_payments` (`c1b7aac`).
+Module 5 (Finance), fourth vertical slice: API routes only — no UI.
+Service layer already done (`8e5a3d5`) — `financeService.js` covers
+`fee_structures` (no WorkflowService gate yet, deliberate per Module 8
+not existing) and `fee_payments` (mark paid/not-paid).
 
 ## Scope (this session's own instruction)
-- `fee_structures` CRUD: create/update always "goes through
-  WorkflowService approval" (BusinessRules: "fee changes require
-  approval before taking effect") — mirror how Academic/Attendance
-  route their approval-gated writes through WorkflowService, same
-  pattern.
-- `fee_payments` mark paid/not-paid: simple write, no WorkflowService
-  gate (manual student-profile action, not a "fee change").
-- Service calls repository only, never raw SQL/storage (CLAUDE.md
-  rule 1).
-- Soft-delete only, no hard delete, on both.
+- Routes under `/api/v1/finance/...` (CLAUDE.md rule 5), mirroring
+  Academic/Attendance route conventions (auth middleware, tenant
+  context, error handling patterns already established).
+- `fee_structures`: create, update, list endpoints → call
+  `financeService` only.
+- `fee_payments`: mark paid/not-paid, list-by-student endpoints → call
+  `financeService` only.
+- No business logic in routes — thin controllers.
 
-## Pre-check: what "the same pattern" actually is in this codebase
-Read `academicService.js` and `attendanceService.js` before writing
-anything, since the instruction says to mirror them. Neither actually
-calls a real WorkflowService — grepped for `WorkflowService` across
-`backend/src`: the only hits are comments. `academicService.js`'s own
-file-level comment states it outright: "CLAUDE.md rule 3: WorkflowService
-is the sole approval gate, and it doesn't exist yet (Roadmap.md builds
-Workflow/Notifications after Attendance/Finance/Documents/Reports) —
-same 'out of scope here, not stubbed' reasoning." `attendanceService.js`
-restates the identical gap for its own `timetable_status === 'Approved'`
-check.
+## Deliberate deviation, called out explicitly
+Every existing router in this codebase (`classes.js`, `attendance.js`,
+`staff.js`, `students.js`, `facultyAllocation.js`, `timetablePeriods.js`)
+mounts flat — `/classes`, `/attendance`, no per-module path segment.
+This session's own instruction explicitly asked for routes "under
+`/api/v1/finance/...`" — a `/finance/` sub-prefix every other module
+doesn't use. Followed literally (`/finance/fee-structures`,
+`/finance/fee-payments`), not silently flattened to match the dominant
+convention, since it was an explicit ask, not an oversight to correct.
+CLAUDE.md rule 5 ("All API routes live under `/api/v1/`") is satisfied
+identically either way — app.js's outer `/api/v1` mount, unchanged.
 
-So "the same pattern" this session's instruction asks to mirror is:
-validate that `status` is a known literal (exactly like
-`classes.timetable_status`), do **not** call, invoke, or fake a
-WorkflowService integration, and flag the gap the same way both prior
-services already do. Building a working approval gate here would be
-inventing infrastructure this codebase has explicitly and repeatedly
-deferred to Module 8 — not "mirroring the pattern," contradicting it.
-This is called out explicitly in `financeService.js`'s own file-level
-comment so it isn't mistaken for an oversight.
+## Scope decision: no GET-by-id routes
+This session's instruction enumerates exactly five endpoints — create/
+update/list for `fee_structures`, mark/list-by-student for
+`fee_payments` — and does not name a `GET /finance/fee-structures/:id`
+or `GET /finance/fee-payments/:id` lookup, unlike every prior router in
+this codebase (which all include one). Not added: the instruction is
+unusually specific and itemized (unlike prior "same as classes.js"
+framings), and nothing yet consumes such a lookup (no Finance UI
+exists at all — see `326e8b5`'s own `.ai/RESULT.md`). Flagged here so a
+future slice can add it deliberately if a real screen needs it, rather
+than this one guessing at an unrequested shape.
 
-## What was built
-`backend/src/services/financeService.js`:
+## Key design decisions
+- **RBAC**: `requireRole('principal')` gates every write (both
+  `fee_structures` create/update and `fee_payments` mark), `requireAuth`
+  gates every read — same deliberately conservative placeholder
+  `classes.js`/`staff.js`/`students.js`/`facultyAllocation.js` already
+  use, for the same reason: `financeService` has no authorization logic
+  of its own (unlike `attendanceService.markAttendance`'s real
+  `assertCanMark`), so the route is the only gate. `fee_payments`
+  marking being "a simple write, no WorkflowService gate" (per this
+  session's own framing for the *approval* question) is a separate
+  question from *who* may perform it — BusinessRules.md names no
+  specific actor (accounts clerk? class tutor?) for either write, so
+  both get the same placeholder treatment every other not-yet-named
+  actor gets in this codebase.
+- **`fee_structures` list** accepts an optional `class_id` +
+  `academic_year` pair (both together, or neither) — `financeService.listFeeStructuresForClassAndYear`
+  takes both as required positional arguments, so a partial pair is
+  rejected with 400 rather than silently ignored, same "reject an
+  ambiguous partial filter" reasoning `facultyAllocation.js`'s own list
+  route uses for its `class_id`/`staff_user_id` pair (inverted here:
+  both-or-neither instead of exactly-one). Neither provided falls
+  through to the plain paginated `listFeeStructures`, same shape
+  `classes.js`'s own `GET /classes` uses.
+- **`fee_payments` mark is `POST /finance/fee-payments`** (no `/mark`
+  path segment) returning **200, not 201** — `markFeePayment` is a real
+  mark-or-re-mark upsert, same reasoning `attendance.js`'s own
+  `POST /attendance` uses for `markAttendance`.
+- **`fee_payments` list is `GET /finance/fee-payments?student_id=...`**,
+  `student_id` required — this is specifically the "list-by-student"
+  endpoint named in scope, not a general/unscoped list (no such lookup
+  exists on `financeService` either, matching `facultyAllocation.js`'s
+  own "don't wrap what nothing needs yet" restraint).
 
-- `createFeeStructure`/`updateFeeStructure`/`getFeeStructure`/
-  `removeFeeStructure`/`listFeeStructuresForClassAndYear`/
-  `listFeeStructures` — validation (required fields, known `status`
-  literal) + audit logging on top of `financeRepository.js`, same
-  shape as `academicService.js`'s `createClass`/`updateClass`.
-  `removeFeeStructure` calls `financeRepository.softDelete`, never a
-  hard delete (the repository has no such function at all).
-- `markFeePayment`/`getFeePayment`/`listFeePaymentsForStudent`/
-  `listFeePayments`/`removeFeePayment` — `markFeePayment` is a
-  find-then-create/update upsert, same shape as
-  `attendanceService.markAttendance`, but with **no** authorization/
-  approval gate before it (this session's own explicit instruction).
-  `status` is a required parameter here (unlike `fee_structures`,
-  which has a sensible unattended default) — "mark paid/not-paid" is
-  the entire point of the action, so omitting it is a caller bug worth
-  surfacing, not something to default silently.
-- Error classes mirror `academicService.js`'s/`attendanceService.js`'s
-  own naming and mapping conventions exactly (`FeeStructureValidationError`,
-  `FeeStructureStatusError`, `FeeStructureConflictError`,
-  `FeeStructureClassNotFoundError`, `FeePaymentValidationError`,
-  `FeePaymentStatusError`, `FeePaymentStudentNotFoundError`,
-  `FeePaymentFeeStructureNotFoundError`, `FeePaymentConflictError`).
-- `marked_by_user_id` is never separately validated against a real FK
-  error — it's always the authenticated actor (`actorUserId`), never
-  caller-supplied free text naming someone else, same precedent
-  `attendance_sessions.marked_by_user_id` already set (no
-  `AttendanceMarkedByNotFoundError` exists there either).
-- `collegeId` is a direct parameter to `markFeePayment` (not derived
-  from a lookup) — the dominant house convention every other `createX`
-  in this codebase uses; `attendanceService.markAttendance`'s reuse of
-  `cls.college_id` is the one exception, justified there by a lookup
-  it already needed for authorization that `markFeePayment` has no
-  equivalent of.
-
-`backend/tests/finance-service.test.js`: unit tests, no live DB, same
-`node:test` mock-based technique as `academic-service.test.js`/
-`attendance-service.test.js` — trusts the constraint names already
-live-verified in `326e8b5`/`c1b7aac` rather than re-running a live
-database for a service layer that adds no new SQL of its own.
+## Files affected
+- `backend/src/routes/finance.js` (new)
+- `backend/src/tenantApp.js` (wired in, after `createAttendanceRouter()`
+  — matches Roadmap.md's Attendance-before-Finance build order)
+- `backend/tests/finance.test.js` (new)
 
 ## Acceptance criteria
-- Unit/integration tests at the same rigor as
-  `academic-service.test.js`/`attendance-service.test.js`: every
-  validation error, every constraint-violation mapping, every
-  audit-log attribution, every no-op case (missing id, no recognized
-  fields) covered.
+- Integration tests at the same rigor as `classes.test.js`/
+  `attendance.test.js`: real HTTP requests against a live Postgres,
+  every error mapping proven against real DB constraints (not
+  hand-thrown stand-ins), RBAC (401/403), cross-tenant isolation
+  (RLS), audit-log attribution.
 - Full backend test suite still passes.
-- No API/UI/`docs/` files touched.
-- No repository or raw SQL calls from the service layer (CLAUDE.md
-  rule 1) — verified by inspection: `financeService.js` only ever
-  calls `financeRepository`/`feePaymentRepository`/`auditLogRepository`.
+- No business logic in routes — every handler only ever calls
+  `financeService`, never a repository or raw SQL (verified by
+  inspection).
