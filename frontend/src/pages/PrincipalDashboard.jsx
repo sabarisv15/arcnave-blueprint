@@ -208,6 +208,13 @@ export default function PrincipalDashboard() {
   });
   const [feeStructureSubmitting, setFeeStructureSubmitting] = useState(false);
 
+  // Reports (Module 7) — real API throughout (routes/reports.js).
+  // No report-history list yet (not asked for this slice) — just the
+  // one trigger + download action, same minimal scope every module's
+  // first real UI slice starts with.
+  const [exportFormat, setExportFormat] = useState('csv');
+  const [exportingStudents, setExportingStudents] = useState(false);
+
   const loadData = async () => {
     setLoading(true);
     try {
@@ -488,6 +495,65 @@ export default function PrincipalDashboard() {
     }
   };
 
+  // POST /api/v1/reports/student-export always creates a
+  // generated_reports row (201) even when generation itself failed —
+  // reportService.js resolves with a 'failed' row rather than
+  // rejecting (see .ai/RESULT.md, 1c7993d), so a business failure is
+  // only visible in the response body's own `status`/`error_message`,
+  // not the HTTP status code.
+  //
+  // Downloading reuses DocumentPanel.jsx's own handleDownload pattern
+  // verbatim: GET /api/v1/documents/:id/download requires a Bearer
+  // header a plain <a href> can't attach, so this fetches the bytes
+  // itself and opens them via a temporary object URL. The filename
+  // comes from the response's own Content-Disposition header (a small
+  // regex extraction) rather than a hardcoded guess — the
+  // generated_reports row has no file_name of its own, only the
+  // documents row it points to does, and fetching that row separately
+  // just to read one field would be an extra round trip for nothing.
+  const handleExportStudents = async () => {
+    setExportingStudents(true);
+    try {
+      const genRes = await fetch('/api/v1/reports/student-export', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ format: exportFormat }),
+      });
+      if (!genRes.ok) {
+        const err = await genRes.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to generate report');
+      }
+      const report = await genRes.json();
+      if (report.status === 'failed') {
+        throw new Error(report.error_message || 'Report generation failed');
+      }
+
+      const downloadRes = await fetch(`/api/v1/documents/${report.document_id}/download`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!downloadRes.ok) throw new Error('Failed to download report');
+      const disposition = downloadRes.headers.get('content-disposition') || '';
+      const fileName = (disposition.match(/filename="([^"]+)"/) || [])[1] || `student_export.${exportFormat}`;
+
+      const blob = await downloadRes.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      showToast('Student export downloaded!', 'success');
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setExportingStudents(false);
+    }
+  };
+
   // Derive workload matrix college-wide
   const staffWorkload = useMemo(() => getStaffWorkload(monitorData), [monitorData]);
 
@@ -567,7 +633,8 @@ export default function PrincipalDashboard() {
     { id: 'timetable_approvals', label: 'Timetable Approvals', icon: CalendarDays },
     { id: 'marksheet_approvals', label: 'Marksheet Approvals', icon: FileText },
     { id: 'admin', label: 'Workload & Staff', icon: Settings },
-    { id: 'finance', label: 'Fee Structures', icon: DollarSign }
+    { id: 'finance', label: 'Fee Structures', icon: DollarSign },
+    { id: 'reports', label: 'Reports', icon: Download }
   ];
 
   return (
@@ -1425,6 +1492,45 @@ export default function PrincipalDashboard() {
                     );
                   })
                 )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {viewSection === 'reports' && (
+          <div className="space-y-8 animate-slide-up">
+            <div className="card p-6 space-y-4">
+              <div className="flex justify-between items-center border-b pb-3 border-slate-50">
+                <div>
+                  <h3 className="font-extrabold text-slate-805 text-sm flex items-center gap-1.5">
+                    <Download className="w-4 h-4 text-indigo-500" />
+                    Reports
+                  </h3>
+                  <p className="text-slate-450 text-[10px] font-semibold mt-0.5">
+                    Export the full student roster for this college.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <select
+                  value={exportFormat}
+                  onChange={(e) => setExportFormat(e.target.value)}
+                  className="bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 focus:outline-none focus:border-indigo-400"
+                >
+                  <option value="csv">CSV</option>
+                  <option value="pdf">PDF</option>
+                  <option value="xlsx">Excel (.xlsx)</option>
+                  <option value="docx">Word (.docx)</option>
+                </select>
+                <button
+                  onClick={handleExportStudents}
+                  disabled={exportingStudents}
+                  className="btn-primary text-[10px] py-1.5 px-3 flex items-center gap-1 disabled:opacity-50"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  {exportingStudents ? 'Exporting…' : 'Export Students'}
+                </button>
               </div>
             </div>
           </div>

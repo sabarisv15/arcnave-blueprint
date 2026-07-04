@@ -1,0 +1,62 @@
+'use strict';
+
+const express = require('express');
+const asyncHandler = require('../middleware/asyncHandler');
+const { requireRole } = require('../middleware/rbac');
+const reportService = require('../services/reportService');
+
+function requireResolvedTenant(req, res) {
+  if (req.collegeId === null) {
+    res.status(400).json({ detail: 'No tenant could be resolved for this request' });
+    return false;
+  }
+  return true;
+}
+
+function mapReportServiceError(err, res) {
+  if (err instanceof reportService.ReportValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof reportService.ReportFormatError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  return false;
+}
+
+function createReportsRouter() {
+  const router = express.Router();
+
+  // RBAC is the same deliberately conservative placeholder
+  // students.js/staff.js/finance.js/documents.js all use, not a final
+  // decision — BusinessRules.md names no specific actor for report
+  // generation either. requireRole('principal') gates the only
+  // endpoint this slice has.
+
+  // 201, not 200: this always inserts a new generated_reports row
+  // (reportService.generateStudentExportReport never updates one),
+  // regardless of whether the row's own `status` comes back
+  // 'completed' or 'failed' — a real resource was created either way,
+  // same reasoning createFeeStructure's 201 uses. The response body's
+  // `status` field is how a caller learns the business outcome, not
+  // the HTTP status code.
+  router.post('/reports/student-export', requireRole('principal'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const report = await reportService.generateStudentExportReport(
+        req.dbClient,
+        { collegeId: req.collegeId, format: (req.body || {}).format },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(report);
+    } catch (err) {
+      if (mapReportServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  return router;
+}
+
+module.exports = createReportsRouter;

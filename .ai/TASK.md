@@ -1,33 +1,50 @@
 # TASK
 
-## Objective (Module 7 — Reports — fifth slice)
-`wordGenerator.js` (2.6, `Promise<Buffer>` contract) + fourth
-`GENERATORS` entry (`docx`) in `reportService.js`. No new report
-types, no API/UI. Completes the tabular Generator lineup
-(csv/pdf/xlsx/docx) — PPT stays parked.
+## Objective (Module 7 — Reports — final slice)
+`POST /api/v1/reports/student-export` (route only, calls
+`reportService` directly) + a UI trigger in `PrincipalDashboard.jsx`.
+Closes Module 7.
 
-## Library: docx, no ADR
-Matches TechStack.md's named gap ("Node equivalent of python-docx") by
-the same pure-JS/no-native-deps criteria ADR-017/019/excelGenerator.js
-already used — expected default, no alternatives weighed, no ADR (same
-treatment exceljs got). `npm audit` unchanged after install (4
-vulnerabilities, all pre-existing — `docx` added nothing new).
+## Route
+Matches `finance.js` conventions: `requireResolvedTenant` guard,
+`requireRole('principal')` placeholder (same restated caveat every
+other write route carries), a `mapReportServiceError` helper
+(`ReportValidationError`/`ReportFormatError` -> 400). Body: `{ format }`
+(optional, `reportService` defaults to `csv`). Returns the
+`generated_reports` row as-is (snake_case, 201 — always a fresh insert,
+never an update, regardless of whether `status` comes back `completed`
+or `failed`).
 
-Unlike `pdfGenerator.js`, no manual column-width/pagination math
-needed: a docx `Table` wraps/paginates on its own in Word, so
-`student_export`'s 22 columns don't need PDF's landscape/small-font
-workaround.
+No new report-listing endpoint — not asked for, and nothing in this
+slice needs a report-history read.
+
+## UI
+New sibling tab `'reports'` in `PrincipalDashboard.jsx` (same
+card-with-header shape as the `'finance'` tab), icon `Download`
+(already imported, unused). Format `<select>` + "Export Students"
+button. On click: `POST /reports/student-export` -> if the returned
+row's `status === 'failed'`, throw its `error_message` as a toast (same
+try/catch/showToast shape every handler in this file uses) -> else
+download via `GET /api/v1/documents/:id/download` using the exact
+Blob-download pattern `DocumentPanel.jsx`'s `handleDownload` already
+established (that route needs a Bearer header, which `<a href>` can't
+attach). Filename taken from the response's own `Content-Disposition`
+header (a small regex extraction) rather than hardcoded, since the
+`generated_reports` row itself carries no filename — only `documents`
+does, and fetching that row separately would be an extra round trip
+for no reason.
 
 ## Files
-- `backend/package.json` (+docx)
-- `backend/src/generators/wordGenerator.js` (new)
-- `backend/src/services/reportService.js` (`GENERATORS.docx`)
-- `backend/tests/report-service.test.js` (docx cases)
+- `backend/src/routes/reports.js` (new)
+- `backend/src/tenantApp.js` (register)
+- `backend/tests/reports.test.js` (new, HTTP-level, matches
+  `finance.test.js`/`documents.test.js` shape)
+- `frontend/src/pages/PrincipalDashboard.jsx` (new tab)
 
 ## Verification
-- Throwaway script: live DB/filesystem round-trip, `format: 'docx'` —
-  real bytes stored, correct mime type, `student_id IS NULL`.
-- Committed tests: `wordGenerator` output structurally verified (real
-  docx/zip archive, contains the expected text), `reportService`
-  `docx`-format wiring through the real generator.
+- Live: seed a tenant/principal/students, hit the route directly for
+  each of the 4 formats, confirm `201` + real `document_id` + a
+  downloadable file at `/documents/:id/download`.
+- `npm run build` (frontend).
+- Headless Chrome screenshot of the running app.
 - Full `npm test` regression.
