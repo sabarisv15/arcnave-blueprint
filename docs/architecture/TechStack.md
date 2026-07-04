@@ -27,9 +27,14 @@ session). See `docs/adr/` for rationale on each contested choice.
   pattern, never LangGraph/LangChain unless that decision is
   explicitly revisited.
 - **File generation**: Node equivalents of openpyxl/python-docx/
-  ReportLab (exact libraries not chosen yet — decide when Module 6
-  Documents/OCR or a report-generation need actually arrives), as pure
-  functions in a dedicated `generators/` module.
+  ReportLab (`exceljs`/`docx`/`pdfkit`, ADR-019 + `excelGenerator.js`/
+  `wordGenerator.js`'s own file comments — building a document from
+  scratch), as pure functions in a dedicated `generators/` module.
+  **Template merge** (filling `{{field}}` placeholders into an
+  existing, College-Admin-uploaded `.docx`, a different job from
+  generating one from scratch) is `docxtemplater` + `pizzip`, same
+  pure-JS/no-native-deps criteria as the rest of this list — see
+  `generators/templateMerger.js`'s own file comment.
 - **Deployment target**: Docker, Nginx, PostgreSQL backups.
 
 ## Known gaps (not yet decided, don't assume a fix exists)

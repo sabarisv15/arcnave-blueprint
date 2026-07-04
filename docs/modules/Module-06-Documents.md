@@ -39,13 +39,85 @@ OCR button/panel stripped entirely (Module 9). Old fake-OCR "Upload
 Documents" step deleted, not repointed (ran before a real `student.id`
 existed).
 
+## Template storage + merge (first slice, post-Module-6)
+Closes this module's own migration comment: "college-wide templates —
+also DocumentService-owned per Architecture.md 2.5 — are ... out of
+scope this slice." No schema change needed — `documents.student_id`
+was already nullable, `doc_type` already free TEXT: a template is
+stored through `documentService.uploadTemplate` (a thin wrapper over
+`uploadDocument` fixing `doc_type = 'template'`, `student_id = null`,
+not caller-suppliable), same table, same `storage_path`, same
+tenant-scoped path every other document uses.
+
+`generators/templateMerger.js` — a pure function (Architecture.md 2.6
+/ ADR-008 restraint: no DB, no storage, no permissions),
+`mergeTemplate(templateBuffer, fields) -> Buffer`. Library:
+`docxtemplater` + `pizzip`, same pure-JS/no-native-deps criteria
+ADR-017/019 used — the expected default, not a deviation, so no new
+ADR (same treatment `wordGenerator.js`'s `docx` choice got). No fixed
+field list: whatever `{{tags}}` the uploaded template itself defines
+are whatever gets filled; a tag with no matching field renders blank
+(`nullGetter`) rather than throwing, since a generic caller-defined
+template not using every field it *could* is normal, not an error.
+
+**CLAUDE.md rule 9 (merge field VALUES are untrusted data, never
+instructions)**: docxtemplater's default mode does literal tag-for-
+value substitution only — a value is inserted as an XML text node once
+the template's own `{{tags}}` have already been parsed, never
+re-scanned for further tags, so a value that itself contains `{{...}}`
+renders as that literal string, not a nested substitution. Verified
+live, not just asserted (see below). The one thing that would break
+this guarantee — attaching docxtemplater's optional angular-
+expressions/eval parser module — is deliberately never done here.
+
+One real bug caught during live verification, not by inspection:
+docxtemplater's own default delimiter is single-brace `{tag}` (it
+reuses the same brace character for its loop/condition syntax), not
+`{{tag}}` — this project's templates are specified as `{{field}}`
+(this slice's own build brief), so `delimiters: { start: '{{', end:
+'}}' }` must be set explicitly in the `Docxtemplater` constructor
+options; relying on the library default silently parsed
+`{{studentName}}` as two nested single-brace tags and failed with a
+confusing "duplicate open tag" error instead of matching what a
+template author actually wrote.
+
+No API/UI yet — no route accepts a template upload or a merge request
+from the outside; a future NotificationService/College-Admin-facing
+slice wires this in (Architecture.md 2.5 already names NotificationService
+as composing DocumentService's templates).
+
+Verified live against the real docker-compose Postgres + a real
+generated `.docx` (one-off script, deleted after use): uploaded a
+template through `uploadTemplate` (`doc_type='template'`,
+`student_id=NULL` confirmed on the row); a second tenant's `getDocument`
+on the same id returned `null` (RLS holds for template rows exactly
+like student-document rows); downloaded bytes were byte-identical to
+the upload; `mergeTemplate` correctly substituted every `{{field}}`,
+left an unmatched tag blank rather than throwing, and — the rule-9
+proof — a field value containing literal `{{rollNo}}` text and a
+fragment resembling a closing XML tag rendered as that exact literal
+string in the output, never re-substituted or interpreted; a
+non-`.docx` buffer raised a clean `TemplateMergeError` instead of an
+opaque library exception. Full backend suite: 430/430 (no regressions;
+no new automated tests added this slice, consistent with this
+project's other first-slice migration+repository/generator commits).
+
 ## Known gaps / deferred
 - OCR/AI extraction — Module 9.
 - `docker-compose.yml` has no volume mounted for `DOCUMENT_STORAGE_ROOT`
   (ADR-017) — files live in the container's writable layer until fixed.
 - No encryption-at-rest for stored files.
 - RBAC placeholder, not a real role model for verify/review.
+- Template storage + merge has no API/UI yet, and no orchestration
+  combining upload -> merge -> re-upload-as-generated-document into one
+  flow — this slice built the two pieces (storage, merge) separately,
+  per its own scope.
+- No mime-type/content validation that an upload tagged `doc_type =
+  'template'` is actually a `.docx` at upload time — `mergeTemplate`
+  is what needs a valid `.docx`, and it validates that at merge time,
+  raising `TemplateMergeError` rather than silently failing.
 
 ## Commits
 `9b7d779` migration+repo · `ee46702` service (+ `fee_payments` FK
-unblock) · `32ddf95` API · `7a7518d` UI
+unblock) · `32ddf95` API · `7a7518d` UI · template storage + merge
+(this slice)

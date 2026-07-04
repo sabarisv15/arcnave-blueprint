@@ -27,6 +27,7 @@
 const documentRepository = require('../repositories/documentRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const fileStorage = require('../storage/fileStorage');
+const templateMerger = require('../generators/templateMerger');
 
 // Missing studentId, docType, fileName, mimeType, fileBuffer, or
 // actorUserId — documents' own NOT NULL columns, plus the actor
@@ -46,6 +47,17 @@ class DocumentStudentNotFoundError extends Error {}
 class DocumentReviewStatusError extends Error {}
 
 const VALID_REVIEW_STATUSES = ['verified', 'rejected'];
+
+// College Admin-uploaded college document templates (BusinessRules.md's
+// College Admin resolution, item 2) -- stored exactly like any other
+// document (same table, same storage_path, same DocumentService path,
+// CLAUDE.md rule 2), never a second storage mechanism. Tagged apart
+// from student files by doc_type/student_id alone: doc_type is always
+// this literal value (not caller-suppliable the way uploadDocument's
+// general docType is), student_id is always null (a template belongs
+// to the college, not to any one student -- documents.student_id has
+// been nullable since 1752800000000).
+const TEMPLATE_DOC_TYPE = 'template';
 
 function assertValidReviewStatus(status) {
   if (!VALID_REVIEW_STATUSES.includes(status)) {
@@ -99,6 +111,23 @@ async function uploadDocument(client, { collegeId, studentId, docType, fileName,
   });
 
   return document;
+}
+
+// Thin wrapper over uploadDocument fixing docType/studentId to the
+// template convention above -- every other field (fileName, mimeType,
+// fileBuffer, actorUserId) and every validation/audit-logging path is
+// the exact same uploadDocument this function delegates to, not a
+// parallel implementation. No mimeType/content check that the upload
+// is actually a .docx -- same restraint doc_type/mime_type already get
+// everywhere else in this file (no CHECK, no enforcement at write
+// time); mergeTemplate below is what actually needs a valid .docx, and
+// it validates that at merge time, not here.
+async function uploadTemplate(client, { collegeId, fileName, mimeType, fileBuffer }, { actorUserId } = {}) {
+  return uploadDocument(
+    client,
+    { collegeId, studentId: null, docType: TEMPLATE_DOC_TYPE, fileName, mimeType, fileBuffer },
+    { actorUserId },
+  );
 }
 
 // null means no document exists with this id — not an error. A route
@@ -193,7 +222,11 @@ module.exports = {
   DocumentValidationError,
   DocumentStudentNotFoundError,
   DocumentReviewStatusError,
+  TemplateMergeError: templateMerger.TemplateMergeError,
+  TEMPLATE_DOC_TYPE,
   uploadDocument,
+  uploadTemplate,
+  mergeTemplate: templateMerger.mergeTemplate,
   getDocument,
   downloadDocument,
   listDocumentsForStudent,
