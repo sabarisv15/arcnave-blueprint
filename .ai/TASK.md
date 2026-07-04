@@ -1,90 +1,95 @@
 # TASK
 
 ## Objective
-Module 5 (Finance), second vertical slice: `fee_payments` migration +
-repository only — no service, API, UI, or `docs/` files. Same
-discipline as every prior module's first/second slice (`ef0a76c`,
-`49c8b4b`, `326e8b5`).
+Module 5 (Finance), third vertical slice: `FinanceService` only — no
+API/UI. DB + repository already done for `fee_structures` (`326e8b5`)
+and `fee_payments` (`c1b7aac`).
 
-## Grounding
-Same situation as `fee_structures` (326e8b5, see `.ai/RESULT.md` at
-that commit): no real fee/invoice/payment screen exists anywhere in
-`frontend/src` to ground field/shape decisions against. This slice's
-shape comes directly from this session's own explicit instruction, not
-a working screen:
+## Scope (this session's own instruction)
+- `fee_structures` CRUD: create/update always "goes through
+  WorkflowService approval" (BusinessRules: "fee changes require
+  approval before taking effect") — mirror how Academic/Attendance
+  route their approval-gated writes through WorkflowService, same
+  pattern.
+- `fee_payments` mark paid/not-paid: simple write, no WorkflowService
+  gate (manual student-profile action, not a "fee change").
+- Service calls repository only, never raw SQL/storage (CLAUDE.md
+  rule 1).
+- Soft-delete only, no hard delete, on both.
 
-- `student_id` (FK `students`), `fee_structure_id` (FK `fee_structures`),
-  `status` (`paid`/`not_paid`), `marked_by` (FK to the acting user),
-  `receipt_document_id` (nullable, intended as a future FK to a
-  `documents` table owned by DocumentService — do not write to
-  storage, just reserve the reference column), `deleted_at` soft-delete
-  (same pattern as `fee_structures`).
-- Explicitly **not** an amount/transaction/ledger table — a manual
-  paid/not-paid flag only, set from the student profile screen.
-- Unique constraint: one active row per `(student_id, fee_structure_id)`
-  `WHERE deleted_at IS NULL`.
-- RLS + tenant isolation, same pattern as `fee_structures`.
+## Pre-check: what "the same pattern" actually is in this codebase
+Read `academicService.js` and `attendanceService.js` before writing
+anything, since the instruction says to mirror them. Neither actually
+calls a real WorkflowService — grepped for `WorkflowService` across
+`backend/src`: the only hits are comments. `academicService.js`'s own
+file-level comment states it outright: "CLAUDE.md rule 3: WorkflowService
+is the sole approval gate, and it doesn't exist yet (Roadmap.md builds
+Workflow/Notifications after Attendance/Finance/Documents/Reports) —
+same 'out of scope here, not stubbed' reasoning." `attendanceService.js`
+restates the identical gap for its own `timetable_status === 'Approved'`
+check.
 
-## Pre-check: migrate.js count:1 fix
-Confirmed already committed (`833535a`, prior to this session) before
-touching anything: `backend/scripts/migrate.js` line ~20 sets
-`count = direction === 'down' ? 1 : Infinity`. No separate fix commit
-needed this session.
+So "the same pattern" this session's instruction asks to mirror is:
+validate that `status` is a known literal (exactly like
+`classes.timetable_status`), do **not** call, invoke, or fake a
+WorkflowService integration, and flag the gap the same way both prior
+services already do. Building a working approval gate here would be
+inventing infrastructure this codebase has explicitly and repeatedly
+deferred to Module 8 — not "mirroring the pattern," contradicting it.
+This is called out explicitly in `financeService.js`'s own file-level
+comment so it isn't mistaken for an oversight.
 
-## Key design decisions
-- **`receipt_document_id` has no FK constraint.** `documents` doesn't
-  exist anywhere in this schema — grepped every migration to confirm
-  (Module 6, Documents & OCR, hasn't been built; Roadmap.md puts it
-  after Finance). Postgres cannot reference a nonexistent table, so
-  this is a bare nullable `UUID` column with no `REFERENCES` clause. A
-  later migration, once Module 6 creates `documents`, must add the FK
-  via `ALTER TABLE ... ADD CONSTRAINT`. Flagged prominently in the
-  migration's own comment, not silently dropped or faked with a
-  same-named-but-wrong reference.
-- **`marked_by_user_id`, not `marked_by`** — naming matches
-  `attendance_sessions.marked_by_user_id`/`classes.tutor_user_id`
-  exactly: FK to `users(id)`, never `staff(id)`, per BusinessRules'
-  already-resolved Module 2 "faculty reference is a users.id" entry.
-  NOT NULL, same reasoning `attendance_sessions.marked_by_user_id`
-  already established — a row only exists once a mark has actually
-  been made; there's no "unmarked" row state.
-- **`status` mirrors `fee_structures.status`/`classes.timetable_status`**
-  — free TEXT, no CHECK, `'not_paid'` default, known values enforced
-  at the service layer once FinanceService exists (not built this
-  slice).
-- **`deleted_at` (soft-delete) resolved now**, same as
-  `fee_structures` — BusinessRules.md's AI section names "fees"
-  explicitly for soft-delete-only. GRANT omits DELETE.
-- **Partial unique index** `(student_id, fee_structure_id) WHERE
-  deleted_at IS NULL` — no explicit `college_id` in the constraint,
-  matching `attendance_sessions`'s own precedent: both FK columns are
-  already tenant-scoped via their referenced tables.
-- **New repository file** (`feePaymentRepository.js`), not appended to
-  `financeRepository.js` — matches the established file-per-table
-  convention (`classRepository.js` vs. `facultyAllocationRepository.js`/
-  `timetablePeriodRepository.js` under the same "Academic" service),
-  not Architecture.md's shorthand one-repository-per-service wording.
+## What was built
+`backend/src/services/financeService.js`:
 
-## Files likely affected
-- `backend/migrations/1752400000000_module-5-finance-fee-payments-schema.js`
-- `backend/src/repositories/feePaymentRepository.js`
+- `createFeeStructure`/`updateFeeStructure`/`getFeeStructure`/
+  `removeFeeStructure`/`listFeeStructuresForClassAndYear`/
+  `listFeeStructures` — validation (required fields, known `status`
+  literal) + audit logging on top of `financeRepository.js`, same
+  shape as `academicService.js`'s `createClass`/`updateClass`.
+  `removeFeeStructure` calls `financeRepository.softDelete`, never a
+  hard delete (the repository has no such function at all).
+- `markFeePayment`/`getFeePayment`/`listFeePaymentsForStudent`/
+  `listFeePayments`/`removeFeePayment` — `markFeePayment` is a
+  find-then-create/update upsert, same shape as
+  `attendanceService.markAttendance`, but with **no** authorization/
+  approval gate before it (this session's own explicit instruction).
+  `status` is a required parameter here (unlike `fee_structures`,
+  which has a sensible unattended default) — "mark paid/not-paid" is
+  the entire point of the action, so omitting it is a caller bug worth
+  surfacing, not something to default silently.
+- Error classes mirror `academicService.js`'s/`attendanceService.js`'s
+  own naming and mapping conventions exactly (`FeeStructureValidationError`,
+  `FeeStructureStatusError`, `FeeStructureConflictError`,
+  `FeeStructureClassNotFoundError`, `FeePaymentValidationError`,
+  `FeePaymentStatusError`, `FeePaymentStudentNotFoundError`,
+  `FeePaymentFeeStructureNotFoundError`, `FeePaymentConflictError`).
+- `marked_by_user_id` is never separately validated against a real FK
+  error — it's always the authenticated actor (`actorUserId`), never
+  caller-supplied free text naming someone else, same precedent
+  `attendance_sessions.marked_by_user_id` already set (no
+  `AttendanceMarkedByNotFoundError` exists there either).
+- `collegeId` is a direct parameter to `markFeePayment` (not derived
+  from a lookup) — the dominant house convention every other `createX`
+  in this codebase uses; `attendanceService.markAttendance`'s reuse of
+  `cls.college_id` is the one exception, justified there by a lookup
+  it already needed for authorization that `markFeePayment` has no
+  equivalent of.
+
+`backend/tests/finance-service.test.js`: unit tests, no live DB, same
+`node:test` mock-based technique as `academic-service.test.js`/
+`attendance-service.test.js` — trusts the constraint names already
+live-verified in `326e8b5`/`c1b7aac` rather than re-running a live
+database for a service layer that adds no new SQL of its own.
 
 ## Acceptance criteria
-- Migration runs up cleanly; RLS enabled+forced, tenant_isolation
-  policy present.
-- Partial unique index proven with a real constraint-violation insert,
-  including the soft-delete-then-recreate case.
-- FK enforcement proven live on all three real FKs (`student_id`,
-  `fee_structure_id`, `marked_by_user_id`).
-- `receipt_document_id` accepts an arbitrary UUID with no FK to
-  violate, as designed.
-- Real DELETE statement rejected by Postgres itself.
-- Migration down/up reversibility confirmed using the now-fixed
-  `scripts/migrate.js` (`down` reverts only `fee_payments`, leaving
-  `fee_structures` and everything else untouched).
+- Unit/integration tests at the same rigor as
+  `academic-service.test.js`/`attendance-service.test.js`: every
+  validation error, every constraint-violation mapping, every
+  audit-log attribution, every no-op case (missing id, no recognized
+  fields) covered.
 - Full backend test suite still passes.
-- No service/API/UI/`docs/` files touched.
-- Flag, don't build: Student module needs an `annual_income` field +
-  optional income-certificate document reference in a future
-  Student-module migration — required before scholarship eligibility
-  (BusinessRules.md Finance's second rule) can be computed at all.
+- No API/UI/`docs/` files touched.
+- No repository or raw SQL calls from the service layer (CLAUDE.md
+  rule 1) — verified by inspection: `financeService.js` only ever
+  calls `financeRepository`/`feePaymentRepository`/`auditLogRepository`.

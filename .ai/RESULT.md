@@ -1,138 +1,143 @@
 # RESULT
 
 ## Files changed
-- `backend/migrations/1752400000000_module-5-finance-fee-payments-schema.js` (new)
-- `backend/src/repositories/feePaymentRepository.js` (new)
+- `backend/src/services/financeService.js` (new)
+- `backend/tests/finance-service.test.js` (new)
 
-No service/API/UI/`docs/` files touched — matches this slice's own
-migration+repository-only scope.
+No API/UI/`docs/` files touched — matches this slice's own
+service-only scope.
 
 ## What was built
-`fee_payments`: a manual paid/not-paid **flag**, not a payment ledger
-— explicitly no amount/transaction/installment fields, per this
-session's instruction. One row per (student, fee line): `id`,
-`college_id` (FK `colleges`), `student_id` (FK `students`, NOT NULL),
-`fee_structure_id` (FK `fee_structures`, NOT NULL), `status`
-(`'not_paid'` default, mirrors `fee_structures.status`),
-`marked_by_user_id` (FK `users`, NOT NULL — never `staff`, per the
-already-resolved Module 2 convention), `receipt_document_id` (nullable
-`UUID`, **no FK** — see below), `deleted_at`, `created_at`,
-`updated_at`.
+`financeService.js` — business logic for both `fee_structures` and
+`fee_payments`, calling only `financeRepository`/`feePaymentRepository`/
+`auditLogRepository` (CLAUDE.md rule 1; never raw SQL, never storage).
 
-Tenant-scoped like every other table: RLS enabled + forced,
-`tenant_isolation` policy on `college_id`. Soft-delete only
-(`deleted_at`, no DELETE grant) — same BusinessRules.md AI-section
-reasoning ("fees" named explicitly) as `fee_structures`. Partial
-unique index on `(student_id, fee_structure_id) WHERE deleted_at IS
-NULL`.
+**`fee_structures`**: `createFeeStructure`, `getFeeStructure`,
+`updateFeeStructure`, `removeFeeStructure`, `listFeeStructuresForClassAndYear`,
+`listFeeStructures`. Validates required fields (`academicYear`,
+`classId`, `feeCategory`, `amount`) and that `status` is one of
+`'Pending Approval'`/`'Approved'`/`'Rejected'` — same shape as
+`academicService.createClass`/`updateClass`'s own `timetableStatus`
+handling. Maps `fee_structures_college_year_class_category_key`
+(23505) to `FeeStructureConflictError` and `fee_structures_class_id_fkey`
+(23503) to `FeeStructureClassNotFoundError`. `removeFeeStructure` calls
+`financeRepository.softDelete` — no hard-delete path exists, since the
+repository itself exposes none.
 
-`feePaymentRepository.js` (new file, not appended to
-`financeRepository.js` — matches the established file-per-table
-convention): `create`, `findById`, `findByStudentAndFeeStructure`,
-`findByStudentId`, `update`, `softDelete`, `list`. No `remove`/
-hard-delete function, same structural guarantee `financeRepository.js`/
-`attendanceRepository.js` already establish.
+**`fee_payments`**: `markFeePayment` (an upsert — find-then-create/update
+by `(studentId, feeStructureId)`, same shape as
+`attendanceService.markAttendance`), `getFeePayment`,
+`listFeePaymentsForStudent`, `listFeePayments`, `removeFeePayment`.
+`status` is a **required** parameter (unlike `fee_structures`, which
+has a real unattended default) — omitting it on a "mark paid/not-paid"
+call is a caller bug, not something to paper over with a silent
+default. Maps `fee_payments_student_id_fkey`/`fee_payments_fee_structure_id_fkey`
+(23503) and the `fee_payments_student_fee_structure_key` create-race
+(23505) to their own domain errors, same shape
+`attendanceService.markAttendance` uses for
+`attendance_sessions_class_date_hour_key`. `removeFeePayment` is
+soft-delete only, same as `removeFeeStructure`.
 
-## receipt_document_id has no FK constraint — flagged, not worked around
-This session's instruction asked for "a nullable FK to documents
-table, owned by DocumentService." Grepped every migration in
-`backend/migrations/` to confirm: **no `documents` table exists
-anywhere in this schema.** Module 6 (Documents & OCR) hasn't been
-built yet (Roadmap.md puts it after Finance). Postgres cannot create a
-foreign key against a table that doesn't exist, so this column is a
-bare nullable `UUID` with no `REFERENCES` clause — the intended
-meaning (which receipt document, if any, backs this payment mark) is
-reserved and documented in the migration's own comment, but the
-constraint itself is deferred. A later migration, once Module 6
-creates `documents`, must run:
-```sql
-ALTER TABLE fee_payments ADD CONSTRAINT fee_payments_receipt_document_id_fkey
-    FOREIGN KEY (receipt_document_id) REFERENCES documents(id)
-```
-Verified live that the column currently accepts any arbitrary UUID
-with no constraint violation (see Verification #6 below) — proving
-this is a real, working gap, not an oversight that happens to look
-fine.
+## The core design question: what does "mirror WorkflowService, same pattern" actually mean here?
+This session's instruction asked to route `fee_structures` create/
+update "through WorkflowService approval... mirror how Academic/
+Attendance route their approval-gated writes through WorkflowService."
+Before writing anything, re-read `academicService.js` and
+`attendanceService.js` and grepped `backend/src` for `WorkflowService` —
+**neither service actually calls one.** `academicService.js`'s own
+file-level comment says so outright: WorkflowService (Module 8)
+doesn't exist yet, Roadmap.md builds it after Finance, and this is
+"the same 'out of scope here, not stubbed' reasoning" used elsewhere.
+`attendanceService.js` restates the identical gap for its own
+`timetable_status === 'Approved'` check.
 
-## Pre-check performed
-Confirmed the `migrate.js` `count: 1`-on-`down` fix (commit `833535a`)
-was already committed before starting this slice — no separate fix
-commit was needed. Used the real `scripts/migrate.js` (not a one-off
-runner) for both migration up and reversibility verification this
-time, since it's now safe to.
+So "the same pattern" is: validate the known status literal (mirroring
+`classes.timetable_status` exactly — no DB CHECK, service-layer
+enforcement only), and explicitly do **not** build, stub, or fake a
+WorkflowService call, because there is nothing real to route through
+yet. Building one here — even a minimal in-process approximation —
+would be inventing infrastructure this codebase has deliberately and
+repeatedly deferred, which contradicts "mirror the pattern" rather than
+honoring it. This reasoning is spelled out in `financeService.js`'s own
+file-level comment specifically so a future reader (or a future
+session extending this file) doesn't mistake the missing gate for an
+oversight.
+
+## Other notable design decisions
+- **`marked_by_user_id` is never mapped to its own "not found" error.**
+  It's always `actorUserId`, the authenticated caller — never
+  caller-supplied free text naming a different user (unlike
+  `tutorUserId` on `classes`, which genuinely is caller-supplied and
+  does get `ClassTutorNotFoundError`). `attendance_sessions.marked_by_user_id`
+  set this exact precedent already: no `AttendanceMarkedByNotFoundError`
+  class exists there either.
+- **`collegeId` is a direct parameter to `markFeePayment`**, not
+  derived from a lookup. Every other `createX` in this codebase
+  (`createClass`, `createStudent`, `createFeeStructure`) takes
+  `collegeId` directly from the tenant-scoped request context.
+  `attendanceService.markAttendance` reusing `cls.college_id` is the
+  one exception, and it's justified there by a class lookup
+  `markAttendance` already needs for authorization — `markFeePayment`
+  has no equivalent lookup to piggyback on, so it follows the dominant
+  convention instead.
+- **`removeFeeStructure`/`removeFeePayment` have no way to reach a hard
+  delete**, structurally: `financeRepository`/`feePaymentRepository`
+  expose no `remove` function at all (verified in both services' own
+  test files via `assert.equal('remove' in <repo>, false)`), so there
+  is nothing for the service layer to accidentally call even if it
+  tried.
 
 ## Verification
-All performed live against the real `docker-compose` Postgres 16
-already running in this environment (`arcnave-blueprint-db-1`).
-
-1. **Migration up**: ran cleanly via `node scripts/migrate.js up`.
-2. **Schema shape** (via `docker exec ... psql`): confirmed all four
-   FKs (`college_id`, `student_id`, `fee_structure_id`,
-   `marked_by_user_id`), confirmed `receipt_document_id` has **no**
-   FK listed, confirmed the partial unique index's exact definition,
-   `relrowsecurity`/`relforcerowsecurity` both `t`, the
-   `tenant_isolation` policy text, and `arcnave_app`'s grant (`arw` —
-   no DELETE).
-3. **Repository, exercised live** through the `arcnave_app` role with
-   real `SET LOCAL app.current_tenant` context (ephemeral script,
-   seeded two real tenants + a class + a student + a staff user + a
-   fee_structure via the admin role, deleted after):
-   - `create()` applies the `'not_paid'` DEFAULT status and leaves
-     `receipt_document_id` null when omitted.
-   - `findById`, `findByStudentAndFeeStructure`, `findByStudentId` all
-     correct.
-   - **Cross-tenant isolation**: college B's `findById` on college A's
-     row id returns `null`.
-   - **Partial unique index**: a duplicate `(student_id,
-     fee_structure_id)` insert while the first row is live is rejected
-     with a real Postgres `23505`; after `softDelete`-ing the first
-     row, the identical key can be re-inserted successfully (new row
-     id).
-   - `update()` marks a row `paid` and stores an arbitrary
-     `receipt_document_id` (a random UUID) with **no** constraint
-     violation — proves #6's "no FK yet" claim isn't just a reading of
-     the DDL, it's actually true at runtime.
-   - `softDelete()` hides the row from `findById` immediately, and is
-     idempotent against an already-deleted or missing id.
-   - **Real hard-DELETE rejected by Postgres itself**: `42501`
-     (`insufficient_privilege`) through the `arcnave_app` connection.
-   - **FK enforcement, all three real FKs individually proven**:
-     bogus `student_id` -> `23503`; bogus `fee_structure_id` ->
-     `23503`; bogus `marked_by_user_id` -> `23503` (this last check
-     needed a second, distinct `fee_structure_id` in the test to avoid
-     colliding with the unique-index case from an earlier step — a
-     test-script ordering issue, not a repository bug; corrected and
-     re-run).
-4. **Migration reversibility**, using the real (now-fixed)
-   `scripts/migrate.js` directly: `down` dropped only `fee_payments`,
-   confirmed via `docker exec ... psql` that `fee_structures` (and
-   everything else) remained; `up` restored `fee_payments` as final
-   state.
-5. **Full backend test suite**: `npm test` — **285/285 pass**, 0
-   failures.
-6. All seeded verification data and the temporary verification script
-   deleted afterward; final DB state is the migrated-up schema with
-   empty tables, same as before this session started.
+1. **Unit tests** (`backend/tests/finance-service.test.js`, no live
+   DB — same `node:test` mock technique as `academic-service.test.js`/
+   `attendance-service.test.js`): 35 assertions covering —
+   - Every required-field validation error, for both `fee_structures`
+     and `fee_payments`, confirmed to short-circuit before touching
+     the repository.
+   - Every known-status literal accepted; every unknown literal
+     rejected (`FeeStructureStatusError`/`FeePaymentStatusError`).
+   - Unrecognized fields dropped before reaching the repository
+     (`aadhaarNumber` probe, same as `academic-service.test.js`'s own).
+   - Audit-log attribution to `actorUserId`/`userId`, correct
+     `action`/`entity` on every write path.
+   - `updateFeeStructure`'s no-op cases (no recognized fields;
+     nonexistent id) correctly skip the audit entry.
+   - Every constraint-violation mapping for both tables
+     (`fee_structures_college_year_class_category_key`,
+     `fee_structures_class_id_fkey`,
+     `fee_payments_student_id_fkey`,
+     `fee_payments_fee_structure_id_fkey`,
+     `fee_payments_student_fee_structure_key`), trusting the
+     constraint names already live-verified against a real Postgres in
+     `326e8b5`/`c1b7aac` rather than re-verifying them here.
+   - `markFeePayment`'s upsert branching: creates when no existing row,
+     updates (re-stamping `markedByUserId`/`status`/`receiptDocumentId`)
+     when one exists, with the correct `fee_payment_marked` vs.
+     `fee_payment_remarked` audit action in each case.
+   - Both `removeX` functions: no-op + no audit entry on a missing/
+     already-soft-deleted id; soft-delete + audit entry on a real one;
+     confirmed neither repository exposes a `remove` function to fall
+     back to.
+   - A non-conflict repository error passes through unchanged, for
+     both `createFeeStructure` and `markFeePayment`.
+2. **Full backend test suite**: `npm test` — **320/320 pass** (285
+   prior + 35 new), 0 failures.
 
 ## Flags / open questions
-- **`receipt_document_id`'s FK is deferred, not built** — see above.
-  Needs a follow-up migration once Module 6 (Documents & OCR) creates
-  `documents`.
-- **Scholarship eligibility remains fully unbuilt** (restated from
-  `fee_structures`' own RESULT.md): BusinessRules.md Finance's second
-  rule — "Students below a configured income threshold become
-  scholarship eligible" — cannot be computed today. **New, explicit
-  ask for the Student module**: a future Student-module migration
-  needs to add an `annual_income` field (and optionally an
-  income-certificate document reference, same "reserve the column, no
-  FK until DocumentService exists" treatment `receipt_document_id` got
-  here) to `students` — out of scope for this Finance slice, but now
-  named as a concrete cross-module dependency rather than a vague
-  "something needs to change" gap.
-- **No transaction/ledger table** — `fee_payments` is a flag, not a
-  payment history; partial payments, refunds, or multiple installments
-  per fee line are unrepresentable in this shape by design, per this
-  session's explicit instruction. Revisit only if a real product
-  requirement asks for it.
-- **`fee_structures.status`/WorkflowService gate still open** —
-  restated from the prior slice, unchanged by this one.
+- **No real WorkflowService gate on `fee_structures.status`** — see
+  above. Restated, not newly discovered: `academicService.js` flagged
+  this for `timetable_status`, `attendanceService.js` restated it, this
+  file restates it a third time for the same underlying reason
+  (Module 8 doesn't exist yet).
+- **Scholarship eligibility remains fully unbuilt** — restated from
+  both prior Finance slices' own RESULT.md entries: no income field
+  exists anywhere in this schema yet.
+- **`receipt_document_id`'s FK is still deferred** — restated from
+  `c1b7aac`: no `documents` table exists yet (Module 6 unbuilt).
+- **No API/UI yet for either table** — this slice is service-only, per
+  its own scope. A future slice wires `/api/v1/fee-structures` and
+  `/api/v1/fee-payments` routes (with RBAC — BusinessRules.md names no
+  specific actor for "who may create a fee structure" or "who may mark
+  a payment," left to the route/RBAC layer once those routes exist,
+  same treatment `academicService.js` gives its own unauthorized
+  operations).
