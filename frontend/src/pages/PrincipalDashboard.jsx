@@ -153,7 +153,7 @@ export default function PrincipalDashboard() {
   
   // Loading & Data States
   const [loading, setLoading] = useState(true);
-  const [viewSection, setViewSection] = useState('overview'); // 'overview', 'timetable_approvals', 'marksheet_approvals', 'admin'
+  const [viewSection, setViewSection] = useState('overview'); // 'overview', 'timetable_approvals', 'marksheet_approvals', 'admin', 'finance'
   const [submissions, setSubmissions] = useState([]);
   const [pendingTimetables, setPendingTimetables] = useState([]);
   const [staffList, setStaffList] = useState([]);
@@ -191,6 +191,22 @@ export default function PrincipalDashboard() {
     department: 'CSE'
   });
   const [generatedCredentials, setGeneratedCredentials] = useState(null);
+
+  // Fee structures (Module 5, Finance) — real API throughout
+  // (routes/finance.js, 77dfcd0), unlike staffForm's create path above
+  // (still the old /api/hod/staff prototype endpoint, per 49c2c36's
+  // own scope boundary): financeService.createFeeStructure needs
+  // nothing this UI can't already supply, so there's no equivalent
+  // reason to leave this one on a dead endpoint.
+  const [feeStructures, setFeeStructures] = useState([]);
+  const [showFeeStructureModal, setShowFeeStructureModal] = useState(false);
+  const [feeStructureForm, setFeeStructureForm] = useState({
+    academic_year: '',
+    class_id: '',
+    fee_category: '',
+    amount: ''
+  });
+  const [feeStructureSubmitting, setFeeStructureSubmitting] = useState(false);
 
   const loadData = async () => {
     setLoading(true);
@@ -233,7 +249,18 @@ export default function PrincipalDashboard() {
         setPendingTimetables(ttData.pending_timetables || []);
       }
 
-      // 5. Fetch submissions (marksheets)
+      // 5. Fetch fee structures — the real API (routes/finance.js,
+      // 77dfcd0), Authorization-gated like classRes above. Bare array,
+      // same response shape as GET /api/v1/classes.
+      const feeStructuresRes = await fetch('/api/v1/finance/fee-structures?limit=200', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (feeStructuresRes.ok) {
+        const feeStructuresData = await feeStructuresRes.json();
+        setFeeStructures(feeStructuresData || []);
+      }
+
+      // 6. Fetch submissions (marksheets)
       const subRes = await fetch('/api/submissions');
       if (subRes.ok) {
         const subData = await subRes.json();
@@ -414,6 +441,53 @@ export default function PrincipalDashboard() {
     setShowStaffModal(true);
   };
 
+  const openAddFeeStructure = () => {
+    setFeeStructureForm({ academic_year: '', class_id: '', fee_category: '', amount: '' });
+    setShowFeeStructureModal(true);
+  };
+
+  // Create only — no edit/delete UI yet, per this session's own scope.
+  // Submitted with no `status` field: financeService.createFeeStructure
+  // applies the real DB default ('Pending Approval') when omitted,
+  // same "let the service/DB supply its own default" restraint
+  // StudentEditorModal's handleSave already uses for its own optional
+  // fields — there is no real approval action to route this through
+  // yet (WorkflowService, Module 8, doesn't exist — financeService.js's
+  // own file comment), so this form has no status control at all,
+  // deliberately: every fee structure created here starts, and stays,
+  // 'Pending Approval' until a future slice builds a real approve/
+  // reject action.
+  const handleFeeStructureFormSubmit = async (e) => {
+    e.preventDefault();
+    setFeeStructureSubmitting(true);
+    try {
+      const res = await fetch('/api/v1/finance/fee-structures', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          academic_year: feeStructureForm.academic_year,
+          class_id: feeStructureForm.class_id,
+          fee_category: feeStructureForm.fee_category,
+          amount: feeStructureForm.amount,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || 'Failed to create fee structure');
+      }
+      showToast('Fee structure submitted for approval!', 'success');
+      setShowFeeStructureModal(false);
+      loadData();
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setFeeStructureSubmitting(false);
+    }
+  };
+
   // Derive workload matrix college-wide
   const staffWorkload = useMemo(() => getStaffWorkload(monitorData), [monitorData]);
 
@@ -492,7 +566,8 @@ export default function PrincipalDashboard() {
     { id: 'overview', label: 'Overview', icon: BarChart3 },
     { id: 'timetable_approvals', label: 'Timetable Approvals', icon: CalendarDays },
     { id: 'marksheet_approvals', label: 'Marksheet Approvals', icon: FileText },
-    { id: 'admin', label: 'Workload & Staff', icon: Settings }
+    { id: 'admin', label: 'Workload & Staff', icon: Settings },
+    { id: 'finance', label: 'Fee Structures', icon: DollarSign }
   ];
 
   return (
@@ -1302,6 +1377,58 @@ export default function PrincipalDashboard() {
             </div>
           </div>
         )}
+
+        {/* FEE STRUCTURES (Module 5, Finance) — create + list only, per
+            this session's own scope. No edit/delete UI yet. */}
+        {viewSection === 'finance' && (
+          <div className="space-y-8 animate-slide-up">
+            <div className="card p-6 space-y-4">
+              <div className="flex justify-between items-center border-b pb-3 border-slate-50">
+                <div>
+                  <h3 className="font-extrabold text-slate-805 text-sm flex items-center gap-1.5">
+                    <DollarSign className="w-4 h-4 text-indigo-500" />
+                    Fee Structures
+                  </h3>
+                  <p className="text-slate-450 text-[10px] font-semibold mt-0.5">
+                    Define fee categories per class and academic year. New fee lines are submitted for approval, not applied immediately.
+                  </p>
+                </div>
+                <button onClick={openAddFeeStructure} className="btn-primary text-[10px] py-1.5 px-3 flex items-center gap-1">
+                  <Plus className="w-3.5 h-3.5" /> Add Fee Structure
+                </button>
+              </div>
+
+              <div className="space-y-2.5 max-h-[480px] overflow-y-auto pr-1">
+                {(feeStructures || []).length === 0 ? (
+                  <p className="text-xs text-slate-400 italic py-6 text-center">No fee structures defined yet.</p>
+                ) : (
+                  feeStructures.map((fs) => {
+                    const cls = classesList?.find((c) => c.id === fs.class_id);
+                    return (
+                      <div key={fs.id} className="p-3 bg-white border border-slate-150 rounded-xl flex items-center justify-between hover:border-slate-350 transition-colors">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-8 h-8 rounded-full bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-xs flex-shrink-0">
+                            <DollarSign className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-xs font-extrabold text-slate-805">{fs.fee_category}</p>
+                              <span className="text-[8px] font-bold bg-slate-100 px-1 py-0.2 rounded">{fs.academic_year}</span>
+                            </div>
+                            <p className="text-[9px] text-slate-400 font-semibold">
+                              {cls ? cls.class_name : `Class ${fs.class_id}`} · ₹{fs.amount}
+                            </p>
+                          </div>
+                        </div>
+                        <StatusBadge status={fs.status} />
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* MARKSHEET REVIEW MODAL */}
@@ -1613,8 +1740,8 @@ export default function PrincipalDashboard() {
                   >
                     Cancel
                   </button>
-                  <button 
-                    type="submit" 
+                  <button
+                    type="submit"
                     className="btn-primary text-xs font-black uppercase py-2 px-5 shadow-sm"
                   >
                     {editingStaff ? 'Save Changes' : 'Generate Account'}
@@ -1622,6 +1749,96 @@ export default function PrincipalDashboard() {
                 </div>
               </form>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ADD FEE STRUCTURE MODAL — create only, no edit/delete yet */}
+      {showFeeStructureModal && (
+        <div className="modal-backdrop">
+          <div className="modal-panel w-full max-w-md animate-scale-up">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+              <div>
+                <h2 className="text-sm font-extrabold text-slate-800">Add Fee Structure</h2>
+                <p className="text-xs text-slate-400 font-semibold mt-0.5">Submitted for approval — starts as "Pending Approval"</p>
+              </div>
+              <button onClick={() => setShowFeeStructureModal(false)} className="text-slate-500 hover:text-slate-800 text-xl font-bold leading-none">&times;</button>
+            </div>
+
+            <form onSubmit={handleFeeStructureFormSubmit}>
+              <div className="p-6 space-y-4 text-xs font-bold text-slate-655 max-h-[60vh] overflow-y-auto">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase text-slate-400">Academic Year</label>
+                    <input
+                      type="text"
+                      required
+                      value={feeStructureForm.academic_year}
+                      onChange={e => setFeeStructureForm({ ...feeStructureForm, academic_year: e.target.value })}
+                      placeholder="e.g. 2025-2026"
+                      className="w-full text-xs font-semibold p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase text-slate-400">Fee Category</label>
+                    <input
+                      type="text"
+                      required
+                      value={feeStructureForm.fee_category}
+                      onChange={e => setFeeStructureForm({ ...feeStructureForm, fee_category: e.target.value })}
+                      placeholder="e.g. Tuition, Exam Fee"
+                      className="w-full text-xs font-semibold p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase text-slate-400">Class</label>
+                  <select
+                    required
+                    value={feeStructureForm.class_id}
+                    onChange={e => setFeeStructureForm({ ...feeStructureForm, class_id: e.target.value })}
+                    className="w-full text-xs font-semibold p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                  >
+                    <option value="">Select a class…</option>
+                    {classesList?.map((cls, idx) => (
+                      <option key={idx} value={cls.id}>{cls.class_name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase text-slate-400">Amount (₹)</label>
+                  <input
+                    type="number"
+                    required
+                    min="0"
+                    step="0.01"
+                    value={feeStructureForm.amount}
+                    onChange={e => setFeeStructureForm({ ...feeStructureForm, amount: e.target.value })}
+                    placeholder="e.g. 45000"
+                    className="w-full text-xs font-semibold p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+
+              <div className="px-6 py-4 border-t border-slate-100 flex justify-between bg-slate-50/50">
+                <button
+                  type="button"
+                  onClick={() => setShowFeeStructureModal(false)}
+                  className="btn-ghost text-xs font-black uppercase py-2 px-4"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={feeStructureSubmitting}
+                  className="btn-primary text-xs font-black uppercase py-2 px-5 shadow-sm"
+                >
+                  {feeStructureSubmitting ? 'Submitting…' : 'Submit for Approval'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
