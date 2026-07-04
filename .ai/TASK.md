@@ -1,86 +1,66 @@
 # TASK
 
-## Objective (Module 6 — Documents & OCR — second vertical slice)
-`DocumentService` only — no API/UI this slice. Built on the
-`documents` migration + `documentRepository.js` from the prior slice
-(9b7d779).
+## Objective (Module 6 — Documents & OCR — third vertical slice)
+`/api/v1/documents` routes only, on top of `documentService.js`
+(ee46702) — no UI yet. Match `finance.js`'s route conventions (route-
+level RBAC placeholder, snake_case<->camelCase body translation,
+`requireResolvedTenant` guard, a `mapXServiceError` helper).
 
-## Storage backend: local disk (see ADR-017)
-TechStack.md names no storage backend. Chosen: local disk under
-`DOCUMENT_STORAGE_ROOT`, via a new `backend/src/storage/fileStorage.js`
-(pure fs helpers, no DB, no business logic — used only by
-`documentService.js`, per ADR-009's single-writer rule). Justification
-in full: ADR-017. Short version: ADR-014 defers horizontal scaling (one
-Express instance), and TechStack.md's deployment target is Docker/
-Nginx/Postgres backups only — S3 buys nothing until a second instance
-exists, and this project runs no object-storage infra today. Revisit
-when ADR-014's own trigger (a second instance) fires.
+## Upload transport: base64 JSON, not multipart
+No `multer` (or any multipart parser) exists in this codebase yet, and
+`tenantApp.js` only registers `express.json()`. Adding a new dependency
+for one route is a bigger call than this slice needs — `documentService.uploadDocument`
+just needs a `Buffer`; a base64 string in the same JSON body every
+other route already uses gets there with zero new dependencies.
+`POST /documents` gets its own route-level `express.json({ limit: '15mb' })`
+(not a global bump) so this is the only endpoint whose body-size
+ceiling changed. Flagged as a deliberate v1 simplification, not a final
+call — a real multipart upload (streamed, no base64 33% overhead) is
+the natural thing to switch to once the UI slice needs to send a
+browser `File` directly, not guessed at here.
+Download goes the other way — real bytes, `Content-Type`/
+`Content-Disposition` headers, no base64 wrapping — since GET responses
+were never bound to the JSON-body convention upload was.
 
-## fee_payments.receipt_document_id FK: added this slice
-The Module 5 migration's own comment named this exact follow-up ("once
-Module 6 creates documents, must add ... FOREIGN KEY
-(receipt_document_id) REFERENCES documents(id)"). `documents` now
-exists (prior slice) — adding the FK is a small, contained, already-
-planned unblock, not scope creep. Done as its own tiny migration, nothing
-else touched in `fee_payments`.
+## docker-compose's missing DOCUMENT_STORAGE_ROOT volume (ADR-017)
+Deferred, not fixed. Tests run on the host (`npm test` outside any
+container), writing straight to `backend/storage/` on the host
+filesystem — the containerized `app` service (which does need a
+volume) is never exercised by this slice's verification. Still a real,
+flagged gap for whoever deploys via `docker compose up app` before a
+volume is added; not this slice's job to fix, since it isn't in this
+slice's blast radius at all.
 
-## Key design decisions
-- **doc_type gets no service-layer validation** — free TEXT, same
-  "don't normalize" treatment `fee_category` gets in `financeService.js`
-  (no validation there either). Unlike `status`, which DOES get
-  validated (see next point) because it has real known-value semantics
-  the service enforces, matching `fee_structures.status`'s precedent.
-- **status validated at the service layer only on review** —
-  `uploadDocument` never accepts a caller-supplied `status` at all (a
-  freshly uploaded document is always `'uploaded'`, the DB default,
-  full stop — no forged initial state, stricter than
-  `fee_structures.status`, which does accept a caller value at create).
-  A dedicated `reviewDocument` transitions to `'verified'`/`'rejected'`
-  only — those are the only two states anything ever transitions a
-  document *to* after upload.
-- **Core file fields are immutable post-upload** — `doc_type`,
-  `file_name`, `storage_path`, `mime_type`, `file_size_bytes`,
-  `student_id` are never touched by any service function after
-  `uploadDocument`. Re-uploading is a new row (versioning, per the
-  migration's own reasoning), not an edit of the old one. Only
-  `reviewDocument` (status/verifiedBy/verifiedAt/remarks) mutates an
-  existing row — narrower than `financeService.updateFeeStructure`'s
-  general-purpose whitelist, because nothing about an uploaded file's
-  identity should change in place.
-- **verifiedByUserId/verifiedAt are stamped by the service, never
-  caller-supplied** — same "the actor is who did it right now, not
-  caller-supplied free text" reasoning `financeService.markFeePayment`
-  already applies to `markedByUserId`.
-- **removeDocument (soft-delete) never touches storage** —
-  `deleted_at` is set, the on-disk file is left alone. Consistent with
-  the migration's own "retention" reasoning (Architecture.md 2.5):
-  soft-deleting the DB row shouldn't destroy the recoverable evidence.
-  A real hard-delete-with-file-removal path doesn't exist — the
-  repository has no hard-delete function at all (same shape Finance's
-  soft-delete-only tables already established).
-- **downloadDocument reads bytes back from disk** — Architecture.md
-  2.5 names "download" as one of DocumentService's owned
-  responsibilities; not just a metadata read, an actual
-  `fileStorage.readFile` round-trip.
+## RBAC
+Same placeholder every other route file in this codebase uses
+(`students.js`/`staff.js`/`finance.js`): `requireRole('principal')`
+gates every write (upload, review, delete), `requireAuth` gates every
+read (get, list, download). BusinessRules.md names no specific actor
+for document upload/verification — same "must be revisited once a real
+role model exists" caveat those other files already carry, restated
+here rather than invented differently.
+
+## Endpoints
+- `POST /documents` — upload (`student_id`, `doc_type`, `file_name`,
+  `mime_type`, `file_base64`)
+- `GET /documents/:id` — metadata
+- `GET /documents/:id/download` — real bytes, correct headers
+- `GET /documents?student_id=...` — list for a student (`student_id`
+  required, mirrors `finance.js`'s fee-payments list)
+- `POST /documents/:id/review` — `{ status, remarks }`
+- `DELETE /documents/:id` — soft-delete, 204
 
 ## Files affected
-- `docs/adr/ADR-017-Document-Storage-Backend.md` (new)
-- `backend/src/storage/fileStorage.js` (new)
-- `backend/src/config.js` (add `documentStorageRoot`)
-- `backend/src/services/documentService.js` (new)
-- `backend/tests/document-service.test.js` (new — mocked repository/
-  storage, no live DB, same technique as `finance-service.test.js`)
-- `backend/migrations/<ts>_fee-payments-receipt-document-fk.js` (new)
+- `backend/src/routes/documents.js` (new)
+- `backend/src/tenantApp.js` (register the router)
+- `backend/tests/documents.test.js` (new — HTTP-level, real DB + real
+  filesystem, same shape as `finance.test.js`)
 
 ## Verification
-- `documentService.js` unit tests (mocked `documentRepository`/
-  `auditLogRepository`/`fileStorage`) — validation, immutability of
-  post-upload fields, review-status enforcement, actor stamping.
-- `fileStorage.js` exercised against the real local filesystem (not
-  mocked in its own right) via a throwaway script: write, read back,
-  confirm bytes match, confirm tenant-prefixed path shape; deleted
-  after use.
-- Live DB: apply the new FK migration against the running
-  `docker-compose` Postgres, confirm `\d fee_payments` shows the new
-  constraint, confirm `down` reverses cleanly, re-apply `up`.
+- New route-level test file against the real dev server + live
+  Postgres + real `fileStorage` disk writes: upload round-trips through
+  to a real file on disk, download returns the exact original bytes
+  with the right headers, review/list/delete each exercised, tenant
+  isolation (cross-tenant 404s, not a leak), a `Content-Disposition`
+  header-injection attempt in `file_name` is neutralized.
 - Full `npm test` regression run.

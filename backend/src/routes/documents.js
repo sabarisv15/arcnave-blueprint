@@ -1,0 +1,177 @@
+'use strict';
+
+const express = require('express');
+const asyncHandler = require('../middleware/asyncHandler');
+const { requireAuth, requireRole } = require('../middleware/rbac');
+const documentService = require('../services/documentService');
+
+function requireResolvedTenant(req, res) {
+  if (req.collegeId === null) {
+    res.status(400).json({ detail: 'No tenant could be resolved for this request' });
+    return false;
+  }
+  return true;
+}
+
+// snake_case <-> camelCase translation lives here, not a shared util,
+// same reasoning every other routes/*.js file already gives.
+// college_id is deliberately absent: always req.collegeId, never the
+// request body. file_base64 is upload-only (see .ai/TASK.md — no
+// multipart parser exists yet; a base64 string in the same JSON body
+// every other route already uses needs no new dependency).
+const UPLOAD_BODY_FIELDS = [
+  ['student_id', 'studentId'],
+  ['doc_type', 'docType'],
+  ['file_name', 'fileName'],
+  ['mime_type', 'mimeType'],
+];
+
+const REVIEW_BODY_FIELDS = [
+  ['status', 'status'],
+  ['remarks', 'remarks'],
+];
+
+function bodyToFields(body, fieldMap) {
+  const fields = {};
+  for (const [snakeKey, camelKey] of fieldMap) {
+    if (body[snakeKey] !== undefined) {
+      fields[camelKey] = body[snakeKey];
+    }
+  }
+  return fields;
+}
+
+// Strips CR/LF and double-quotes before a value goes into a
+// Content-Disposition header — file_name is caller-supplied at upload
+// time, and an unsanitized value there is a header-injection vector
+// (OWASP CRLF injection / response splitting), not just a display
+// nicety.
+function safeHeaderFileName(fileName) {
+  return String(fileName).replace(/[\r\n"]/g, '');
+}
+
+function mapDocumentServiceError(err, res) {
+  if (err instanceof documentService.DocumentValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof documentService.DocumentReviewStatusError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof documentService.DocumentStudentNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  return false;
+}
+
+function createDocumentsRouter() {
+  const router = express.Router();
+
+  // RBAC is the same deliberately conservative placeholder
+  // students.js/staff.js/finance.js all use, not a final decision —
+  // BusinessRules.md names no specific actor for document upload/
+  // verification. requireRole('principal') gates every write;
+  // requireAuth gates every read. Revisit once a real role model names
+  // who may upload/verify a student's documents (most likely the class
+  // tutor, per BusinessRules.md's Staff section — not assumed here).
+
+  // A route-level body-size limit, not a global one: base64 adds ~33%
+  // overhead over raw bytes, and this is the only endpoint in the app
+  // that needs headroom above express.json()'s default 100kb.
+  router.post('/documents', requireRole('principal'), express.json({ limit: '15mb' }), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const { file_base64: fileBase64 } = req.body || {};
+    if (typeof fileBase64 !== 'string' || fileBase64.length === 0) {
+      res.status(400).json({ detail: 'file_base64 is required' });
+      return;
+    }
+
+    try {
+      const document = await documentService.uploadDocument(
+        req.dbClient,
+        { collegeId: req.collegeId, ...bodyToFields(req.body || {}, UPLOAD_BODY_FIELDS), fileBuffer: Buffer.from(fileBase64, 'base64') },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(document);
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.get('/documents/:id', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const document = await documentService.getDocument(req.dbClient, req.params.id);
+    if (document === null) {
+      res.status(404).json({ detail: `No document found with id ${JSON.stringify(req.params.id)}` });
+      return;
+    }
+    res.json(document);
+  }));
+
+  // Real bytes, not JSON — Architecture.md 2.5 names "download" as a
+  // DocumentService responsibility, and a caller asking to download a
+  // file wants the file, not a base64-wrapped envelope.
+  router.get('/documents/:id/download', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const result = await documentService.downloadDocument(req.dbClient, req.params.id);
+    if (result === null) {
+      res.status(404).json({ detail: `No document found with id ${JSON.stringify(req.params.id)}` });
+      return;
+    }
+    res.set('Content-Type', result.document.mime_type);
+    res.set('Content-Disposition', `attachment; filename="${safeHeaderFileName(result.document.file_name)}"`);
+    res.send(result.buffer);
+  }));
+
+  // student_id is required — the "list-by-student" endpoint this
+  // slice needs, not a general/unscoped list, same restraint
+  // finance.js's own GET /finance/fee-payments documents for the
+  // identical shape.
+  router.get('/documents', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const { student_id: studentId } = req.query;
+    if (!studentId) {
+      res.status(400).json({ detail: 'student_id query parameter is required' });
+      return;
+    }
+    const documents = await documentService.listDocumentsForStudent(req.dbClient, studentId);
+    res.json(documents);
+  }));
+
+  router.post('/documents/:id/review', requireRole('principal'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const document = await documentService.reviewDocument(
+        req.dbClient,
+        req.params.id,
+        bodyToFields(req.body || {}, REVIEW_BODY_FIELDS),
+        { actorUserId: req.jwtClaims.sub },
+      );
+      if (document === null) {
+        res.status(404).json({ detail: `No document found with id ${JSON.stringify(req.params.id)}` });
+        return;
+      }
+      res.json(document);
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.delete('/documents/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const document = await documentService.removeDocument(req.dbClient, req.params.id, { userId: req.jwtClaims.sub });
+    if (document === null) {
+      res.status(404).json({ detail: `No document found with id ${JSON.stringify(req.params.id)}` });
+      return;
+    }
+    res.status(204).end();
+  }));
+
+  return router;
+}
+
+module.exports = createDocumentsRouter;
