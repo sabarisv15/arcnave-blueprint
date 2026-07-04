@@ -150,6 +150,6 @@ notification delivery. Full suite: 430/430.
   needs to send a notification.
 
 ## Commits
-Schema + repositories · `workflowService.js` · FinanceService/
-StaffService wiring · NotificationService + staff-activation cascade
-(this slice).
+`9e6787d` schema+repositories · `2021eec` `workflowService.js` ·
+`45214b1` FinanceService/StaffService wiring · `de0f9a0`
+NotificationService + staff-activation cascade.

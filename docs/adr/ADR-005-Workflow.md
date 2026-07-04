@@ -20,7 +20,16 @@ question only needs to be answered once.
 ## Consequences
 - `WorkflowRepository` persists approval requests and history for
   both origins.
-- Open question, not yet resolved: whether approval authority needs
-  finer scoping than existing RBAC roles (e.g. a staff member should
-  not approve their own AI-drafted fee change) — to be settled during
-  Module 8 (Workflow & Notifications) implementation.
+- **Resolved (Module 8 implementation)**: approval authority does need
+  one finer scope than RBAC roles alone — an actor may never approve a
+  `workflow_requests` row whose `requested_by_user_id` is their own,
+  regardless of origin (`human` or `ai`) or of otherwise being the
+  resolved approver at the current step. Enforced in
+  `workflowService.approveRequest` as a real, structural check
+  (`WorkflowRequestSelfApprovalError`), not a UI-only convention.
+  Scoped to approval only — `rejectRequest` allows self-withdrawal,
+  since ending your own pending request early isn't a gate bypass.
+  Verified live against both routed callers (Staff registration's
+  Faculty→HOD→Principal chain, Finance's fee-structure approval): the
+  resolved Principal cannot approve their own submission; a genuinely
+  different Principal can. Commit `2021eec`.
