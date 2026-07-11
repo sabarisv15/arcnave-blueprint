@@ -63,12 +63,36 @@ function createAuthRouter() {
     res.status(204).end();
   }));
 
+  // Always 204, enumeration-safe — same reasoning login's single
+  // generic AuthError uses: whether or not `email` matches a real,
+  // active account, the caller sees the identical response either way.
+  // authService.requestPasswordReset itself is what actually decides
+  // whether to mint a token + send an email at all.
   router.post('/auth/password-reset', asyncHandler(async (req, res) => {
+    if (req.collegeId === null) {
+      res.status(400).json({ detail: 'No tenant could be resolved for this request' });
+      return;
+    }
     const { email } = req.body || {};
+    await authService.requestPasswordReset(req.dbClient, { collegeId: req.collegeId, email });
+    res.status(204).end();
+  }));
+
+  router.post('/auth/password-reset/confirm', asyncHandler(async (req, res) => {
+    const { token, new_password: newPassword } = req.body || {};
     try {
-      authService.requestPasswordReset(email);
-    } catch {
-      res.status(501).json({ detail: 'Password reset is not implemented yet' });
+      await authService.resetPassword(req.dbClient, { token, newPassword });
+      res.status(204).end();
+    } catch (err) {
+      if (err instanceof authService.PasswordResetValidationError) {
+        res.status(400).json({ detail: err.message });
+        return;
+      }
+      if (err instanceof authService.PasswordResetTokenError) {
+        res.status(401).json({ detail: err.message });
+        return;
+      }
+      throw err;
     }
   }));
 

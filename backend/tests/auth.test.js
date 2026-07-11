@@ -107,6 +107,9 @@ async function seedTenantWithUser(adminPool) {
 
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
+  // password_reset_tokens also FKs to users(id) — must go before the
+  // users delete below, same reasoning refresh_tokens already needed.
+  await adminPool.query('DELETE FROM password_reset_tokens WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM colleges WHERE college_id = $1', [college.collegeId]);
 }
@@ -226,9 +229,60 @@ test('auth', async (t) => {
     assert.equal(resp.status, 204);
   });
 
-  await t.test('password reset returns 501', async () => {
+  // Module 8: the real reset-token flow replacing the old 501 stub.
+  // Enumeration-safe (unknown email and real email both 204) and
+  // requires a resolved tenant, same as login.
+  await t.test('password reset request requires a resolved tenant', async () => {
     const resp = await post(baseUrl, '/api/v1/auth/password-reset', {}, { email: 'someone@example.com' });
-    assert.equal(resp.status, 501);
+    assert.equal(resp.status, 400);
+  });
+
+  await t.test('password reset request 204s for an unknown email — enumeration-safe', async () => {
+    const resp = await post(baseUrl, '/api/v1/auth/password-reset', tenantHeaders, { email: 'nobody@example.com' });
+    assert.equal(resp.status, 204);
+  });
+
+  await t.test('password reset end to end: request emails a token (never returned in the response), confirm changes the password, the token cannot be reused, and the old password stops working', async () => {
+    const notificationService = require('../src/services/notificationService');
+    let capturedToken = null;
+    const emailMock = t.mock.method(notificationService, 'sendPasswordResetEmail', async (client, { to, token }) => {
+      capturedToken = token;
+      return { status: 'stubbed', to };
+    });
+    t.after(() => emailMock.mock.restore());
+
+    const requestResp = await post(baseUrl, '/api/v1/auth/password-reset', tenantHeaders, { email: 'authuser@example.com' });
+    assert.equal(requestResp.status, 204);
+    assert.equal(requestResp.body, null);
+    assert.ok(capturedToken, 'expected sendPasswordResetEmail to have been called with a real token');
+
+    const confirmResp = await post(baseUrl, '/api/v1/auth/password-reset/confirm', tenantHeaders, {
+      token: capturedToken, new_password: 'a-brand-new-password-456',
+    });
+    assert.equal(confirmResp.status, 204);
+
+    const oldPasswordLogin = await login(VALID_PASSWORD);
+    assert.equal(oldPasswordLogin.status, 401);
+
+    const newPasswordLogin = await login('a-brand-new-password-456');
+    assert.equal(newPasswordLogin.status, 200);
+
+    const reuseResp = await post(baseUrl, '/api/v1/auth/password-reset/confirm', tenantHeaders, {
+      token: capturedToken, new_password: 'yet-another-password-789',
+    });
+    assert.equal(reuseResp.status, 401);
+  });
+
+  await t.test('password reset confirm rejects an unknown token and a missing new_password', async () => {
+    const unknown = await post(baseUrl, '/api/v1/auth/password-reset/confirm', tenantHeaders, {
+      token: 'not-a-real-token', new_password: 'some-password-123',
+    });
+    assert.equal(unknown.status, 401);
+
+    const missing = await post(baseUrl, '/api/v1/auth/password-reset/confirm', tenantHeaders, {
+      token: 'not-a-real-token',
+    });
+    assert.equal(missing.status, 400);
   });
 
   // --- Tenant Middleware's JWT-claim resolution — couldn't exist

@@ -10,6 +10,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const authRepository = require('../src/repositories/authRepository');
+const notificationService = require('../src/services/notificationService');
 const security = require('../src/security');
 const authService = require('../src/services/authService');
 
@@ -62,5 +63,137 @@ test('AuthService.activateUser (no DB)', async (t) => {
     const second = await authService.activateUser({}, 'user-1', { activatedBy: 'principal-1' });
 
     assert.notEqual(first.plainPassword, second.plainPassword);
+  });
+});
+
+// This session's own task: password reset must go out through the
+// existing notification flow, never in an API response, and must be
+// enumeration-safe (an unknown email and a real one look identical to
+// the caller).
+test('AuthService.requestPasswordReset / resetPassword (no DB)', async (t) => {
+  await t.test('requestPasswordReset does nothing for an unknown email — no token created, no email sent', async () => {
+    const lookupMock = t.mock.method(authRepository, 'getUserByEmail', async () => null);
+    const createTokenMock = t.mock.method(authRepository, 'createPasswordResetToken', async () => {});
+    const emailMock = t.mock.method(notificationService, 'sendPasswordResetEmail', async () => ({ status: 'stubbed' }));
+    t.after(() => {
+      lookupMock.mock.restore();
+      createTokenMock.mock.restore();
+      emailMock.mock.restore();
+    });
+
+    await authService.requestPasswordReset({}, { collegeId: 'c1', email: 'nobody@example.com' });
+
+    assert.equal(createTokenMock.mock.callCount(), 0);
+    assert.equal(emailMock.mock.callCount(), 0);
+  });
+
+  await t.test('requestPasswordReset does nothing for an inactive account — same as unknown', async () => {
+    const lookupMock = t.mock.method(authRepository, 'getUserByEmail', async () => ({
+      id: 'user-1', email: 'pending@example.com', is_active: false,
+    }));
+    const createTokenMock = t.mock.method(authRepository, 'createPasswordResetToken', async () => {});
+    const emailMock = t.mock.method(notificationService, 'sendPasswordResetEmail', async () => ({ status: 'stubbed' }));
+    t.after(() => {
+      lookupMock.mock.restore();
+      createTokenMock.mock.restore();
+      emailMock.mock.restore();
+    });
+
+    await authService.requestPasswordReset({}, { collegeId: 'c1', email: 'pending@example.com' });
+
+    assert.equal(createTokenMock.mock.callCount(), 0);
+    assert.equal(emailMock.mock.callCount(), 0);
+  });
+
+  await t.test('requestPasswordReset for a real, active account creates a hashed token and emails it — never the raw token', async () => {
+    const lookupMock = t.mock.method(authRepository, 'getUserByEmail', async () => ({
+      id: 'user-1', email: 'jdoe@college.edu', is_active: true,
+    }));
+    const createTokenMock = t.mock.method(authRepository, 'createPasswordResetToken', async () => {});
+    const emailMock = t.mock.method(notificationService, 'sendPasswordResetEmail', async () => ({ status: 'stubbed' }));
+    t.after(() => {
+      lookupMock.mock.restore();
+      createTokenMock.mock.restore();
+      emailMock.mock.restore();
+    });
+
+    await authService.requestPasswordReset({}, { collegeId: 'c1', email: 'jdoe@college.edu' });
+
+    assert.equal(createTokenMock.mock.callCount(), 1);
+    const stored = createTokenMock.mock.calls[0].arguments[1];
+    assert.equal(stored.userId, 'user-1');
+    assert.equal(stored.collegeId, 'c1');
+
+    assert.equal(emailMock.mock.callCount(), 1);
+    const emailArgs = emailMock.mock.calls[0].arguments[1];
+    assert.equal(emailArgs.to, 'jdoe@college.edu');
+    // The token stored (hashed) must never equal the raw token emailed
+    // — same discipline refresh tokens already follow.
+    assert.notEqual(stored.tokenHash, emailArgs.token);
+    assert.equal(stored.tokenHash, security.hashRefreshToken(emailArgs.token));
+  });
+
+  await t.test('resetPassword rejects a missing newPassword before touching the DB', async () => {
+    const lookupMock = t.mock.method(authRepository, 'getPasswordResetTokenByHash');
+    t.after(() => lookupMock.mock.restore());
+
+    await assert.rejects(
+      () => authService.resetPassword({}, { token: 'sometoken', newPassword: undefined }),
+      authService.PasswordResetValidationError,
+    );
+    assert.equal(lookupMock.mock.callCount(), 0);
+  });
+
+  await t.test('resetPassword rejects an unknown token', async () => {
+    const lookupMock = t.mock.method(authRepository, 'getPasswordResetTokenByHash', async () => null);
+    t.after(() => lookupMock.mock.restore());
+
+    await assert.rejects(
+      () => authService.resetPassword({}, { token: 'unknown', newPassword: 'new-password-123' }),
+      authService.PasswordResetTokenError,
+    );
+  });
+
+  await t.test('resetPassword rejects an already-used token', async () => {
+    const lookupMock = t.mock.method(authRepository, 'getPasswordResetTokenByHash', async () => ({
+      id: 'prt-1', user_id: 'user-1', used_at: new Date(), expires_at: new Date(Date.now() + 3600_000),
+    }));
+    t.after(() => lookupMock.mock.restore());
+
+    await assert.rejects(
+      () => authService.resetPassword({}, { token: 'used-token', newPassword: 'new-password-123' }),
+      authService.PasswordResetTokenError,
+    );
+  });
+
+  await t.test('resetPassword rejects an expired token', async () => {
+    const lookupMock = t.mock.method(authRepository, 'getPasswordResetTokenByHash', async () => ({
+      id: 'prt-1', user_id: 'user-1', used_at: null, expires_at: new Date(Date.now() - 1000),
+    }));
+    t.after(() => lookupMock.mock.restore());
+
+    await assert.rejects(
+      () => authService.resetPassword({}, { token: 'expired-token', newPassword: 'new-password-123' }),
+      authService.PasswordResetTokenError,
+    );
+  });
+
+  await t.test('resetPassword on a valid token updates the password hash and marks the token used', async () => {
+    const lookupMock = t.mock.method(authRepository, 'getPasswordResetTokenByHash', async () => ({
+      id: 'prt-1', user_id: 'user-1', used_at: null, expires_at: new Date(Date.now() + 3600_000),
+    }));
+    const updateMock = t.mock.method(authRepository, 'updatePasswordHash', async () => {});
+    const markUsedMock = t.mock.method(authRepository, 'markPasswordResetTokenUsed', async () => {});
+    t.after(() => {
+      lookupMock.mock.restore();
+      updateMock.mock.restore();
+      markUsedMock.mock.restore();
+    });
+
+    await authService.resetPassword({}, { token: 'valid-token', newPassword: 'new-password-123' });
+
+    assert.equal(updateMock.mock.calls[0].arguments[1], 'user-1');
+    assert.ok(await security.verifyPassword('new-password-123', updateMock.mock.calls[0].arguments[2]));
+    assert.equal(markUsedMock.mock.calls[0].arguments[1], 'prt-1');
   });
 });

@@ -23,9 +23,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const notificationService = require('../src/services/notificationService');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PLATFORM_PASSWORD = 'PlatformPass123!';
@@ -152,13 +155,27 @@ test('principal invitation', async (t) => {
     return resp.body.access_token;
   }
 
+  // This session's own task: an invitation token is delivered only via
+  // email (sendPrincipalInvitationEmail), never in the API response —
+  // mocked for the whole suite so every call below can still recover
+  // the raw token it needs to drive /invitations/accept, the same way
+  // a real recipient would read it out of their inbox.
+  let lastInvitationToken = null;
+  const emailMock = t.mock.method(notificationService, 'sendPrincipalInvitationEmail', async (client, { to, token }) => {
+    lastInvitationToken = token;
+    return { status: 'stubbed', to };
+  });
+  t.after(() => emailMock.mock.restore());
+
   async function invite(token, collegeId, email) {
-    return post(
+    lastInvitationToken = null;
+    const resp = await post(
       baseUrl,
       `/api/v1/platform/colleges/${collegeId}/invite-principal`,
       { authorization: `Bearer ${token}` },
       { email },
     );
+    return { ...resp, rawToken: lastInvitationToken };
   }
 
   function accept(rawToken, username, password = ACCEPT_PASSWORD) {
@@ -172,13 +189,14 @@ test('principal invitation', async (t) => {
     assert.equal(resp.status, 401);
   });
 
-  await t.test('invite-principal succeeds', async () => {
+  await t.test('invite-principal succeeds, emails the token, and never returns it', async () => {
     const token = await platformToken();
     const resp = await invite(token, collegeA, 'principal@example.com');
     assert.equal(resp.status, 200);
     assert.equal(resp.body.college_id, collegeA);
     assert.equal(resp.body.email, 'principal@example.com');
-    assert.ok(resp.body.token);
+    assert.equal('token' in resp.body, false);
+    assert.ok(resp.rawToken, 'expected sendPrincipalInvitationEmail to have been called with a real token');
   });
 
   await t.test('invite-principal rejects an unknown college', async () => {
@@ -192,7 +210,7 @@ test('principal invitation', async (t) => {
   await t.test('accept creates a correctly tenant-scoped user', async () => {
     const token = await platformToken();
     const inviteResp = await invite(token, collegeA, 'principal@example.com');
-    const rawToken = inviteResp.body.token;
+    const rawToken = inviteResp.rawToken;
 
     const username = `accepted${crypto.randomUUID().slice(0, 8)}`;
     const resp = await accept(rawToken, username);
@@ -236,9 +254,17 @@ test('principal invitation', async (t) => {
   });
 
   await t.test('reuse of an already-accepted token is rejected and logged, same message as expired', async () => {
+    // A fresh college, not collegeA — collegeA already has an active
+    // principal from the 'accept creates a correctly tenant-scoped
+    // user' test above, and this session's own task (at most one
+    // active Principal per college) now enforces that for real; a
+    // second successful accept against collegeA would 409 for an
+    // unrelated reason before this test ever reaches what it's
+    // actually testing (reuse rejection).
+    const collegeC = await seedCollege('c');
     const token = await platformToken();
-    const inviteResp = await invite(token, collegeA, 'principal@example.com');
-    const rawToken = inviteResp.body.token;
+    const inviteResp = await invite(token, collegeC, 'principal@example.com');
+    const rawToken = inviteResp.rawToken;
     const username = `accepted${crypto.randomUUID().slice(0, 8)}`;
 
     const first = await accept(rawToken, username);
@@ -270,16 +296,105 @@ test('principal invitation', async (t) => {
   });
 
   await t.test('a duplicate username within the same tenant is rejected with 409', async () => {
-    const token = await platformToken();
+    // A pre-seeded non-principal user with the target username,
+    // inserted directly (bypassing invite/accept) — isolates the
+    // username conflict from this session's own new "one active
+    // Principal per college" constraint, which a SECOND real accept
+    // into the same college would also trip regardless of username
+    // (every accept always creates role: 'principal').
+    const collegeD = await seedCollege('d');
     const username = `dupuser${crypto.randomUUID().slice(0, 8)}`;
+    await adminPool.query(
+      `INSERT INTO users (college_id, username, email, password_hash, role, is_active)
+       VALUES ($1, $2, $3, $4, 'staff', true)`,
+      [collegeD, username, `${username}@example.com`, await security.hashPassword(ACCEPT_PASSWORD)],
+    );
 
-    const invite1 = await invite(token, collegeA, 'first@example.com');
-    const accept1 = await accept(invite1.body.token, username);
-    assert.equal(accept1.status, 201);
+    const token = await platformToken();
+    const invite1 = await invite(token, collegeD, 'first@example.com');
+    const accept1 = await accept(invite1.rawToken, username);
+    assert.equal(accept1.status, 409);
+  });
 
-    const invite2 = await invite(token, collegeA, 'second@example.com');
-    const accept2 = await accept(invite2.body.token, username);
-    assert.equal(accept2.status, 409);
+  // --- Resend / revoke (this session's own task) ---
+
+  await t.test('resend rotates the token, emails the new one, and never returns it; the old token stops working', async () => {
+    // A fresh college — see the 'reuse' test above for why: this test
+    // completes a real accept, and collegeA's one active-principal
+    // slot is already taken.
+    const collegeE = await seedCollege('e');
+    const token = await platformToken();
+    const inviteResp = await invite(token, collegeE, 'resend@example.com');
+    const oldToken = inviteResp.rawToken;
+
+    lastInvitationToken = null;
+    const resendResp = await post(
+      baseUrl,
+      `/api/v1/platform/invitations/${inviteResp.body.invitation_id}/resend`,
+      { authorization: `Bearer ${token}` },
+    );
+    assert.equal(resendResp.status, 200);
+    assert.equal('token' in resendResp.body, false);
+    const newToken = lastInvitationToken;
+    assert.ok(newToken);
+    assert.notEqual(newToken, oldToken);
+
+    const oldAccept = await accept(oldToken, `shouldnotwork${crypto.randomUUID().slice(0, 8)}`);
+    assert.equal(oldAccept.status, 401);
+
+    const newAccept = await accept(newToken, `resendaccepted${crypto.randomUUID().slice(0, 8)}`);
+    assert.equal(newAccept.status, 201);
+  });
+
+  await t.test('resend on an already-accepted invitation is a real 409', async () => {
+    const collegeF = await seedCollege('f');
+    const token = await platformToken();
+    const inviteResp = await invite(token, collegeF, 'resend2@example.com');
+    const accepted = await accept(inviteResp.rawToken, `resend2accepted${crypto.randomUUID().slice(0, 8)}`);
+    assert.equal(accepted.status, 201);
+
+    const resendResp = await post(
+      baseUrl,
+      `/api/v1/platform/invitations/${inviteResp.body.invitation_id}/resend`,
+      { authorization: `Bearer ${token}` },
+    );
+    assert.equal(resendResp.status, 409);
+  });
+
+  await t.test('revoke invalidates the invitation; accepting a revoked token is rejected with the same generic message', async () => {
+    const token = await platformToken();
+    const inviteResp = await invite(token, collegeA, 'revoke@example.com');
+
+    const revokeResp = await post(
+      baseUrl,
+      `/api/v1/platform/invitations/${inviteResp.body.invitation_id}/revoke`,
+      { authorization: `Bearer ${token}` },
+    );
+    assert.equal(revokeResp.status, 200);
+    assert.ok(revokeResp.body.revoked_at);
+
+    const acceptResp = await accept(inviteResp.rawToken, `revokeattempt${crypto.randomUUID().slice(0, 8)}`);
+    assert.equal(acceptResp.status, 401);
+    assert.equal(acceptResp.body.detail, 'Invalid or expired invitation');
+  });
+
+  await t.test('revoke and resend both 404 for an unknown invitation id', async () => {
+    const token = await platformToken();
+    const missingId = crypto.randomUUID();
+
+    const revokeResp = await post(
+      baseUrl,
+      `/api/v1/platform/invitations/${missingId}/revoke`,
+      { authorization: `Bearer ${token}` },
+    );
+    assert.equal(revokeResp.status, 404);
+
+    const resendResp = await post(
+      baseUrl,
+      `/api/v1/platform/invitations/${missingId}/resend`,
+      { authorization: `Bearer ${token}` },
+    );
+    assert.equal(resendResp.status, 404);
   });
 
   // --- Cross-tenant isolation ---
@@ -287,28 +402,46 @@ test('principal invitation', async (t) => {
   await t.test(
     'one college\'s invitation can never create a user under a different college_id',
     async () => {
+      // Fresh colleges, not collegeA/collegeB — both already-used
+      // colleges elsewhere in this file may already have their one
+      // active principal; this test only needs two colleges that have
+      // never had a successful accept yet, not specifically A/B.
+      const collegeG = await seedCollege('g');
+      const collegeH = await seedCollege('h');
       const token = await platformToken();
-      const inviteA = await invite(token, collegeA, 'principal-a@example.com');
-      const inviteB = await invite(token, collegeB, 'principal-b@example.com');
+      const inviteA = await invite(token, collegeG, 'principal-a@example.com');
+      const inviteB = await invite(token, collegeH, 'principal-b@example.com');
 
       const sharedUsername = `sharedprincipal${crypto.randomUUID().slice(0, 8)}`;
 
-      const respA = await accept(inviteA.body.token, sharedUsername);
-      const respB = await accept(inviteB.body.token, sharedUsername);
+      const respA = await accept(inviteA.rawToken, sharedUsername);
+      const respB = await accept(inviteB.rawToken, sharedUsername);
       assert.equal(respA.status, 201);
       assert.equal(respB.status, 201);
-      assert.equal(respA.body.college_id, collegeA);
-      assert.equal(respB.body.college_id, collegeB);
+      assert.equal(respA.body.college_id, collegeG);
+      assert.equal(respB.body.college_id, collegeH);
 
       // RLS-scoped proof each row landed under its own college, not
       // the other one.
-      const rowUnderA = await userVisibleUnderTenant(collegeA, sharedUsername);
+      const rowUnderA = await userVisibleUnderTenant(collegeG, sharedUsername);
       assert.ok(rowUnderA);
-      assert.equal(rowUnderA.college_id, collegeA);
+      assert.equal(rowUnderA.college_id, collegeG);
 
-      const rowUnderB = await userVisibleUnderTenant(collegeB, sharedUsername);
+      const rowUnderB = await userVisibleUnderTenant(collegeH, sharedUsername);
       assert.ok(rowUnderB);
-      assert.equal(rowUnderB.college_id, collegeB);
+      assert.equal(rowUnderB.college_id, collegeH);
     },
   );
+});
+
+// CLAUDE.md rule 1 ("every route calls a Business Service, never a
+// repository") for POST /invitations/accept specifically: this file's
+// own HTTP tests above prove the route still behaves correctly after
+// the authService.lookupPendingInvitation/acceptInvitation refactor,
+// but not that the bypass itself is actually gone — a source check on
+// the route file itself is the one thing that proves it.
+test('routes/invitations.js calls authService only, no repository imports', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/routes/invitations.js'), 'utf8');
+  assert.doesNotMatch(source, /require\(['"]\.\.\/repositories\//);
+  assert.match(source, /require\(['"]\.\.\/services\/authService['"]\)/);
 });

@@ -40,6 +40,23 @@ async function getUserById(client, userId) {
   return result.rows[0] || null;
 }
 
+// requestPasswordReset's own lookup: a user identifies themselves by
+// email, not username (there is no login-time equivalent — login
+// always takes a username). email has no UNIQUE constraint on this
+// table, unlike (college_id, username), so this can in principle match
+// more than one row; ORDER BY id keeps the result deterministic rather
+// than whatever order Postgres happens to return, same defensive
+// instinct as staffRepository's own tie-break comment.
+async function getUserByEmail(client, collegeId, email) {
+  const result = await client.query(
+    `SELECT id, college_id, username, email, role, is_active
+     FROM users WHERE college_id = $1 AND email = $2
+     ORDER BY id LIMIT 1`,
+    [collegeId, email],
+  );
+  return result.rows[0] || null;
+}
+
 async function updatePasswordHash(client, userId, passwordHash) {
   await client.query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
 }
@@ -81,13 +98,41 @@ async function revokeRefreshToken(client, tokenId) {
   await client.query('UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1', [tokenId]);
 }
 
+// password_reset_tokens — same shape/reasoning as refresh_tokens
+// above, just for the reset flow (see authService.requestPasswordReset/
+// resetPassword).
+async function createPasswordResetToken(client, { collegeId, userId, tokenHash, expiresAt }) {
+  await client.query(
+    `INSERT INTO password_reset_tokens (college_id, user_id, token_hash, expires_at)
+     VALUES ($1, $2, $3, $4)`,
+    [collegeId, userId, tokenHash, expiresAt],
+  );
+}
+
+async function getPasswordResetTokenByHash(client, tokenHash) {
+  const result = await client.query(
+    `SELECT id, college_id, user_id, token_hash, issued_at, expires_at, used_at
+     FROM password_reset_tokens WHERE token_hash = $1`,
+    [tokenHash],
+  );
+  return result.rows[0] || null;
+}
+
+async function markPasswordResetTokenUsed(client, tokenId) {
+  await client.query('UPDATE password_reset_tokens SET used_at = now() WHERE id = $1', [tokenId]);
+}
+
 module.exports = {
   createUser,
   getUserByUsername,
   getUserById,
+  getUserByEmail,
   updatePasswordHash,
   activateUser,
   createRefreshToken,
   getRefreshTokenByHash,
   revokeRefreshToken,
+  createPasswordResetToken,
+  getPasswordResetTokenByHash,
+  markPasswordResetTokenUsed,
 };

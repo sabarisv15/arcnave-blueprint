@@ -15,6 +15,8 @@
 const config = require('../config');
 const security = require('../security');
 const authRepository = require('../repositories/authRepository');
+const principalInvitationRepository = require('../repositories/principalInvitationRepository');
+const notificationService = require('./notificationService');
 const { logWarn } = require('../logging/logger');
 
 // Generic authentication failure. Deliberately not more specific than
@@ -37,6 +39,30 @@ class RefreshTokenReuseError extends Error {}
 // service makes no assumption about future callers, same "required
 // lookup" precedent every other *NotFoundError in this codebase sets.
 class UserNotFoundError extends Error {}
+
+// resetPassword given no newPassword — the one thing this action
+// cannot proceed without. Raised before any repository call, same as
+// every other pre-query guard in this codebase.
+class PasswordResetValidationError extends Error {}
+
+// resetPassword given a token with no matching, unused, unexpired
+// password_reset_tokens row. One generic message for all three cases
+// (unknown/expired/already-used) — same don't-let-the-error-message-
+// be-an-oracle reasoning as AuthError and /invitations/accept's own
+// generic 401.
+class PasswordResetTokenError extends Error {}
+
+// lookupPendingInvitation given a token with no matching, unrevoked,
+// unaccepted, unexpired principal_invitations row. One generic message
+// for every case (unknown/revoked/already-accepted/expired) — same
+// don't-let-the-error-message-be-an-oracle reasoning as AuthError/
+// PasswordResetTokenError above; routes/invitations.js's own prior
+// inline comments already established this, moved here unchanged.
+class InvitationInvalidError extends Error {}
+
+// acceptInvitation's createUser hit UNIQUE (college_id, username) —
+// this username is already taken in the invitation's own college.
+class InvitationUsernameConflictError extends Error {}
 
 async function issueTokenPair(client, { collegeId, userId, role }) {
   const accessToken = security.createAccessToken({ userId, collegeId, role });
@@ -114,15 +140,56 @@ async function revoke(client, rawRefreshToken) {
   }
 }
 
-// Stub — Roadmap.md lists password reset in Module 0 scope, but it
-// needs a reset-token flow that doesn't exist yet. notificationService
-// exists now (Module 8), but only for its one built use (staff
-// activation) — reusing it here without a real reset-token mechanism
-// would just email a password nobody asked to change. Throwing here is
-// the whole implementation; the route layer turns this into 501.
-// eslint-disable-next-line no-unused-vars
-function requestPasswordReset(email) {
-  throw new Error('Password reset is not implemented in Module 0');
+// Module 8: the reset-token flow the old Module 0 stub was waiting on.
+// Enumeration-safe like login: whether or not a matching, active
+// account exists for this email, the caller sees the same outcome (the
+// route always 204s) — this function simply returns without emailing
+// anything for an unknown email or an inactive account (nothing
+// meaningful to reset — see authService.activateUser: an account with
+// no real password yet isn't a legitimate reset target). Only a real
+// match gets a token + email. collegeId is required, same as login:
+// the caller must already have a resolved tenant (routes/auth.js runs
+// this after tenantMiddleware, same as login).
+async function requestPasswordReset(client, { collegeId, email }) {
+  const user = await authRepository.getUserByEmail(client, collegeId, email);
+  if (!user || !user.is_active) {
+    return;
+  }
+
+  const rawToken = security.generateRefreshToken();
+  const expiresAt = new Date(Date.now() + config.passwordResetTokenExpireHours * 60 * 60 * 1000);
+  await authRepository.createPasswordResetToken(client, {
+    collegeId,
+    userId: user.id,
+    tokenHash: security.hashRefreshToken(rawToken),
+    expiresAt,
+  });
+
+  // The raw token is only ever handed to the user via this email —
+  // never returned in an API response (this session's own task
+  // instruction, same rule invitation tokens now follow — see
+  // platformService.invitePrincipal).
+  await notificationService.sendPasswordResetEmail(client, { to: user.email, token: rawToken });
+}
+
+// Consumes a reset token minted by requestPasswordReset above. Expired
+// and already-used tokens are both rejected with the same generic
+// PasswordResetTokenError — same pattern routes/invitations.js's
+// accept flow already uses for its own one-time token.
+async function resetPassword(client, { token, newPassword }) {
+  if (!newPassword) {
+    throw new PasswordResetValidationError('newPassword is required');
+  }
+
+  const tokenHash = security.hashRefreshToken(token || '');
+  const stored = await authRepository.getPasswordResetTokenByHash(client, tokenHash);
+
+  if (!stored || stored.used_at !== null || stored.expires_at.getTime() <= Date.now()) {
+    throw new PasswordResetTokenError('Invalid or expired password reset token');
+  }
+
+  await authRepository.updatePasswordHash(client, stored.user_id, await security.hashPassword(newPassword));
+  await authRepository.markPasswordResetTokenUsed(client, stored.id);
 }
 
 // Module 8: the "login is enabled only once credentials exist" moment
@@ -144,13 +211,87 @@ async function activateUser(client, userId, { activatedBy }) {
   return { user, plainPassword };
 }
 
+// The pre-transaction half of accepting an invitation: resolves and
+// validates the token BEFORE the caller knows which college_id to
+// scope a real transaction to (routes/invitations.js's own module
+// comment explains why that ordering is unavoidable here — this is
+// the one route that can't rely on tenantMiddleware's normal
+// resolution). client is a plain, un-scoped connection (a short-lived
+// appPool.connect(), same as before) — principal_invitations has no
+// RLS, so no tenant context is needed for this lookup at all.
+async function lookupPendingInvitation(client, token) {
+  const tokenHash = security.hashRefreshToken(token || '');
+  const invitation = await principalInvitationRepository.getInvitationByTokenHash(client, tokenHash);
+
+  if (invitation === null) {
+    throw new InvitationInvalidError('invitation token does not exist');
+  }
+  if (invitation.revoked_at !== null) {
+    throw new InvitationInvalidError(`invitation ${JSON.stringify(invitation.id)} was revoked`);
+  }
+  if (invitation.accepted_at !== null) {
+    // Presenting an already-used one-time credential again is a
+    // possible-theft signal, not a routine rejection — same asymmetry
+    // refresh()'s own RefreshTokenReuseError has against a merely
+    // expired-but-never-accepted token (which logs nothing).
+    logWarn('principal_invitation_reuse_detected', {
+      collegeId: invitation.college_id,
+      invitationId: invitation.id,
+      originallyAcceptedAt: invitation.accepted_at,
+    });
+    throw new InvitationInvalidError(`invitation ${JSON.stringify(invitation.id)} was already accepted`);
+  }
+  if (invitation.expires_at.getTime() <= Date.now()) {
+    throw new InvitationInvalidError(`invitation ${JSON.stringify(invitation.id)} has expired`);
+  }
+
+  return invitation;
+}
+
+// The post-transaction half: client here IS the tenant-scoped
+// transaction routes/invitations.js opens (via openTenantTransaction)
+// against invitation.college_id once lookupPendingInvitation has
+// already proven the token authentic. Every invitation accepted this
+// way creates a 'principal' account — the only role this route has
+// ever granted (see the migration's own file-level comment on
+// principal_invitations' purpose).
+async function acceptInvitation(client, invitation, { username, password }) {
+  let user;
+  try {
+    user = await authRepository.createUser(client, {
+      collegeId: invitation.college_id,
+      username,
+      email: invitation.email,
+      passwordHash: await security.hashPassword(password),
+      role: 'principal',
+      isActive: true,
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      throw new InvitationUsernameConflictError(`Username ${JSON.stringify(username)} is already taken`);
+    }
+    throw err;
+  }
+
+  await principalInvitationRepository.markInvitationAccepted(client, invitation.id);
+
+  return user;
+}
+
 module.exports = {
   AuthError,
   RefreshTokenReuseError,
   UserNotFoundError,
+  PasswordResetValidationError,
+  PasswordResetTokenError,
+  InvitationInvalidError,
+  InvitationUsernameConflictError,
   login,
   refresh,
   revoke,
   requestPasswordReset,
+  resetPassword,
   activateUser,
+  lookupPendingInvitation,
+  acceptInvitation,
 };

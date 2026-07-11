@@ -31,9 +31,18 @@ async function createInvitation(pool, { collegeId, email, tokenHash, createdBy, 
 
 async function getInvitationByTokenHash(client, tokenHash) {
   const result = await client.query(
-    `SELECT id, college_id, email, expires_at, accepted_at
+    `SELECT id, college_id, email, expires_at, accepted_at, revoked_at
      FROM principal_invitations WHERE token_hash = $1`,
     [tokenHash],
+  );
+  return result.rows[0] || null;
+}
+
+async function getInvitationById(pool, invitationId) {
+  const result = await pool.query(
+    `SELECT id, college_id, email, expires_at, accepted_at, revoked_at, created_at
+     FROM principal_invitations WHERE id = $1`,
+    [invitationId],
   );
   return result.rows[0] || null;
 }
@@ -42,4 +51,43 @@ async function markInvitationAccepted(client, invitationId) {
   await client.query('UPDATE principal_invitations SET accepted_at = now() WHERE id = $1', [invitationId]);
 }
 
-module.exports = { createInvitation, getInvitationByTokenHash, markInvitationAccepted };
+// Rotates token_hash/expires_at on an existing, still-pending
+// (never accepted, never revoked) invitation — resend reuses the SAME
+// row rather than creating a second one, so there is never more than
+// one live invitation per original invite action. The WHERE guard is
+// the real backstop (same "let the DB be the actual backstop"
+// discipline as everywhere else in this codebase): a concurrent
+// accept/revoke racing this call means zero rows come back, not a
+// silently-wrong token issued for an invitation that's no longer
+// resendable.
+async function resendInvitation(pool, invitationId, { tokenHash, expiresAt }) {
+  const result = await pool.query(
+    `UPDATE principal_invitations SET token_hash = $2, expires_at = $3
+     WHERE id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+     RETURNING id, college_id, email, expires_at, created_at`,
+    [invitationId, tokenHash, expiresAt],
+  );
+  return result.rows[0] || null;
+}
+
+// Same WHERE-guard reasoning as resendInvitation: an already-accepted
+// or already-revoked invitation is simply not touched (null returned),
+// never silently re-revoked or revoked-after-accepted.
+async function revokeInvitation(pool, invitationId) {
+  const result = await pool.query(
+    `UPDATE principal_invitations SET revoked_at = now()
+     WHERE id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+     RETURNING id, college_id, email, revoked_at`,
+    [invitationId],
+  );
+  return result.rows[0] || null;
+}
+
+module.exports = {
+  createInvitation,
+  getInvitationByTokenHash,
+  getInvitationById,
+  markInvitationAccepted,
+  resendInvitation,
+  revokeInvitation,
+};
