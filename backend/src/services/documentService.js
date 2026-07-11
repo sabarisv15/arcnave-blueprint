@@ -59,6 +59,14 @@ const VALID_REVIEW_STATUSES = ['verified', 'rejected'];
 // been nullable since 1752800000000).
 const TEMPLATE_DOC_TYPE = 'template';
 
+// The one doc_type value CLAUDE.md rule 8 singles out — never used for
+// identity, dedup, import, search, AI reasoning, or reporting.
+// Exported here (not hardcoded independently elsewhere) so
+// documentSearchService.js's own ingestion gate has one single source
+// for the literal value, same reasoning TEMPLATE_DOC_TYPE already
+// establishes for its own known-value constant.
+const AADHAAR_DOC_TYPE = 'aadhaar';
+
 function assertValidReviewStatus(status) {
   if (!VALID_REVIEW_STATUSES.includes(status)) {
     throw new DocumentReviewStatusError(`status ${JSON.stringify(status)} is not a valid review outcome`);
@@ -269,6 +277,7 @@ module.exports = {
   TemplateMergeError: templateMerger.TemplateMergeError,
   DocumentNotATemplateError,
   TEMPLATE_DOC_TYPE,
+  AADHAAR_DOC_TYPE,
   uploadDocument,
   uploadTemplate,
   mergeTemplate: templateMerger.mergeTemplate,

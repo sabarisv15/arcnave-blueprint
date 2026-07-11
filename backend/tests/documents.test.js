@@ -13,10 +13,12 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const http = require('node:http');
 const fs = require('node:fs/promises');
+const path = require('node:path');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
 const config = require('../src/config');
+const fileStorage = require('../src/storage/fileStorage');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PASSWORD = 'DocumentsTestPass123!';
@@ -125,6 +127,7 @@ async function seedTenant(adminPool, label) {
 
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM ocr_results WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM documents WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM students WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
@@ -147,7 +150,22 @@ test('documents', async (t) => {
     await cleanupTenant(adminPool, collegeA);
     await cleanupTenant(adminPool, collegeB);
     await adminPool.end();
-    await fs.rm(config.documentStorageRoot, { recursive: true, force: true });
+    // Empties documentStorageRoot's CONTENTS, not the directory itself:
+    // docker-compose.yml now mounts a named volume at this exact path
+    // (this session's own task — durable storage), so the path itself
+    // is a mount point and can't be rmdir'd from inside the container,
+    // only emptied. Works the same whether documentStorageRoot is a
+    // plain directory (local, non-Docker test runs) or a volume mount.
+    const entries = await fs.readdir(config.documentStorageRoot).catch(() => []);
+    await Promise.all(entries.map((entry) => fs.rm(
+      path.join(config.documentStorageRoot, entry),
+      { recursive: true, force: true },
+    )));
+    const backupEntries = await fs.readdir(config.documentBackupRoot).catch(() => []);
+    await Promise.all(backupEntries.map((entry) => fs.rm(
+      path.join(config.documentBackupRoot, entry),
+      { recursive: true, force: true },
+    )));
   });
 
   async function login(college, username) {
@@ -183,7 +201,9 @@ test('documents', async (t) => {
     assert.equal(resp.body.college_id, collegeA.collegeId);
 
     const onDisk = await fs.readFile(require('path').join(config.documentStorageRoot, resp.body.storage_path));
-    assert.ok(onDisk.equals(fileBytes), 'bytes on disk must match the uploaded bytes exactly');
+    assert.equal(onDisk.equals(fileBytes), false, 'bytes at rest must not be plain uploaded bytes');
+    const fromStorage = await fileStorage.readFile(resp.body.storage_path);
+    assert.ok(fromStorage.equals(fileBytes), 'DocumentService reads back the original bytes');
   });
 
   await t.test('upload rejects a missing file_base64 with 400, not a 500', async () => {
@@ -250,6 +270,20 @@ test('documents', async (t) => {
     assert.equal(resp.headers['content-type'], 'application/pdf');
     assert.match(resp.headers['content-disposition'], /transfer\.pdf/);
     assert.ok(resp.buffer.equals(fileBytes), 'downloaded bytes must match uploaded bytes exactly');
+  });
+
+  await t.test('OCR extracts readable text and stores the result', async () => {
+    const token = await login(collegeA, 'principaluser');
+    const textBytes = Buffer.from('OCR readable certificate text');
+    const uploaded = await post(baseUrl, '/api/v1/documents', headersFor(collegeA, token), {
+      student_id: collegeA.studentId, doc_type: 'certificate', file_name: 'ocr.txt', mime_type: 'text/plain', file_base64: textBytes.toString('base64'),
+    });
+    assert.equal(uploaded.status, 201);
+
+    const ocr = await post(baseUrl, `/api/v1/documents/${uploaded.body.id}/ocr`, headersFor(collegeA, token), {});
+    assert.equal(ocr.status, 201);
+    assert.equal(ocr.body.document_id, uploaded.body.id);
+    assert.match(ocr.body.extracted_text, /certificate text/);
   });
 
   await t.test('a file_name containing CRLF is neutralized in the Content-Disposition header', async () => {
@@ -323,8 +357,8 @@ test('documents', async (t) => {
     const getResp = await get(baseUrl, `/api/v1/documents/${uploaded.body.id}`, headersFor(collegeA, token));
     assert.equal(getResp.status, 404);
 
-    const onDisk = await fs.readFile(require('path').join(config.documentStorageRoot, uploaded.body.storage_path));
-    assert.ok(onDisk.equals(fileBytes), 'soft-delete must not remove the file from disk (retention)');
+    const restored = await fileStorage.readFile(uploaded.body.storage_path);
+    assert.ok(restored.equals(fileBytes), 'soft-delete must not remove the recoverable file bytes');
   });
 
   await t.test('delete on a nonexistent id returns 404', async () => {

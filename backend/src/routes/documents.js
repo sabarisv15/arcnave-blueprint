@@ -4,6 +4,7 @@ const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requireRole } = require('../middleware/rbac');
 const documentService = require('../services/documentService');
+const ocrService = require('../services/ocrService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -69,6 +70,18 @@ function mapDocumentServiceError(err, res) {
   }
   if (err instanceof documentService.TemplateMergeError) {
     res.status(400).json({ detail: err.message });
+    return true;
+  }
+  return false;
+}
+
+function mapOcrServiceError(err, res) {
+  if (err instanceof ocrService.OcrValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof ocrService.OcrDocumentNotFoundError) {
+    res.status(404).json({ detail: err.message });
     return true;
   }
   return false;
@@ -204,6 +217,23 @@ function createDocumentsRouter() {
   // slice needs, not a general/unscoped list, same restraint
   // finance.js's own GET /finance/fee-payments documents for the
   // identical shape.
+  router.post('/documents/:id/ocr', requireRole('principal'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const result = await ocrService.processDocument(req.dbClient, req.params.id, { actorUserId: req.jwtClaims.sub });
+      res.status(201).json(result);
+    } catch (err) {
+      if (mapOcrServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.get('/documents/:id/ocr', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const results = await ocrService.listForDocument(req.dbClient, req.params.id);
+    res.json(results);
+  }));
+
   router.get('/documents', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { student_id: studentId } = req.query;

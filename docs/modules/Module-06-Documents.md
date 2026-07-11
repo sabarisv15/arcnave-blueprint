@@ -184,9 +184,13 @@ production build clean, both before and after the `Header.jsx` fix.
 
 ## Known gaps / deferred
 - OCR/AI extraction — Module 9.
-- `docker-compose.yml` has no volume mounted for `DOCUMENT_STORAGE_ROOT`
-  (ADR-017) — files live in the container's writable layer until fixed.
-- No encryption-at-rest for stored files.
+- ~~`docker-compose.yml` has no volume mounted for `DOCUMENT_STORAGE_ROOT`~~
+  — fixed: a named `document_storage` volume is now mounted at
+  `DOCUMENT_STORAGE_ROOT` (ADR-017's Consequences section). Backup and
+  encryption-at-rest are still not implemented, only planned — see
+  ADR-017's new "Backup & Encryption plan" section.
+- No encryption-at-rest for stored files (planned, not built — see
+  ADR-017).
 - RBAC placeholder, not a real role model for verify/review.
 - No mime-type/content validation that an upload tagged `doc_type =
   'template'` is actually a `.docx` at upload time — `mergeTemplate`
