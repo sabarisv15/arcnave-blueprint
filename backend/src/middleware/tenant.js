@@ -63,6 +63,10 @@ function extractExplicitCode(req) {
   return code || null;
 }
 
+// Raw .query() calls in these two lookups are tenant-context bootstrap
+// plumbing, exempt from CLAUDE.md rule 1 -- they run before a tenant
+// (and therefore a repository's RLS-scoped connection) is even known,
+// not a business-data bypass.
 async function lookupCollegeIdBySubdomain(client, subdomain) {
   const result = await client.query('SELECT college_id FROM colleges WHERE subdomain = $1', [subdomain]);
   return result.rows[0] ? result.rows[0].college_id : null;

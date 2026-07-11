@@ -9,7 +9,13 @@ a team with a PR-review board.
 2. Every migration is reversible.
 3. Repositories never call other repositories.
 4. Services own business logic; repositories own query mechanics only.
-5. No raw SQL outside repositories.
+5. No raw SQL outside repositories. Sole exception: transaction-control
+   (`BEGIN`/`COMMIT`/`ROLLBACK`) and tenant-context-bootstrap
+   (`set_config('app.current_tenant', ...)`, and the pre-tenant-known
+   colleges lookup in `middleware/tenant.js`) SQL, which runs around
+   or before repository-mediated business queries rather than
+   replacing them — see `backgroundJobService.js` and
+   `middleware/tenant.js` for the documented instances.
 6. All APIs live under `/api/v1/` (or the current version).
 7. Every tenant-scoped query is protected by PostgreSQL RLS — verify
    with the two-tenant-on-one-pooled-connection integration test
