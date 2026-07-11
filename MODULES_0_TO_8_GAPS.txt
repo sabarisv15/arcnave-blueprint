@@ -1,0 +1,39 @@
+ARCNAVE - Modules 0 to 8: Gap Summary
+
+Modules 0-8 are complete as their planned vertical slices, but these
+product and production gaps remain.
+
+Highest priority before or during Module 9
+
+- Notification ledger missing: required before AI can draft/send
+  discretionary email, SMS, or WhatsApp. Current email only supports
+  staff activation after human approval.
+- Document storage is not deployment-safe: no Docker volume for
+  uploaded files, no file backup plan, and no encryption at rest.
+- No background-job system: needed for bulk OCR, imports, and
+  notifications.
+- No initial platform-admin bootstrap: a fresh deployment needs a
+  direct database insert to create its first super admin.
+- Password reset remains a 501 stub; principal invites return a raw
+  token instead of delivering an email and have no resend/revoke flow.
+- Module 9 itself: no Tool Registry, Context Builder, Prompt Safety
+  Layer, RAG, or governed AI API yet.
+
+Functional gaps
+
+- Scholarship eligibility is blocked because students lack
+  annual_income.
+- Academic timetable CSV import and raw timetable-file storage are
+  absent.
+- Reports currently provide only student export; attendance and finance
+  reports are absent.
+- No OCR extraction yet.
+- No enforced uniqueness for one Principal per college or one HOD per
+  department.
+- Departments are only partly normalized; existing staff and academic
+  department fields remain free text.
+
+Notes
+
+- Several older Module 1, 2, and 5 notes that say "requires Module 8"
+  are now outdated because Module 8 is built.

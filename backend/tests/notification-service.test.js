@@ -9,11 +9,36 @@
 // than mocking config itself — restored in t.after() every time so
 // tests never leak state into each other or into other test files that
 // import config.
+//
+// The notifications/notification_delivery ledger extension below
+// (draftNotification/submitForApproval/approveNotification/
+// rejectNotification/dispatchApprovedNotification) is tested the same
+// way financeService's own submitFeeStructureApproval/approveFeeStructure/
+// rejectFeeStructure are in finance-service.test.js: notificationRepository/
+// workflowService/staffService/auditLogRepository mocked via node:test's
+// built-in mock, no live Postgres here (that's the one-off live
+// verification script — migrate up/down, RLS, FK enforcement, the real
+// draft -> submit -> approve -> dispatch -> delivery lifecycle against
+// docker-compose Postgres — deleted after use, matching
+// financeService's own documented precedent).
+//
+// dispatchApprovedNotification calls this file's OWN sendEmail as a
+// bare local function reference, not `module.exports.sendEmail` — so
+// mocking `notificationService.sendEmail` from outside would not
+// actually intercept that internal call (property mocking on the
+// exports object doesn't rebind what a function's own closure calls).
+// Same reason the existing sendStaffCredentialsEmail test above never
+// mocks sendEmail either: these tests drive the real sendEmail through
+// its own deterministic stub path (config.smtp.host unset) instead.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const nodemailer = require('nodemailer');
 const config = require('../src/config');
+const notificationRepository = require('../src/repositories/notificationRepository');
+const auditLogRepository = require('../src/repositories/auditLogRepository');
+const workflowService = require('../src/services/workflowService');
+const staffService = require('../src/services/staffService');
 const notificationService = require('../src/services/notificationService');
 
 test('NotificationService (no live SMTP)', async (t) => {
@@ -94,5 +119,246 @@ test('NotificationService (no live SMTP)', async (t) => {
     assert.equal(result.status, 'stubbed');
     assert.equal(result.to, 'staff@college.edu');
     assert.match(result.subject, /active/);
+  });
+});
+
+test('NotificationService ledger: draft/submit/approve/reject/dispatch (no DB)', async (t) => {
+  await t.test('draftNotification rejects missing collegeId/channel/toAddress/body/actorUserId without touching the repository', async () => {
+    const createMock = t.mock.method(notificationRepository, 'create');
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => notificationService.draftNotification({}, { channel: 'email', toAddress: 'a@b.com', body: 'hi' }, {}),
+      notificationService.NotificationValidationError,
+    );
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('draftNotification rejects an unknown origin without touching the repository', async () => {
+    const createMock = t.mock.method(notificationRepository, 'create');
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => notificationService.draftNotification(
+        {},
+        { collegeId: 'c1', channel: 'email', toAddress: 'a@b.com', body: 'hi', origin: 'robot' },
+        { actorUserId: 'u1' },
+      ),
+      notificationService.NotificationValidationError,
+    );
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('draftNotification creates a Draft row and writes an audit entry attributed to actorUserId', async () => {
+    const createMock = t.mock.method(notificationRepository, 'create', async (client, fields) => ({ id: 'notif-1', ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      createMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const notification = await notificationService.draftNotification(
+      {},
+      { collegeId: 'c1', channel: 'email', toAddress: 'a@b.com', subject: 'Hi', body: 'hello' },
+      { actorUserId: 'u1' },
+    );
+
+    assert.equal(notification.id, 'notif-1');
+    const passedFields = createMock.mock.calls[0].arguments[1];
+    assert.equal(passedFields.status, 'Draft');
+    assert.equal(passedFields.origin, 'human');
+    assert.equal(passedFields.draftedByUserId, 'u1');
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'notification_drafted');
+    assert.equal(auditMock.mock.calls[0].arguments[1].userId, 'u1');
+  });
+
+  await t.test('draftNotification maps a notifications_drafted_by_user_id_fkey violation to NotificationUserNotFoundError', async () => {
+    const createMock = t.mock.method(notificationRepository, 'create', async () => {
+      const err = new Error('insert or update on table "notifications" violates foreign key constraint "notifications_drafted_by_user_id_fkey"');
+      err.code = '23503';
+      err.constraint = 'notifications_drafted_by_user_id_fkey';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => notificationService.draftNotification(
+        {},
+        { collegeId: 'c1', channel: 'email', toAddress: 'a@b.com', body: 'hi' },
+        { actorUserId: 'missing-user' },
+      ),
+      notificationService.NotificationUserNotFoundError,
+    );
+  });
+
+  await t.test('submitForApproval rejects a missing requestedByUserId without touching the DB', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById');
+    t.after(() => findMock.mock.restore());
+
+    await assert.rejects(
+      () => notificationService.submitForApproval({}, 'notif-1', {}),
+      notificationService.NotificationValidationError,
+    );
+    assert.equal(findMock.mock.callCount(), 0);
+  });
+
+  await t.test('submitForApproval throws NotificationNotFoundError for a nonexistent id', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async () => null);
+    t.after(() => findMock.mock.restore());
+
+    await assert.rejects(
+      () => notificationService.submitForApproval({}, 'missing-id', { requestedByUserId: 'requester-1' }),
+      notificationService.NotificationNotFoundError,
+    );
+  });
+
+  await t.test('submitForApproval resolves the real principal and submits a single-step chain, then stores workflow_request_id', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({ id, college_id: 'c1', origin: 'human' }));
+    const principalMock = t.mock.method(staffService, 'findPrincipal', async () => ({ user_id: 'principal-user-1' }));
+    const submitMock = t.mock.method(workflowService, 'submitRequest', async (client, fields) => ({ id: 'wf-1', ...fields }));
+    const updateMock = t.mock.method(notificationRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
+    t.after(() => {
+      findMock.mock.restore();
+      principalMock.mock.restore();
+      submitMock.mock.restore();
+      updateMock.mock.restore();
+    });
+
+    const result = await notificationService.submitForApproval({}, 'notif-1', { requestedByUserId: 'requester-1' });
+
+    assert.equal(result.workflowRequestId, 'wf-1');
+    const submitted = submitMock.mock.calls[0].arguments[1];
+    assert.equal(submitted.entityType, 'notification');
+    assert.equal(submitted.entityId, 'notif-1');
+    assert.equal(submitted.origin, 'human');
+    assert.deepEqual(submitted.approverChain, [{ step: 1, role: 'principal', user_id: 'principal-user-1' }]);
+    assert.deepEqual(updateMock.mock.calls[0].arguments[2], { workflowRequestId: 'wf-1' });
+  });
+
+  await t.test('approveNotification calls workflowService.approveRequest then sets status to Approved, audit-logged', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Approved' }));
+    const updateMock = t.mock.method(notificationRepository, 'update', async (client, id, fields) => ({ id, college_id: 'c1', ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await notificationService.approveNotification({}, 'notif-1', { actorUserId: 'principal-user-1' });
+
+    assert.equal(result.status, 'Approved');
+    assert.equal(approveMock.mock.calls[0].arguments[1], 'wf-1');
+    assert.deepEqual(updateMock.mock.calls[0].arguments[2], { status: 'Approved' });
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'notification_approved');
+  });
+
+  await t.test('approveNotification throws NotificationNoPendingRequestError when nothing is pending', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => null);
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => notificationService.approveNotification({}, 'notif-1', { actorUserId: 'principal-user-1' }),
+      notificationService.NotificationNoPendingRequestError,
+    );
+  });
+
+  await t.test('approveNotification lets workflowService.approveRequest errors (e.g. self-approval) pass through unchanged, without updating status', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => {
+      throw new workflowService.WorkflowRequestSelfApprovalError('actor requested this workflow request');
+    });
+    const updateMock = t.mock.method(notificationRepository, 'update');
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => notificationService.approveNotification({}, 'notif-1', { actorUserId: 'requester-1' }),
+      workflowService.WorkflowRequestSelfApprovalError,
+    );
+    assert.equal(updateMock.mock.callCount(), 0);
+  });
+
+  await t.test('rejectNotification calls workflowService.rejectRequest then sets status to Rejected, audit-logged', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({ id, college_id: 'c1' }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const rejectMock = t.mock.method(workflowService, 'rejectRequest', async () => ({ id: 'wf-1', status: 'Rejected' }));
+    const updateMock = t.mock.method(notificationRepository, 'update', async (client, id, fields) => ({ id, college_id: 'c1', ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      rejectMock.mock.restore();
+      updateMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const result = await notificationService.rejectNotification({}, 'notif-1', { actorUserId: 'principal-user-1', remarks: 'no' });
+
+    assert.equal(result.status, 'Rejected');
+    assert.deepEqual(updateMock.mock.calls[0].arguments[2], { status: 'Rejected' });
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'notification_rejected');
+  });
+
+  await t.test('dispatchApprovedNotification throws NotificationNotFoundError for a nonexistent id', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async () => null);
+    t.after(() => findMock.mock.restore());
+
+    await assert.rejects(
+      () => notificationService.dispatchApprovedNotification({}, 'missing-id'),
+      notificationService.NotificationNotFoundError,
+    );
+  });
+
+  await t.test('dispatchApprovedNotification throws NotificationNotApprovedError when the notification is not Approved', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({ id, status: 'Draft' }));
+    t.after(() => findMock.mock.restore());
+
+    await assert.rejects(
+      () => notificationService.dispatchApprovedNotification({}, 'notif-1'),
+      notificationService.NotificationNotApprovedError,
+    );
+  });
+
+  await t.test('dispatchApprovedNotification sends (stub path, SMTP unconfigured), records a delivery row, advances status to Dispatched, and audit-logs', async () => {
+    const originalHost = config.smtp.host;
+    config.smtp.host = null;
+
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', status: 'Approved', to_address: 'a@b.com', subject: 'Hi', body: 'hello', drafted_by_user_id: 'drafter-1',
+    }));
+    const deliveryMock = t.mock.method(notificationRepository, 'recordDeliveryAttempt', async (client, fields) => ({ id: 'delivery-1', ...fields }));
+    const updateMock = t.mock.method(notificationRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      config.smtp.host = originalHost;
+      findMock.mock.restore();
+      deliveryMock.mock.restore();
+      updateMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const { notification, delivery } = await notificationService.dispatchApprovedNotification({}, 'notif-1');
+
+    assert.equal(notification.status, 'Dispatched');
+    assert.equal(delivery.status, 'stubbed');
+    assert.equal(deliveryMock.mock.calls[0].arguments[1].notificationId, 'notif-1');
+    assert.deepEqual(updateMock.mock.calls[0].arguments[2], { status: 'Dispatched' });
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'notification_dispatched');
+    assert.equal(auditMock.mock.calls[0].arguments[1].userId, 'drafter-1');
+    assert.equal(auditMock.mock.calls[0].arguments[1].metadata.deliveryStatus, 'stubbed');
   });
 });

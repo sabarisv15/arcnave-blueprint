@@ -6,6 +6,7 @@ const { requireAuth } = require('../middleware/rbac');
 const workflowService = require('../services/workflowService');
 const staffService = require('../services/staffService');
 const financeService = require('../services/financeService');
+const notificationService = require('../services/notificationService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -52,11 +53,27 @@ function requireResolvedTenant(req, res) {
 // (workflowService.getRequest, a plain read added for exactly this)
 // and dispatches to the matching, ALREADY-EXISTING entity-specific
 // service function — no new service logic, only routing between
-// functions that already exist. Anything that isn't 'staff_registration'
-// or 'fee_structure' (there is no third entity type yet) falls back to
-// calling workflowService.approveRequest/rejectRequest directly, so a
-// future entity type with no dedicated cascade still works through this
-// same generic endpoint without this route needing to change.
+// functions that already exist. Anything that isn't 'staff_registration',
+// 'fee_structure', or 'notification' falls back to calling
+// workflowService.approveRequest/rejectRequest directly, so a future
+// entity type with no dedicated cascade still works through this same
+// generic endpoint without this route needing to change.
+//
+// 'notification' (Module 9's draft_notification/request_notification_send
+// AI tools, and any future human-drafted notification) is a genuine
+// two-step cascade on approve, unlike staff_registration/fee_structure's
+// one call each: notificationService.approveNotification (flips
+// workflow_requests -> 'Approved' AND notifications.status ->
+// 'Approved', mirroring financeService.approveFeeStructure exactly),
+// THEN notificationService.dispatchApprovedNotification (the actual
+// send — sendEmail, a notification_delivery row, notifications.status
+// -> 'Dispatched'). Approval alone is not "done" for a notification the
+// way it is for a fee structure; dispatch is the real point of
+// approving one at all. Reject is a single call, same shape as the
+// other two entity types — a rejected notification is simply never
+// dispatched (notificationService.dispatchApprovedNotification's own
+// NotificationNotApprovedError guard already blocks a stray dispatch
+// attempt against it, structurally, not just by this route's own care).
 function mapWorkflowRequestsError(err, res) {
   if (err instanceof workflowService.WorkflowRequestValidationError) {
     res.status(400).json({ detail: err.message });
@@ -106,6 +123,21 @@ function mapWorkflowRequestsError(err, res) {
     res.status(409).json({ detail: err.message });
     return true;
   }
+  if (err instanceof notificationService.NotificationValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof notificationService.NotificationNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (
+    err instanceof notificationService.NotificationNoPendingRequestError
+    || err instanceof notificationService.NotificationNotApprovedError
+  ) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -136,6 +168,15 @@ async function dispatchWorkflowAction(req, action) {
   if (request.entity_type === 'fee_structure') {
     const fn = action === 'approve' ? financeService.approveFeeStructure : financeService.rejectFeeStructure;
     return { result: await fn(req.dbClient, request.entity_id, { actorUserId, remarks }) };
+  }
+  if (request.entity_type === 'notification') {
+    if (action === 'reject') {
+      return { result: await notificationService.rejectNotification(req.dbClient, request.entity_id, { actorUserId, remarks }) };
+    }
+    // Two real steps, not one — see the file-level comment: approval
+    // alone doesn't dispatch anything.
+    await notificationService.approveNotification(req.dbClient, request.entity_id, { actorUserId, remarks });
+    return { result: await notificationService.dispatchApprovedNotification(req.dbClient, request.entity_id) };
   }
 
   const fn = action === 'approve' ? workflowService.approveRequest : workflowService.rejectRequest;

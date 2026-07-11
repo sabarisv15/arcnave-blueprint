@@ -237,13 +237,87 @@ toast, and `console` free of runtime errors at every step.
 - NotificationService's real SMTP send path is unit-tested with a
   mocked transporter only — no real mail server exists in this dev
   environment to prove an actual outbound send.
-- The full notification ledger (`notifications`/`notification_delivery`)
-  and any free-form/AI-drafted notification path are not built —
-  the next thing to add once something other than staff activation
-  needs to send a notification.
+- No route/UI yet for the notification ledger below (draft/submit/
+  approve/reject/dispatch) — schema + repository + service methods
+  only, per this extension's own build brief. The next thing to add
+  once a real caller with discretionary content (an AI-drafted
+  announcement, a bulk SMS blast) needs one.
+- `sendEmail`'s single-channel assumption: `dispatchApprovedNotification`
+  always calls `sendEmail` regardless of a notification's own `channel`
+  column — correct today (email is the only real channel), but a
+  future `channel = 'sms'`/`'whatsapp'` draft would need real per-channel
+  dispatch logic this slice doesn't add (nothing yet sets `channel` to
+  anything but `'email'`).
+
+## Notification ledger (extension — schema + repository + service only)
+`notifications` (`college_id`, `channel`, `to_address`, `subject`
+nullable, `body`, `status` `'Draft'|'Approved'|'Dispatched'|'Rejected'`
+default `'Draft'`, `origin` `'human'|'ai'`, `drafted_by_user_id` FK ->
+`users`, `workflow_request_id` nullable+UNIQUE FK -> `workflow_requests`)
++ `notification_delivery` (append-only, `notification_id` FK,
+`attempted_at`, `status`, `error` nullable) — the real ledger
+`notificationService.js`'s original comment flagged as a future gap
+(Architecture.md 2.8). Deliberately no `'Pending'` status on
+`notifications` itself: "awaiting approval" lives entirely on the
+`workflow_requests` row a Draft is submitted against, so the two tables
+can't drift out of sync on what counts as pending. Both tables RLS
+enabled+forced, tenant_isolation policy, no DELETE grant (never
+deleted, structurally) — same pattern every other tenant table in this
+schema uses. `backend/src/repositories/notificationRepository.js` —
+plain CRUD + `recordDeliveryAttempt`/`findDeliveryAttempts`, no
+business logic.
+
+**Service** (`notificationService.js`, extended, not rewritten):
+`draftNotification` (Draft row, no send), `submitForApproval` (resolves
+a single-step Principal-only approver chain via
+`staffService.findPrincipal` — same precedent
+`financeService.submitFeeStructureApproval` already set: nothing scopes
+a notification to one department, so there's no HOD to resolve — then
+calls `workflowService.submitRequest`, stores `workflow_request_id`),
+`approveNotification`/`rejectNotification` (mirror
+`financeService.approveFeeStructure`/`rejectFeeStructure` exactly:
+status only ever moves off `'Draft'` as the real consequence of
+`workflowService.approveRequest`/`rejectRequest` resolving — ADR-005's
+self-approval rule applies transitively, proven live), and
+`dispatchApprovedNotification` (only callable when `status ===
+'Approved'`; calls the existing `sendEmail`, writes one
+`notification_delivery` row recording whatever `sendEmail` actually
+returned — `'sent'`/`'stubbed'`/`'failed'`, not force-mapped — then
+always advances to `'Dispatched'` regardless of send outcome, same
+best-effort philosophy the original `sendStaffCredentialsEmail` path
+already established).
+
+A real circular-require was caught and fixed before it shipped:
+`staffService.js` already requires `notificationService.js` (for
+`sendStaffCredentialsEmail`), so a top-level `require('./staffService')`
+in `notificationService.js` would have made whichever of the two
+modules finishes loading second capture the other's still-empty
+`module.exports` (this codebase's `module.exports = {...}`
+single-assignment convention doesn't survive a top-level cycle).
+Fixed by deferring that one require to inside `submitForApproval` (the
+only function that needs it) — loads correctly regardless of which
+module a caller requires first.
+
+Verified live (docker-compose Postgres): migration up/down (the new
+migration alone, isolated); RLS cross-tenant isolation (0 rows visible
+to a second tenant); FK enforcement on `drafted_by_user_id`,
+`workflow_request_id` (`notifications`), and `notification_id`
+(`notification_delivery`), all real 23503s; the full
+draft → submit → approve → dispatch → delivery lifecycle end to end,
+including dispatch correctly rejected before approval and after
+rejection; and the ADR-005 self-approval gate firing transitively
+through `notificationService.approveNotification` exactly as it does
+for `financeService.approveFeeStructure`. Full backend suite: 487/487
+(one `ENOTEMPTY` failure in `reports.test.js` traced to a genuine,
+pre-existing race between it and `documents.test.js` — both clean up
+the same shared `config.documentStorageRoot` directory in their own
+`t.after()` hooks, and Node's test runner runs files concurrently by
+default; confirmed by a clean 487/487 run with
+`--test-concurrency=1`. Unrelated to this extension, not fixed here).
 
 ## Commits
 `9e6787d` schema+repositories · `2021eec` `workflowService.js` ·
 `45214b1` FinanceService/StaffService wiring · `de0f9a0`
 NotificationService + staff-activation cascade · pending-approvals API
-+ UI, closing Module 8 end to end (this slice).
++ UI, closing Module 8 end to end · notification ledger schema +
+repository + service extension (this slice).

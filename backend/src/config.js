@@ -92,4 +92,22 @@ module.exports = {
     password: process.env.SMTP_PASSWORD || null,
     fromAddress: process.env.SMTP_FROM_ADDRESS || 'no-reply@arcnave.local',
   },
+
+  // NVIDIA NIM (OpenAI-compatible /chat/completions) — the LLM
+  // services/llmProvider.js calls at the end of Module 9's pipeline
+  // (Tool Registry -> Context Builder -> Prompt Safety Layer -> LLM,
+  // AI-Governance.md §2). Optional, same reasoning as smtp above:
+  // unset apiKey means the LLM step is simply unavailable
+  // (llmProvider.complete throws LlmNotConfiguredError, mapped to a
+  // real 503 by routes/ai.js) rather than a startup failure — this
+  // app must keep running (every non-LLM route, including the plain
+  // tool-invoke path with no `question`) whether or not a provider key
+  // exists. Global only, not per-tenant, despite AI-Governance.md §6
+  // naming ConfigurationService/per-tenant provider selection as a
+  // future option — no tenant has asked for a different provider yet.
+  nim: {
+    apiKey: process.env.NIM_API_KEY || null,
+    baseUrl: process.env.NIM_BASE_URL || 'https://integrate.api.nvidia.com/v1',
+    model: process.env.NIM_MODEL || 'meta/llama-3.1-8b-instruct',
+  },
 };

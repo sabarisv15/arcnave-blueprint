@@ -60,6 +60,12 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-no-reply@arcnave.local}
+      # Optional — Module 9's LLM step (services/llmProvider.js). `:-`
+      # defaults, not `:?`: unset NIM_API_KEY means the AI "ask" path
+      # 503s cleanly (LlmNotConfiguredError), not a startup failure.
+      NIM_API_KEY: ${NIM_API_KEY:-}
+      NIM_BASE_URL: ${NIM_BASE_URL:-https://integrate.api.nvidia.com/v1}
+      NIM_MODEL: ${NIM_MODEL:-meta/llama-3.1-8b-instruct}
     ports:
       - "8000:8000"
     volumes:
