@@ -11,6 +11,9 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const http = require('node:http');
 const fs = require('node:fs/promises');
+// Named nodePath, not path: this file's own requestJson(baseUrl, path,
+// method, ...) already uses `path` as a parameter name.
+const nodePath = require('node:path');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
@@ -132,7 +135,15 @@ test('reports', async (t) => {
     await stopServer(server);
     await cleanupTenant(adminPool, college);
     await adminPool.end();
-    await fs.rm(config.documentStorageRoot, { recursive: true, force: true });
+    // Empties documentStorageRoot's CONTENTS, not the directory itself
+    // — see documents.test.js's own comment on this exact fix: the
+    // path is now a Docker volume mount point (this session's own
+    // task), not rmdir-able from inside the container.
+    const entries = await fs.readdir(config.documentStorageRoot).catch(() => []);
+    await Promise.all(entries.map((entry) => fs.rm(
+      nodePath.join(config.documentStorageRoot, entry),
+      { recursive: true, force: true },
+    )));
   });
 
   async function login(username) {
@@ -167,6 +178,19 @@ test('reports', async (t) => {
     // via res.set() automatically — real behavior, not asserted away.
     assert.ok(download.headers['content-type'].startsWith('text/csv'));
     assert.ok(download.buffer.toString('utf8').includes('Alice'));
+  });
+
+  await t.test('principal generates attendance and finance reports', async () => {
+    const token = await login('principaluser');
+    const attendance = await post(baseUrl, '/api/v1/reports/attendance', headersFor(token), { format: 'csv' });
+    assert.equal(attendance.status, 201);
+    assert.equal(attendance.body.report_type, 'attendance_report');
+    assert.equal(attendance.body.status, 'completed');
+
+    const finance = await post(baseUrl, '/api/v1/reports/finance', headersFor(token), { format: 'csv' });
+    assert.equal(finance.status, 201);
+    assert.equal(finance.body.report_type, 'finance_report');
+    assert.equal(finance.body.status, 'completed');
   });
 
   await t.test('defaults to csv when format is omitted', async () => {

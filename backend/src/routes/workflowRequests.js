@@ -7,6 +7,7 @@ const workflowService = require('../services/workflowService');
 const staffService = require('../services/staffService');
 const financeService = require('../services/financeService');
 const notificationService = require('../services/notificationService');
+const academicService = require('../services/academicService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -111,6 +112,14 @@ function mapWorkflowRequestsError(err, res) {
     res.status(409).json({ detail: err.message });
     return true;
   }
+  if (err instanceof academicService.ClassValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof academicService.ClassTimetableApprovalNotPendingError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
   if (err instanceof financeService.FeeStructureValidationError) {
     res.status(400).json({ detail: err.message });
     return true;
@@ -163,6 +172,10 @@ async function dispatchWorkflowAction(req, action) {
 
   if (request.entity_type === 'staff_registration') {
     const fn = action === 'approve' ? staffService.approveStaffRegistration : staffService.rejectStaffRegistration;
+    return { result: await fn(req.dbClient, request.entity_id, { actorUserId, remarks }) };
+  }
+  if (request.entity_type === 'timetable_approval') {
+    const fn = action === 'approve' ? academicService.approveTimetableApproval : academicService.rejectTimetableApproval;
     return { result: await fn(req.dbClient, request.entity_id, { actorUserId, remarks }) };
   }
   if (request.entity_type === 'fee_structure') {

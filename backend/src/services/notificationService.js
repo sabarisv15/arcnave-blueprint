@@ -173,6 +173,48 @@ async function sendStaffCredentialsEmail(client, { to, username, password, staff
   return sendEmail(client, { to, subject, body });
 }
 
+// This session's own task: password reset must go out through the
+// existing notification flow, never in an API response. Same
+// send-first, best-effort, non-ledger treatment as
+// sendStaffCredentialsEmail above — a deterministic consequence of a
+// real user action (their own reset request), no discretionary
+// content for the ledger to gate.
+async function sendPasswordResetEmail(client, { to, token }) {
+  const subject = 'Reset your ARCNAVE password';
+  const body = [
+    'A password reset was requested for your ARCNAVE account.',
+    `Reset token: ${token}`,
+    '',
+    'If you did not request this, you can safely ignore this email.',
+  ].join('\n');
+
+  return sendEmail(client, { to, subject, body });
+}
+
+// This session's own task: principal invitation must go out through
+// the existing notification flow, never in an API response. Same
+// treatment as sendPasswordResetEmail above — the platform admin's own
+// invite action is the deterministic trigger, not free-form/discretionary
+// content. `client` here is realistically platformPool, not a tenant
+// transaction (invitePrincipal has no tenant to scope one to yet — the
+// college being invited into has no principal at all until this
+// invitation is accepted) — harmless, since sendEmail never actually
+// uses its own client parameter either (see that function's comment).
+async function sendPrincipalInvitationEmail(client, {
+  to, collegeId, token, expiresAt,
+}) {
+  const subject = `You've been invited to set up ARCNAVE for ${collegeId}`;
+  const body = [
+    `You have been invited to become the Principal administrator for college "${collegeId}" on ARCNAVE.`,
+    `Invitation token: ${token}`,
+    `This invitation expires at ${expiresAt.toISOString()}.`,
+    '',
+    'Use this token with POST /api/v1/invitations/accept to finish setting up your account.',
+  ].join('\n');
+
+  return sendEmail(client, { to, subject, body });
+}
+
 // origin has no DB CHECK constraint (see the migration's own file-level
 // comment) — known values ('human'|'ai') enforced here, same house
 // convention workflowService.assertValidOrigin already uses for the
@@ -377,6 +419,8 @@ module.exports = {
   NotificationNotApprovedError,
   sendEmail,
   sendStaffCredentialsEmail,
+  sendPasswordResetEmail,
+  sendPrincipalInvitationEmail,
   draftNotification,
   submitForApproval,
   approveNotification,

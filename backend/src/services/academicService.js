@@ -48,6 +48,9 @@ const classRepository = require('../repositories/classRepository');
 const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
 const timetablePeriodRepository = require('../repositories/timetablePeriodRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
+const documentService = require('./documentService');
+const workflowService = require('./workflowService');
+const staffService = require('./staffService');
 
 // Missing className — classes.class_name is NOT NULL at the DB level.
 // Raised before any repository call, same as staffService's pre-query
@@ -83,6 +86,30 @@ class ClassTutorConflictError extends Error {}
 // caller-supplied free text), so any 23503 here unambiguously means
 // this.
 class ClassTutorNotFoundError extends Error {}
+
+// classes_department_id_fkey (classes.department_id -> departments.id)
+// violated (Postgres 23503) — the given departmentId doesn't exist.
+// Same precedent as ClassTutorNotFoundError.
+class ClassDepartmentNotFoundError extends Error {}
+
+// Module 3->4 gap fix: 'Pending HOD'/'Pending Principal'/'Approved'/
+// 'Rejected' are workflow-governed states now — reachable only via
+// submitTimetableForApproval/approveTimetableApproval/
+// rejectTimetableApproval, never a direct updateClass PATCH. That
+// direct path was the exact "raw UPDATE... to reach the 'Approved'
+// branch at all" workaround attendanceService.js's own comments (and
+// tests/attendance.test.js's admin-pool seeding) already named as the
+// only way to unlock attendance marking today. 'No Tutor' is the one
+// literal still directly settable — it is not a step in the approval
+// chain, just the "nothing submitted yet" default.
+class ClassTimetableStatusManagedByWorkflowError extends Error {}
+
+// submitTimetableForApproval/approveTimetableApproval/
+// rejectTimetableApproval given a classId with no live Pending
+// 'timetable_approval' workflow_requests row (never submitted, or
+// already resolved) — same "required lookup, not an optional fetch"
+// shape as staffService.StaffRegistrationNotPendingError.
+class ClassTimetableApprovalNotPendingError extends Error {}
 
 // Missing classId, periodId, subject, or staffUserId —
 // faculty_allocation.class_id/period_id/subject are NOT NULL at the
@@ -142,6 +169,7 @@ class TimetablePeriodSlotTakenError extends Error {}
 // than silently cascading — surfaced as a domain error instead of a
 // raw pg one, same discipline as every other constraint in this file.
 class TimetablePeriodInUseError extends Error {}
+class TimetableImportError extends Error {}
 
 // Known real timetable_status values, per the migration's own comment
 // and .ai/TASK.md's grounding against TutorClass.jsx/
@@ -163,6 +191,7 @@ const VALID_TIMETABLE_STATUSES = [
 const ALLOWED_FIELDS = [
   'className',
   'department',
+  'departmentId',
   'semester',
   'tutorUserId',
   'timetableStatus',
@@ -211,6 +240,9 @@ async function createClass(client, { collegeId, className, ...rest }, { actorUse
     if (err.code === '23503' && err.constraint === 'classes_tutor_user_id_fkey') {
       throw new ClassTutorNotFoundError(`tutorUserId ${JSON.stringify(rest.tutorUserId)} does not exist`);
     }
+    if (err.code === '23503' && err.constraint === 'classes_department_id_fkey') {
+      throw new ClassDepartmentNotFoundError(`departmentId ${JSON.stringify(rest.departmentId)} does not exist`);
+    }
     throw err;
   }
 
@@ -232,9 +264,16 @@ async function getClass(client, id) {
   return classRepository.findById(client, id);
 }
 
+const WORKFLOW_MANAGED_TIMETABLE_STATUSES = ['Pending HOD', 'Pending Principal', 'Approved', 'Rejected'];
+
 async function updateClass(client, id, fields, { userId }) {
   const patch = pickClassFields(fields);
   assertValidTimetableStatus(patch.timetableStatus);
+  if (WORKFLOW_MANAGED_TIMETABLE_STATUSES.includes(patch.timetableStatus)) {
+    throw new ClassTimetableStatusManagedByWorkflowError(
+      `timetableStatus ${JSON.stringify(patch.timetableStatus)} can only be reached via submitTimetableForApproval/approveTimetableApproval/rejectTimetableApproval, not a direct update`,
+    );
+  }
   const hasChanges = Object.keys(patch).length > 0;
 
   let cls;
@@ -249,6 +288,9 @@ async function updateClass(client, id, fields, { userId }) {
     }
     if (err.code === '23503' && err.constraint === 'classes_tutor_user_id_fkey') {
       throw new ClassTutorNotFoundError(`tutorUserId ${JSON.stringify(patch.tutorUserId)} does not exist`);
+    }
+    if (err.code === '23503' && err.constraint === 'classes_department_id_fkey') {
+      throw new ClassDepartmentNotFoundError(`departmentId ${JSON.stringify(patch.departmentId)} does not exist`);
     }
     throw err;
   }
@@ -299,6 +341,99 @@ async function removeClass(client, id, { userId }) {
 
 async function listClasses(client, { limit, offset } = {}) {
   return classRepository.list(client, { limit, offset });
+}
+
+// Module 3->4 gap fix: BusinessRules.md/HodDashboard.jsx/
+// PrincipalDashboard.jsx's own timetable review chain ('Pending HOD'
+// -> 'Approved'/'Pending Principal'/'Rejected') modeled as a 2-step
+// approver_chain through the one real WorkflowService gate (CLAUDE.md
+// rule 3/ADR-005), same shape as staffService.submitStaffRegistration:
+// HOD (of the class's own department) then Principal, both resolved
+// from real data via staffService.findHodForDepartment/findPrincipal,
+// never hardcoded. No parallel approval mechanism — this is the same
+// generic workflow_requests table/submitRequest every other approval
+// already routes through, just a new entityType.
+async function submitTimetableForApproval(client, classId, { requestedByUserId, origin = 'human' } = {}) {
+  if (!requestedByUserId) {
+    throw new ClassValidationError('requestedByUserId is required');
+  }
+
+  const cls = await classRepository.findById(client, classId);
+  if (cls === null) {
+    throw new ClassValidationError(`class ${JSON.stringify(classId)} does not exist`);
+  }
+  if (!cls.department_id) {
+    throw new ClassValidationError(`class ${JSON.stringify(classId)} has no departmentId set, cannot resolve an hod approver`);
+  }
+
+  const hod = await staffService.findHodForDepartment(client, cls.college_id, cls.department_id);
+  const principal = await staffService.findPrincipal(client, cls.college_id);
+
+  const request = await workflowService.submitRequest(client, {
+    collegeId: cls.college_id,
+    entityType: 'timetable_approval',
+    entityId: cls.id,
+    requestedByUserId,
+    origin,
+    approverChain: [
+      { step: 1, role: 'hod', user_id: hod.user_id },
+      { step: 2, role: 'principal', user_id: principal.user_id },
+    ],
+  });
+
+  await classRepository.update(client, classId, { timetableStatus: 'Pending HOD' });
+
+  return request;
+}
+
+// Shared load+validate for approve/reject: the class must exist, and
+// exactly one live Pending 'timetable_approval' workflow_requests row
+// must govern it — same shape as staffService.loadPendingRegistration.
+async function loadPendingTimetableApproval(client, classId) {
+  const cls = await classRepository.findById(client, classId);
+  if (cls === null) {
+    throw new ClassValidationError(`class ${JSON.stringify(classId)} does not exist`);
+  }
+
+  const pending = await workflowService.findPendingForEntity(client, 'timetable_approval', classId);
+  if (pending === null) {
+    throw new ClassTimetableApprovalNotPendingError(`class ${JSON.stringify(classId)} has no pending timetable approval request`);
+  }
+
+  return pending;
+}
+
+// The actual Module 3->4 unblock: workflowService.approveRequest alone
+// only ever flips workflow_requests.status — nothing else in this
+// codebase mirrors that outcome onto classes.timetable_status, which
+// is the one column attendanceService.assertTimetableApproved actually
+// gates on. Mid-chain (the HOD's own step) advances the visible status
+// to 'Pending Principal' without closing the request; the terminal
+// step (status -> 'Approved') is the only point that flips
+// timetable_status to 'Approved' and genuinely unblocks attendance.
+async function approveTimetableApproval(client, classId, { actorUserId, remarks } = {}) {
+  const pending = await loadPendingTimetableApproval(client, classId);
+  const resolved = await workflowService.approveRequest(client, pending.id, { actorUserId, remarks });
+
+  const nextStatus = resolved.status === 'Approved' ? 'Approved' : 'Pending Principal';
+  const cls = await classRepository.update(client, classId, { timetableStatus: nextStatus });
+
+  return { workflowRequest: resolved, class: cls };
+}
+
+// Rejecting at any step ends the whole chain (workflowService's own
+// rule) — mirrored onto timetable_status -> 'Rejected', matching the
+// known literal HodDashboard.jsx/PrincipalDashboard.jsx already use
+// for this outcome. A rejected class must go through
+// submitTimetableForApproval again to re-enter the chain, same
+// "resubmit as a new request" precedent workflowService.js's own
+// file-level comment already documents.
+async function rejectTimetableApproval(client, classId, { actorUserId, remarks } = {}) {
+  const pending = await loadPendingTimetableApproval(client, classId);
+  const resolved = await workflowService.rejectRequest(client, pending.id, { actorUserId, remarks });
+  const cls = await classRepository.update(client, classId, { timetableStatus: 'Rejected' });
+
+  return { workflowRequest: resolved, class: cls };
 }
 
 // Assigns a staff member to teach a subject during a specific
@@ -438,6 +573,93 @@ async function createTimetablePeriod(client, { collegeId, dayOfWeek, hourIndex, 
   return period;
 }
 
+function parseCsvLine(line) {
+  const values = [];
+  let current = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '"' && line[i + 1] === '"') {
+      current += '"';
+      i += 1;
+    } else if (ch === '"') {
+      quoted = !quoted;
+    } else if (ch === ',' && !quoted) {
+      values.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  values.push(current.trim());
+  return values;
+}
+
+async function importTimetablePeriodsCsv(client, { collegeId, fileName = 'timetable.csv', fileBuffer }, { actorUserId } = {}) {
+  if (!fileBuffer || !actorUserId) {
+    throw new TimetableImportError('fileBuffer and actorUserId are required');
+  }
+
+  const rawDocument = await documentService.uploadDocument(
+    client,
+    { collegeId, docType: 'timetable_import', fileName, mimeType: 'text/csv', fileBuffer },
+    { actorUserId },
+  );
+
+  const text = fileBuffer.toString('utf8').replace(/^\uFEFF/, '');
+  const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '');
+  if (lines.length < 2) {
+    throw new TimetableImportError('csv must include a header and at least one row');
+  }
+  const headers = parseCsvLine(lines[0]).map((value) => value.toLowerCase());
+  const required = ['day_of_week', 'hour_index', 'start_time', 'end_time'];
+  for (const name of required) {
+    if (!headers.includes(name)) throw new TimetableImportError(`csv missing ${name}`);
+  }
+
+  const imported = [];
+  const skipped = [];
+  let rowNumber = 0;
+  for (const line of lines.slice(1)) {
+    rowNumber += 1;
+    const cells = parseCsvLine(line);
+    const row = Object.fromEntries(headers.map((header, index) => [header, cells[index]]));
+    // Each row gets its own SAVEPOINT: a UNIQUE violation (23505)
+    // otherwise poisons the whole surrounding transaction in Postgres
+    // (every later statement fails with "current transaction is
+    // aborted" regardless of its own validity), turning one duplicate
+    // row into an all-or-nothing 500. ROLLBACK TO SAVEPOINT undoes
+    // just this row's failed INSERT and clears the aborted state,
+    // letting the loop continue.
+    const savepoint = `csv_import_row_${rowNumber}`;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await client.query(`SAVEPOINT ${savepoint}`);
+      // eslint-disable-next-line no-await-in-loop
+      await createTimetablePeriod(client, {
+        collegeId,
+        dayOfWeek: row.day_of_week,
+        hourIndex: Number(row.hour_index),
+        startTime: row.start_time,
+        endTime: row.end_time,
+      }, { actorUserId });
+      // eslint-disable-next-line no-await-in-loop
+      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      imported.push({ row: rowNumber, dayOfWeek: row.day_of_week, hourIndex: Number(row.hour_index) });
+    } catch (err) {
+      if (err instanceof TimetablePeriodSlotTakenError) {
+        // eslint-disable-next-line no-await-in-loop
+        await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        skipped.push({ row: rowNumber, reason: err.message });
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  return { rawDocumentId: rawDocument.id, imported, skipped, totalRows: lines.length - 1 };
+}
+
 // null means no period exists with this id — not an error. The route
 // turns that into 404, same as getClass/getFacultyAllocation.
 async function getTimetablePeriod(client, id) {
@@ -519,6 +741,9 @@ module.exports = {
   ClassNameConflictError,
   ClassTutorConflictError,
   ClassTutorNotFoundError,
+  ClassDepartmentNotFoundError,
+  ClassTimetableStatusManagedByWorkflowError,
+  ClassTimetableApprovalNotPendingError,
   FacultyAllocationValidationError,
   FacultyAllocationClassNotFoundError,
   FacultyAllocationPeriodNotFoundError,
@@ -528,11 +753,15 @@ module.exports = {
   TimetablePeriodValidationError,
   TimetablePeriodSlotTakenError,
   TimetablePeriodInUseError,
+  TimetableImportError,
   createClass,
   getClass,
   updateClass,
   removeClass,
   listClasses,
+  submitTimetableForApproval,
+  approveTimetableApproval,
+  rejectTimetableApproval,
   assignFacultyAllocation,
   getFacultyAllocation,
   listFacultyAllocationsForClass,
@@ -541,6 +770,7 @@ module.exports = {
   getTimetablePeriodByDayAndHour,
   getFacultyAllocationForClassAndPeriod,
   createTimetablePeriod,
+  importTimetablePeriodsCsv,
   getTimetablePeriod,
   listTimetablePeriods,
   removeTimetablePeriod,

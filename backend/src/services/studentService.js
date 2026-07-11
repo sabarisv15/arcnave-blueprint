@@ -69,6 +69,7 @@ const ALLOWED_FIELDS = [
   'notes',
   'licenseNumber',
   'bikeNumber',
+  'annualIncome',
 ];
 
 function pickStudentFields(source) {

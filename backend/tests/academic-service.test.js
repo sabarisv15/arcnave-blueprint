@@ -177,6 +177,21 @@ test('AcademicService validation and audit logging (no DB)', async (t) => {
     );
   });
 
+  await t.test('createClass maps a classes_department_id_fkey violation to ClassDepartmentNotFoundError', async () => {
+    const createMock = t.mock.method(classRepository, 'create', async () => {
+      const err = new Error('insert or update on table "classes" violates foreign key constraint "classes_department_id_fkey"');
+      err.code = '23503';
+      err.constraint = 'classes_department_id_fkey';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => academicService.createClass({}, { collegeId: 'c1', className: '3rd Sem · CS-A', departmentId: 'missing-dept' }),
+      academicService.ClassDepartmentNotFoundError,
+    );
+  });
+
   await t.test('createClass lets a non-conflict repository error pass through unchanged', async () => {
     const boom = new Error('connection lost');
     const createMock = t.mock.method(classRepository, 'create', async () => {
@@ -222,10 +237,17 @@ test('AcademicService validation and audit logging (no DB)', async (t) => {
       auditMock.mock.restore();
     });
 
-    await academicService.updateClass({}, 'class-id', { timetableStatus: 'Pending HOD' }, { userId: 'u1' });
+    await academicService.updateClass({}, 'class-id', { className: 'Renamed Class' }, { userId: 'u1' });
 
     assert.equal(auditMock.mock.callCount(), 1);
     assert.equal(auditMock.mock.calls[0].arguments[1].action, 'class_updated');
+  });
+
+  await t.test('updateClass rejects a direct attempt to set a workflow-managed timetableStatus', async () => {
+    await assert.rejects(
+      () => academicService.updateClass({}, 'class-id', { timetableStatus: 'Approved' }, { userId: 'u1' }),
+      academicService.ClassTimetableStatusManagedByWorkflowError,
+    );
   });
 
   await t.test('updateClass against a nonexistent id does not write an audit entry', async () => {

@@ -43,7 +43,9 @@
 // unchanged, still flagged, not this slice's job either.
 
 const crypto = require('node:crypto');
+const security = require('../security');
 const staffRepository = require('../repositories/staffRepository');
+const authRepository = require('../repositories/authRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const workflowService = require('./workflowService');
 const authService = require('./authService');
@@ -74,6 +76,8 @@ class StaffUserConflictError extends Error {}
 // the exact constraint name on a 23505).
 class StaffCodeConflictError extends Error {}
 
+class StaffAccountConflictError extends Error {}
+
 // staff_user_id_fkey (staff.user_id -> users.id) violated (Postgres
 // 23503) — the given userId doesn't exist in users. Follows
 // platformService.js's CollegeNotFoundError precedent: staff has
@@ -82,6 +86,11 @@ class StaffCodeConflictError extends Error {}
 // caller-supplied free text), so any 23503 here unambiguously means
 // this, no separate existence check needed.
 class StaffUserNotFoundError extends Error {}
+
+// staff_department_id_fkey (staff.department_id -> departments.id)
+// violated (Postgres 23503) — the given departmentId doesn't exist.
+// Same precedent as StaffUserNotFoundError.
+class StaffDepartmentNotFoundError extends Error {}
 
 // submitStaffRegistration/approveStaffRegistration/rejectStaffRegistration
 // given a staffId with no matching row — a required lookup (the
@@ -107,6 +116,28 @@ class StaffPrincipalNotFoundError extends Error {}
 // "a required lookup, not an optional fetch" shape.
 class StaffRegistrationNotPendingError extends Error {}
 
+// This session's own task: "at most one active Principal per college."
+// Thrown by assertSingleActiveRoleHolder (checked inside
+// approveStaffRegistration, before authService.activateUser ever
+// runs) when the staff row being activated belongs to a users.role =
+// 'principal' account and this college already has a different active
+// principal. Backed by a real DB-level partial unique index too
+// (users_one_active_principal_per_college — see that migration's own
+// comment for why this one case can be a plain single-table
+// constraint) — this check is the clean, well-typed error path;
+// the index is the backstop for anything that reaches
+// authService.activateUser some other way.
+class StaffPrincipalAlreadyActiveError extends Error {}
+
+// Same rule, for HOD: "at most one active HOD per department." Unlike
+// Principal, department_id lives on `staff` while role/is_active live
+// on `users` — no single-table index can express this join, so unlike
+// StaffPrincipalAlreadyActiveError there is no DB-level backstop here,
+// only this service-level check (staffRepository.findByCollegeDepartmentAndRole
+// already filters users.is_active = true, matching this rule's own
+// definition of "active").
+class StaffHodAlreadyActiveError extends Error {}
+
 // The fields this service accepts for create/update, deliberately
 // listed here rather than trusting staffRepository's own COLUMNS
 // whitelist to be the only line of defense — same defense-in-depth
@@ -125,6 +156,7 @@ const ALLOWED_FIELDS = [
   'dob',
   'phone',
   'department',
+  'departmentId',
   'designation',
   'qualification',
   'hasPhd',
@@ -181,6 +213,9 @@ async function createStaff(client, { collegeId, userId, fullName, ...rest }, { a
     if (err.code === '23503' && err.constraint === 'staff_user_id_fkey') {
       throw new StaffUserNotFoundError(`userId ${JSON.stringify(userId)} does not exist`);
     }
+    if (err.code === '23503' && err.constraint === 'staff_department_id_fkey') {
+      throw new StaffDepartmentNotFoundError(`departmentId ${JSON.stringify(rest.departmentId)} does not exist`);
+    }
     throw err;
   }
 
@@ -198,6 +233,68 @@ async function createStaff(client, { collegeId, userId, fullName, ...rest }, { a
 
 // null means no staff profile exists with this id — not an error. The
 // route turns that into 404, same as studentService.getStudent.
+async function provisionHodAccount(client, { collegeId, username, email, fullName, departmentId, ...rest }, { actorUserId } = {}) {
+  if (!username || !email || !fullName || !departmentId || !actorUserId) {
+    throw new StaffValidationError('username, email, fullName, departmentId, and actorUserId are required');
+  }
+
+  const existing = await staffRepository.findByCollegeDepartmentAndRole(client, collegeId, departmentId, 'hod');
+  if (existing !== null) {
+    throw new StaffHodAlreadyActiveError(`department ${JSON.stringify(departmentId)} already has an active hod`);
+  }
+
+  let user;
+  try {
+    user = await authRepository.createUser(client, {
+      collegeId,
+      username,
+      email,
+      passwordHash: await security.hashPassword(security.generateTemporaryPassword()),
+      role: 'hod',
+      isActive: false,
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      throw new StaffAccountConflictError(`username ${JSON.stringify(username)} is already taken`);
+    }
+    throw err;
+  }
+
+  let staff;
+  try {
+    staff = await createStaff(
+      client,
+      { collegeId, userId: user.id, fullName, departmentId, ...rest },
+      { actorUserId },
+    );
+    staff = await assignStaffCode(client, staff.id);
+
+    const { user: activatedUser, plainPassword } = await authService.activateUser(client, user.id, { activatedBy: actorUserId });
+    await notificationService.sendStaffCredentialsEmail(client, {
+      to: activatedUser.email,
+      username: activatedUser.username,
+      password: plainPassword,
+      staffCode: staff.staff_code,
+    });
+  } catch (err) {
+    if (err.code === '23505' && err.constraint === 'users_one_active_hod_per_department') {
+      throw new StaffHodAlreadyActiveError(`department ${JSON.stringify(departmentId)} already has an active hod`);
+    }
+    throw err;
+  }
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId,
+    userId: actorUserId,
+    action: 'hod_account_provisioned',
+    entity: 'staff',
+    entityId: staff.id,
+    metadata: { userId: user.id, departmentId },
+  });
+
+  return { user, staff };
+}
+
 async function getStaff(client, id) {
   return staffRepository.findById(client, id);
 }
@@ -212,6 +309,9 @@ async function updateStaff(client, id, fields, { userId }) {
   } catch (err) {
     if (err.code === '23505' && err.constraint === 'staff_college_id_staff_code_key') {
       throw new StaffCodeConflictError(`staff_code ${JSON.stringify(patch.staffCode)} already exists for this college`);
+    }
+    if (err.code === '23503' && err.constraint === 'staff_department_id_fkey') {
+      throw new StaffDepartmentNotFoundError(`departmentId ${JSON.stringify(patch.departmentId)} does not exist`);
     }
     throw err;
   }
@@ -269,10 +369,10 @@ async function listStaff(client, { limit, offset } = {}) {
 // submission cannot build a valid approver_chain without this, same
 // "required lookup" precedent createStaff's own error mapping already
 // established for a bad FK.
-async function findHodForDepartment(client, collegeId, department) {
-  const hod = await staffRepository.findByCollegeDepartmentAndRole(client, collegeId, department, 'hod');
+async function findHodForDepartment(client, collegeId, departmentId) {
+  const hod = await staffRepository.findByCollegeDepartmentAndRole(client, collegeId, departmentId, 'hod');
   if (hod === null) {
-    throw new StaffHodNotFoundError(`no hod found for department ${JSON.stringify(department)}`);
+    throw new StaffHodNotFoundError(`no active hod found for departmentId ${JSON.stringify(departmentId)}`);
   }
   return hod;
 }
@@ -308,11 +408,11 @@ async function submitStaffRegistration(client, staffId, { requestedByUserId, ori
   if (staff === null) {
     throw new StaffNotFoundError(`staff ${JSON.stringify(staffId)} does not exist`);
   }
-  if (!staff.department) {
-    throw new StaffValidationError(`staff ${JSON.stringify(staffId)} has no department set, cannot resolve an HOD approver`);
+  if (!staff.department_id) {
+    throw new StaffValidationError(`staff ${JSON.stringify(staffId)} has no departmentId set, cannot resolve an HOD approver`);
   }
 
-  const hod = await findHodForDepartment(client, staff.college_id, staff.department);
+  const hod = await findHodForDepartment(client, staff.college_id, staff.department_id);
   const principal = await findPrincipal(client, staff.college_id);
 
   return workflowService.submitRequest(client, {
@@ -391,6 +491,41 @@ async function assignStaffCode(client, staffId) {
 // self-approval rule and the correct-actor-for-this-step check ran
 // before any of this executes.
 //
+// This session's own task: enforce "at most one active Principal per
+// college" / "at most one active HOD per department" at the one real
+// place a users row actually flips is_active -> true today
+// (approveStaffRegistration's terminal Approved outcome, just before
+// authService.activateUser runs) — checked BEFORE activation, so a
+// rejected check leaves nothing mutated (staff_code was already
+// assigned by this point, but that's a harmless, idempotent-on-retry
+// side effect, not a security-relevant one). Only fires for the two
+// roles the rule actually names; every other role (staff, college_admin)
+// passes through untouched. excludeUserId guards a re-approval of the
+// SAME account being idempotent rather than tripping over itself as
+// its own "existing" match.
+async function assertSingleActiveRoleHolder(client, staff, user) {
+  if (user.role === 'principal') {
+    const existing = await staffRepository.findByCollegeAndRole(client, staff.college_id, 'principal');
+    if (existing && existing.user_id !== user.id) {
+      throw new StaffPrincipalAlreadyActiveError(
+        `college ${JSON.stringify(staff.college_id)} already has an active principal`,
+      );
+    }
+    return;
+  }
+  if (user.role === 'hod') {
+    if (!staff.department_id) {
+      throw new StaffValidationError(`staff ${JSON.stringify(staff.id)} has no departmentId set, cannot verify hod uniqueness`);
+    }
+    const existing = await staffRepository.findByCollegeDepartmentAndRole(client, staff.college_id, staff.department_id, 'hod');
+    if (existing && existing.user_id !== user.id) {
+      throw new StaffHodAlreadyActiveError(
+        `department ${JSON.stringify(staff.department_id)} already has an active hod`,
+      );
+    }
+  }
+}
+
 // Order matters: staff_code first (a staffService-owned mutation),
 // then authService.activateUser (users is AuthService's table, not
 // this file's — Architecture.md 2.5), then the email — composing the
@@ -409,6 +544,9 @@ async function approveStaffRegistration(client, staffId, { actorUserId, remarks 
   }
 
   const staff = await assignStaffCode(client, staffId);
+  const targetUser = await authRepository.getUserById(client, staff.user_id);
+  await assertSingleActiveRoleHolder(client, staff, targetUser);
+
   const { user, plainPassword } = await authService.activateUser(client, staff.user_id, { activatedBy: actorUserId });
 
   await notificationService.sendStaffCredentialsEmail(client, {
@@ -439,12 +577,17 @@ module.exports = {
   StaffValidationError,
   StaffUserConflictError,
   StaffCodeConflictError,
+  StaffAccountConflictError,
   StaffUserNotFoundError,
+  StaffDepartmentNotFoundError,
   StaffNotFoundError,
   StaffHodNotFoundError,
   StaffPrincipalNotFoundError,
   StaffRegistrationNotPendingError,
+  StaffPrincipalAlreadyActiveError,
+  StaffHodAlreadyActiveError,
   createStaff,
+  provisionHodAccount,
   getStaff,
   updateStaff,
   removeStaff,

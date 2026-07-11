@@ -32,6 +32,7 @@ const COLUMNS = [
   ['collegeId', 'college_id'],
   ['className', 'class_name'],
   ['department', 'department'],
+  ['departmentId', 'department_id'],
   ['semester', 'semester'],
   ['tutorUserId', 'tutor_user_id'],
   ['timetableStatus', 'timetable_status'],

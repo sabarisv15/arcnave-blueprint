@@ -29,12 +29,17 @@
 // `staff` has no `role` column of its own (role lives on users; see
 // this file's own header comment), so resolving "the HOD of this
 // department" or "this college's Principal" for a workflow_requests
-// approver_chain needs both tables. Both order by staff.created_at
-// and LIMIT 1 rather than asserting exactly one row exists: nothing
-// in this schema enforces "at most one HOD per department" or "at
-// most one Principal per college" today, so picking the earliest-
-// created one is a deliberate, minimal tie-break, not a claim that a
-// second one couldn't exist.
+// approver_chain needs both tables. Both filter users.is_active = true
+// and order by staff.created_at LIMIT 1: an inactive (deactivated or
+// never-activated) account is never a valid approver or a valid
+// "the current HOD/Principal" answer, and — this session's own task —
+// staffService.assertSingleActiveRoleHolder relies on this same
+// active-only definition to enforce "at most one active HOD per
+// department" / (alongside the real DB-level partial unique index)
+// "at most one active Principal per college." Department matching is
+// staff.department_id (the departments FK — see the
+// staff-classes-department-fk migration), not the legacy free-text
+// department column.
 
 const COLUMNS = [
   ['collegeId', 'college_id'],
@@ -45,6 +50,7 @@ const COLUMNS = [
   ['dob', 'dob'],
   ['phone', 'phone'],
   ['department', 'department'],
+  ['departmentId', 'department_id'],
   ['designation', 'designation'],
   ['qualification', 'qualification'],
   ['hasPhd', 'has_phd'],
@@ -121,14 +127,14 @@ async function list(client, { limit = 50, offset = 0 } = {}) {
   return result.rows;
 }
 
-async function findByCollegeDepartmentAndRole(client, collegeId, department, role) {
+async function findByCollegeDepartmentAndRole(client, collegeId, departmentId, role) {
   const result = await client.query(
     `SELECT staff.* FROM staff
      JOIN users ON users.id = staff.user_id
-     WHERE staff.college_id = $1 AND staff.department = $2 AND users.role = $3
+     WHERE staff.college_id = $1 AND staff.department_id = $2 AND users.role = $3 AND users.is_active = true
      ORDER BY staff.created_at
      LIMIT 1`,
-    [collegeId, department, role],
+    [collegeId, departmentId, role],
   );
   return result.rows[0] || null;
 }
@@ -137,7 +143,7 @@ async function findByCollegeAndRole(client, collegeId, role) {
   const result = await client.query(
     `SELECT staff.* FROM staff
      JOIN users ON users.id = staff.user_id
-     WHERE staff.college_id = $1 AND users.role = $2
+     WHERE staff.college_id = $1 AND users.role = $2 AND users.is_active = true
      ORDER BY staff.created_at
      LIMIT 1`,
     [collegeId, role],

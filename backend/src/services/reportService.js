@@ -28,6 +28,9 @@
 const studentService = require('./studentService');
 const documentService = require('./documentService');
 const generatedReportRepository = require('../repositories/generatedReportRepository');
+const attendanceRepository = require('../repositories/attendanceRepository');
+const financeRepository = require('../repositories/financeRepository');
+const feePaymentRepository = require('../repositories/feePaymentRepository');
 const csvGenerator = require('../generators/csvGenerator');
 const pdfGenerator = require('../generators/pdfGenerator');
 const excelGenerator = require('../generators/excelGenerator');
@@ -101,12 +104,57 @@ const STUDENT_EXPORT_COLUMNS = [
 // shape PrincipalDashboard.jsx's own `?limit=200` fetches already use
 // elsewhere in this codebase.
 const STUDENT_EXPORT_LIMIT = 5000;
+const REPORT_LIMIT = 5000;
 
 function buildStudentExportReportModel(students) {
   return {
     title: 'Student Export',
     columns: STUDENT_EXPORT_COLUMNS.map(([id, label]) => ({ id, label })),
     rows: students,
+  };
+}
+
+function buildAttendanceReportModel(rows) {
+  return {
+    title: 'Attendance Report',
+    columns: [
+      { id: 'session_date', label: 'Date' },
+      { id: 'class_id', label: 'Class' },
+      { id: 'hour_index', label: 'Hour' },
+      { id: 'total_students', label: 'Total' },
+      { id: 'absent_count', label: 'Absent' },
+      { id: 'present_count', label: 'Present' },
+    ],
+    rows: rows.map((row) => {
+      const absentCount = Array.isArray(row.absent_student_ids) ? row.absent_student_ids.length : 0;
+      return { ...row, absent_count: absentCount, present_count: Number(row.total_students) - absentCount };
+    }),
+  };
+}
+
+function buildFinanceReportModel({ feeStructures, feePayments }) {
+  return {
+    title: 'Finance Report',
+    columns: [
+      { id: 'section', label: 'Section' },
+      { id: 'reference', label: 'Reference' },
+      { id: 'status', label: 'Status' },
+      { id: 'amount', label: 'Amount' },
+    ],
+    rows: [
+      ...feeStructures.map((row) => ({
+        section: 'Fee Structure',
+        reference: `${row.academic_year} ${row.fee_category}`,
+        status: row.status,
+        amount: row.amount,
+      })),
+      ...feePayments.map((row) => ({
+        section: 'Payment',
+        reference: row.student_id,
+        status: row.status,
+        amount: '',
+      })),
+    ],
   };
 }
 
@@ -167,8 +215,72 @@ async function generateStudentExportReport(client, { collegeId, format = 'csv' }
   }
 }
 
+async function generateSimpleReport(client, { collegeId, format = 'csv', reportType, titleBuilder, loadRows }, { actorUserId } = {}) {
+  if (!collegeId || !actorUserId) {
+    throw new ReportValidationError('collegeId and actorUserId are required');
+  }
+  const generator = GENERATORS[format];
+  if (!generator) {
+    throw new ReportFormatError(`format ${JSON.stringify(format)} is not supported`);
+  }
+
+  try {
+    const bytes = await generator.generate(titleBuilder(await loadRows()));
+    const document = await documentService.uploadDocument(
+      client,
+      { collegeId, docType: 'generated_report', fileName: `${reportType}_${Date.now()}.${generator.extension}`, mimeType: generator.mimeType, fileBuffer: bytes },
+      { actorUserId },
+    );
+    return await generatedReportRepository.create(client, {
+      collegeId,
+      requestedByUserId: actorUserId,
+      reportType,
+      format,
+      parameters: {},
+      status: 'completed',
+      documentId: document.id,
+    });
+  } catch (err) {
+    if (err instanceof ReportValidationError || err instanceof ReportFormatError) throw err;
+    return generatedReportRepository.create(client, {
+      collegeId,
+      requestedByUserId: actorUserId,
+      reportType,
+      format,
+      parameters: {},
+      status: 'failed',
+      errorMessage: err.message,
+    });
+  }
+}
+
+async function generateAttendanceReport(client, { collegeId, format = 'csv' }, opts = {}) {
+  return generateSimpleReport(client, {
+    collegeId,
+    format,
+    reportType: 'attendance_report',
+    titleBuilder: buildAttendanceReportModel,
+    loadRows: () => attendanceRepository.list(client, { limit: REPORT_LIMIT }),
+  }, opts);
+}
+
+async function generateFinanceReport(client, { collegeId, format = 'csv' }, opts = {}) {
+  return generateSimpleReport(client, {
+    collegeId,
+    format,
+    reportType: 'finance_report',
+    titleBuilder: buildFinanceReportModel,
+    loadRows: async () => ({
+      feeStructures: await financeRepository.list(client, { limit: REPORT_LIMIT }),
+      feePayments: await feePaymentRepository.list(client, { limit: REPORT_LIMIT }),
+    }),
+  }, opts);
+}
+
 module.exports = {
   ReportValidationError,
   ReportFormatError,
   generateStudentExportReport,
+  generateAttendanceReport,
+  generateFinanceReport,
 };

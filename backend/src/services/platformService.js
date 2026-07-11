@@ -32,12 +32,25 @@ const config = require('../config');
 const security = require('../security');
 const platformRepository = require('../repositories/platformRepository');
 const principalInvitationRepository = require('../repositories/principalInvitationRepository');
+const notificationService = require('./notificationService');
 
 // Generic platform-admin authentication failure — same single-
 // message-for-every-failure-mode reasoning as AuthError in
 // authService.js: unknown username and wrong password must look
 // identical to the caller.
 class PlatformAuthError extends Error {}
+
+// bootstrapPlatformAdmin given no username/email/password — the three
+// things a platform_admins row needs. Raised before any repository
+// call, same as every other pre-query guard in this codebase.
+class PlatformAdminValidationError extends Error {}
+
+// bootstrapPlatformAdmin called when a platform_admins row already
+// exists — this session's own task: "a safe first platform-admin setup
+// method that does not require manually inserting database data,"
+// which by definition must stop working the moment a first admin is
+// real, or it would just be an unauthenticated way to create more.
+class PlatformAlreadyBootstrappedError extends Error {}
 
 // college_id or subdomain already exists (colleges' two UNIQUE
 // constraints).
@@ -50,6 +63,54 @@ class DuplicateCollegeError extends Error {}
 // same reasoning as DuplicateCollegeError's unique_violation catch
 // above.
 class CollegeNotFoundError extends Error {}
+
+// resendPrincipalInvitation/revokePrincipalInvitation given an
+// invitationId with no matching row.
+class PrincipalInvitationNotFoundError extends Error {}
+
+// resendPrincipalInvitation/revokePrincipalInvitation given an
+// invitation that's already accepted or already revoked — neither can
+// be resent or revoked again. One error class for both sub-cases,
+// same "the caller only needs to know this isn't actionable" reasoning
+// workflowService.WorkflowRequestAlreadyResolvedError already uses for
+// its own two terminal states.
+class PrincipalInvitationNotPendingError extends Error {}
+
+// This session's own task: "a safe first platform-admin setup method
+// that does not require manually inserting database data." Safe means
+// two things: (1) it can never create a SECOND admin once one exists —
+// enforced at the DB level by platformRepository.bootstrapPlatformAdmin's
+// atomic INSERT ... WHERE NOT EXISTS, not a check-then-insert this
+// service could race against itself; (2) deliberately unauthenticated
+// (there is no admin yet to authenticate as — the same structural
+// reason /invitations/accept is this codebase's other unauthenticated
+// tenant-side route), but that only stays safe because of (1): the
+// window in which this route does anything at all is exactly "zero
+// platform_admins rows exist," which in practice means once at
+// first deploy.
+//
+// A minimum password length is enforced here — nowhere else in this
+// codebase validates password strength (activateUser always generates
+// its own random one), but every other credential-creation path is
+// gated behind an existing authenticated actor; this is the one
+// exception, so it gets its own floor.
+const MIN_BOOTSTRAP_PASSWORD_LENGTH = 8;
+
+async function bootstrapPlatformAdmin(pool, { username, email, password }) {
+  if (!username || !email || !password) {
+    throw new PlatformAdminValidationError('username, email, and password are required');
+  }
+  if (password.length < MIN_BOOTSTRAP_PASSWORD_LENGTH) {
+    throw new PlatformAdminValidationError(`password must be at least ${MIN_BOOTSTRAP_PASSWORD_LENGTH} characters`);
+  }
+
+  const passwordHash = await security.hashPassword(password);
+  const admin = await platformRepository.bootstrapPlatformAdmin(pool, { username, email, passwordHash });
+  if (admin === null) {
+    throw new PlatformAlreadyBootstrappedError('a platform admin already exists; bootstrap can only run once');
+  }
+  return admin;
+}
 
 async function login(pool, { username, password }) {
   const admin = await platformRepository.getPlatformAdminByUsername(pool, username);
@@ -76,16 +137,16 @@ async function createCollege(pool, { collegeId, name, subdomain, createdBy }) {
   }
 }
 
-// Records an invitation and returns the raw token — the route layer
-// hands it back directly in the response body as a temporary stand-in
-// for actually emailing an accept-link, since NotificationService
-// doesn't exist yet (same pattern as password-reset's 501 stub). The
-// raw token is never persisted — only its hash, via security.js's
-// existing generateRefreshToken/hashRefreshToken, reused verbatim
-// rather than duplicated: an invitation token has the same threat-
-// model shape as a refresh token (server-generated high-entropy
-// randomness), so the same reasoning for SHA-256 over argon2 applies
-// unchanged.
+// Records an invitation and emails the raw token to the invitee
+// (notificationService.sendPrincipalInvitationEmail — NotificationService
+// exists now, Module 8) — this session's own task instruction: an
+// invitation token must never be returned in an API response, only
+// delivered via the existing notification flow. The raw token is
+// never persisted — only its hash, via security.js's existing
+// generateRefreshToken/hashRefreshToken, reused verbatim rather than
+// duplicated: an invitation token has the same threat-model shape as a
+// refresh token (server-generated high-entropy randomness), so the
+// same reasoning for SHA-256 over argon2 applies unchanged.
 async function invitePrincipal(pool, { collegeId, email, createdBy }) {
   const rawToken = security.generateRefreshToken();
   const expiresAt = new Date(Date.now() + config.principalInvitationExpireHours * 60 * 60 * 1000);
@@ -105,19 +166,102 @@ async function invitePrincipal(pool, { collegeId, email, createdBy }) {
     }
     throw err;
   }
-  return {
+
+  await notificationService.sendPrincipalInvitationEmail(pool, {
+    to: invitation.email,
     collegeId: invitation.college_id,
-    email: invitation.email,
     token: rawToken,
     expiresAt: invitation.expires_at,
+  });
+
+  return {
+    invitationId: invitation.id,
+    collegeId: invitation.college_id,
+    email: invitation.email,
+    expiresAt: invitation.expires_at,
+  };
+}
+
+// Shared load+validate for resendPrincipalInvitation/
+// revokePrincipalInvitation: the invitation must exist and must still
+// be pending (never accepted, never revoked) — same "load then
+// validate" shape financeService.loadPendingFeeStructureApproval
+// already established for a different table.
+async function loadPendingInvitation(pool, invitationId) {
+  const invitation = await principalInvitationRepository.getInvitationById(pool, invitationId);
+  if (invitation === null) {
+    throw new PrincipalInvitationNotFoundError(`invitation ${JSON.stringify(invitationId)} does not exist`);
+  }
+  if (invitation.accepted_at !== null || invitation.revoked_at !== null) {
+    throw new PrincipalInvitationNotPendingError(`invitation ${JSON.stringify(invitationId)} is no longer pending`);
+  }
+  return invitation;
+}
+
+// Rotates the invitation's token and expiry, then re-sends the email —
+// the same row, not a new invitation, so accepting the OLD token (if
+// it leaked, e.g. from a mis-delivered email) stops being possible the
+// moment a fresh one is issued.
+async function resendPrincipalInvitation(pool, invitationId) {
+  const existing = await loadPendingInvitation(pool, invitationId);
+
+  const rawToken = security.generateRefreshToken();
+  const expiresAt = new Date(Date.now() + config.principalInvitationExpireHours * 60 * 60 * 1000);
+  const invitation = await principalInvitationRepository.resendInvitation(pool, invitationId, {
+    tokenHash: security.hashRefreshToken(rawToken),
+    expiresAt,
+  });
+  if (invitation === null) {
+    // Lost a race against a concurrent accept/revoke between the load
+    // above and this update — re-check to report the real reason.
+    throw new PrincipalInvitationNotPendingError(`invitation ${JSON.stringify(invitationId)} is no longer pending`);
+  }
+
+  await notificationService.sendPrincipalInvitationEmail(pool, {
+    to: existing.email,
+    collegeId: existing.college_id,
+    token: rawToken,
+    expiresAt: invitation.expires_at,
+  });
+
+  return {
+    invitationId: invitation.id,
+    collegeId: invitation.college_id,
+    email: invitation.email,
+    expiresAt: invitation.expires_at,
+  };
+}
+
+// No email on revoke — nothing to tell the invitee that isn't already
+// implied by the token simply no longer working.
+async function revokePrincipalInvitation(pool, invitationId) {
+  await loadPendingInvitation(pool, invitationId);
+
+  const invitation = await principalInvitationRepository.revokeInvitation(pool, invitationId);
+  if (invitation === null) {
+    throw new PrincipalInvitationNotPendingError(`invitation ${JSON.stringify(invitationId)} is no longer pending`);
+  }
+
+  return {
+    invitationId: invitation.id,
+    collegeId: invitation.college_id,
+    email: invitation.email,
+    revokedAt: invitation.revoked_at,
   };
 }
 
 module.exports = {
   PlatformAuthError,
+  PlatformAdminValidationError,
+  PlatformAlreadyBootstrappedError,
   DuplicateCollegeError,
   CollegeNotFoundError,
+  PrincipalInvitationNotFoundError,
+  PrincipalInvitationNotPendingError,
+  bootstrapPlatformAdmin,
   login,
   createCollege,
   invitePrincipal,
+  resendPrincipalInvitation,
+  revokePrincipalInvitation,
 };

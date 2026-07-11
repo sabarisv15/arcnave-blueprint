@@ -56,6 +56,36 @@ function createReportsRouter() {
     }
   }));
 
+  router.post('/reports/attendance', requireRole('principal'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const report = await reportService.generateAttendanceReport(
+        req.dbClient,
+        { collegeId: req.collegeId, format: (req.body || {}).format },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(report);
+    } catch (err) {
+      if (mapReportServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/reports/finance', requireRole('principal'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const report = await reportService.generateFinanceReport(
+        req.dbClient,
+        { collegeId: req.collegeId, format: (req.body || {}).format },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(report);
+    } catch (err) {
+      if (mapReportServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
   return router;
 }
 

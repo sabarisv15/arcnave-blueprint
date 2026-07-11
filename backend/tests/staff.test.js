@@ -21,6 +21,7 @@ const http = require('node:http');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const notificationService = require('../src/services/notificationService');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PASSWORD = 'StaffTestPass123!';
@@ -109,12 +110,18 @@ async function seedTenant(adminPool, label) {
     );
     userIds[username] = result.rows[0].id;
   }
-  return { ...college, userIds };
+  const department = await adminPool.query(
+    `INSERT INTO departments (college_id, name, approved_intake)
+     VALUES ($1, $2, 60) RETURNING id`,
+    [college.collegeId, `Computer Science ${label}`],
+  );
+  return { ...college, userIds, departmentIds: { cse: department.rows[0].id } };
 }
 
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM staff WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM departments WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM colleges WHERE college_id = $1', [college.collegeId]);
@@ -166,6 +173,51 @@ test('staff', async (t) => {
     assert.equal(resp.body.designation, 'Professor');
     assert.equal(resp.body.college_id, collegeA.collegeId);
     assert.equal(resp.body.user_id, collegeA.userIds.subjectuser);
+  });
+
+  await t.test('principal can provision the first HOD account for a department, but not a second one', async () => {
+    const token = await login(collegeA, 'principaluser');
+    let mailedCredentials = null;
+    const emailMock = t.mock.method(notificationService, 'sendStaffCredentialsEmail', async (client, args) => {
+      mailedCredentials = args;
+      return { status: 'stubbed' };
+    });
+    t.after(() => emailMock.mock.restore());
+
+    const username = `hod${crypto.randomUUID().slice(0, 8)}`;
+    const created = await post(baseUrl, '/api/v1/staff/hod-accounts', headersFor(collegeA, token), {
+      username,
+      email: `${username}@example.com`,
+      full_name: 'First HOD',
+      department_id: collegeA.departmentIds.cse,
+      designation: 'Head of Department',
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.role, 'hod');
+    assert.equal(created.body.department_id, collegeA.departmentIds.cse);
+    assert.ok(created.body.staff_code);
+    assert.equal('password' in created.body, false);
+    assert.equal(mailedCredentials.username, username);
+    assert.ok(mailedCredentials.password);
+
+    const hodLogin = await requestJson(
+      baseUrl,
+      '/api/v1/auth/login',
+      'POST',
+      {
+        headers: { host: hostFor(collegeA.subdomain) },
+        body: { username, password: mailedCredentials.password },
+      },
+    );
+    assert.equal(hodLogin.status, 200);
+
+    const second = await post(baseUrl, '/api/v1/staff/hod-accounts', headersFor(collegeA, token), {
+      username: `hod${crypto.randomUUID().slice(0, 8)}`,
+      email: `hod2-${crypto.randomUUID().slice(0, 8)}@example.com`,
+      full_name: 'Second HOD',
+      department_id: collegeA.departmentIds.cse,
+    });
+    assert.equal(second.status, 409);
   });
 
   await t.test('create rejects a missing user_id with 400, not a 500', async () => {

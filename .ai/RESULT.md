@@ -1,66 +1,60 @@
 # RESULT
 
-## Files changed
-- `backend/src/services/aiToolRegistry.js` (+`AiToolL3BypassError`,
-  +`assertL3ResultNotBypassed`, `invokeTool` now checks it after any
-  `L3` handler returns)
-- `docs/modules/Module-09-AI.md` (Policy Gate section + Known Gaps
-  updated — L3 safety now has a real runtime backstop, not only a
-  documented convention)
-- `backend/tests/ai-service.test.js` (+3 tests: the bypass backstop
-  catches two distinct bad shapes; an `L1` tool with no
-  `workflow_request_id` is correctly left alone; fixed 2 pre-existing
-  tests whose dummy/mocked results didn't match the real DB row shape
-  the new check expects)
+## RAG slice (search_documents, closes Module 9)
 
-No migration, no route change.
+Confirmed NIM has a real embeddings endpoint (`/v1/embeddings`,
+OpenAI-compatible) — used it, not a second provider. Model:
+`nvidia/nv-embedqa-e5-v5` (1024-dim, asymmetric query/passage
+embeddings, purpose-built for retrieval).
 
-## What was built
-`invokeTool` now runs `tool.handler(...)`, and for `L3` tools only,
-asserts the result: `workflow_request_id` must be truthy, and `status`
-must not be `'Dispatched'`/`'sent'`. Either violation throws
-`AiToolL3BypassError` and writes an `ai_tool_denied` audit_log row
-(`reason: 'l3_bypass'`), same pattern every other Policy Gate rejection
-already uses. This runs strictly AFTER the handler executes — it
-cannot undo a bad handler's already-happened side effects, only
-guarantee they don't go undetected. `L1`/`L2` results are never
-checked (a `workflow_request_id`-less result is completely normal for
-them).
+### Files changed
+- `docker-compose.yml` — `db` image `postgres:16` → `pgvector/pgvector:pg16` (drop-in, extension preinstalled).
+- `backend/migrations/1753200000000_module-9-document-chunks-schema.js` — `ai_document_chunks` (pgvector, HNSW cosine index, RLS, no UPDATE/DELETE grant).
+- `backend/src/repositories/aiDocumentChunkRepository.js` — new: `create`, `findByDocumentId`, `search` (cosine `<=>`, joined to `documents` to exclude soft-deleted).
+- `backend/src/services/documentSearchService.js` — new Business Service: `ingestDocument` (chunk+embed), `searchDocuments` (embed query + row-level classification filter), doc_type→classification map, Aadhaar block.
+- `backend/src/services/documentService.js` — gained `AADHAAR_DOC_TYPE` exported constant only (no auto-ingest hook — see below).
+- `backend/src/services/aiClassificationAccess.js` — new: `ROLE_CLASSIFICATION_ACCESS` pulled out of `aiToolRegistry.js` so both the Policy Gate and `documentSearchService`'s row-level filter share one source.
+- `backend/src/services/aiToolRegistry.js` — registers `search_documents` (L1/Internal, `allowedRoles` includes `staff`); sources the classification matrix from the new shared module.
+- `backend/src/services/llmProvider.js` — new `embed(texts, {inputType})` + `EMBEDDING_DIMENSIONS`; shared transport factored into `postJson`.
+- `backend/src/config.js` / `.env.example` — `NIM_EMBEDDING_MODEL`.
+- `backend/tests/document-search-service.test.js` — new, 19 unit tests (chunking, classification mapping, Aadhaar block, mocked ingest/search).
+- `docs/modules/Module-09-AI.md` — RAG slice section + live verification results + new Known Gaps.
+- `.ai/TASK.md`, `.ai/RESULT.md` — this entry.
 
-## Bugs caught by the new check itself, fixed before merging
-The backstop immediately exposed two pre-existing test fixtures that
-didn't reflect real shapes:
-1. An earlier dummy `L3` test tool's handler returned `{ok: 'l3'}` —
-   no `workflow_request_id`. Fixed to return a real submission-shaped
-   result.
-2. The real `request_notification_send` unit test's hand-written
-   `notificationRepository.update` mock echoed back the camelCase
-   `{workflowRequestId}` input instead of a real DB row's snake_case
-   `workflow_request_id` (what `RETURNING *` actually returns) — the
-   backstop correctly flagged this as indistinguishable from a bypass.
-   Fixed the mock to match the real repository's return shape; this
-   was a latent test-fidelity gap the new check surfaced, not a
-   production bug.
+### A real bug caught and fixed mid-slice
+First design auto-wired ingestion into `documentService.uploadDocument`
+(best-effort, post-upload). This broke `reports.test.js`: report
+exports are `text/csv`, so every report-generation test would silently
+attempt a REAL embedding call whenever a real `NIM_API_KEY` happens to
+be configured (as it now is) — a live network call hidden inside the
+committed suite. It also left orphaned `ai_document_chunks` rows that
+broke the test's hard-delete cleanup (`ai_document_chunks_document_id_fkey`
+violation). Fixed by making `ingestDocument` explicit-only — never
+auto-wired into `uploadDocument` — per the task's own "or a separate
+backfill job" option. Confirmed with a from-scratch Docker rebuild +
+full suite re-run: 520/520 clean.
 
-## Verification
-Full backend suite: **501/501**, both at `--test-concurrency=1` and at
-default concurrency (the previously-flaky `reports.test.js`/
-`documents.test.js` shared-directory race did not reproduce this run).
+### Live verification (one-off script, deleted after use)
+Real Postgres (pgvector/HNSW) + real NIM embeddings:
 
-New tests: two deliberately-wrong dummy `L3` tools — one returning no
-`workflow_request_id` at all, one returning a real
-`workflow_request_id` alongside `status: 'Dispatched'` — are both
-caught by `AiToolL3BypassError`, each with its own `ai_tool_denied` row
-(`reason: 'l3_bypass'`). A dummy `L1` tool whose result also happens to
-lack `workflow_request_id` runs normally, unflagged, proving the
-backstop is `L3`-only. The real `request_notification_send` tool
-(exercised by the pre-existing unit and integration tests, now fixed
-to use accurate mock shapes) continues to pass the check as expected.
+| Proof | Result |
+|---|---|
+| Ingest real `birth_cert` (Confidential) + `scholarship_cert` (Restricted) docs | chunked, embedded, classified correctly |
+| Ingest `aadhaar` doc | refused (`DocumentSearchAadhaarBlockedError`), zero chunks written |
+| `search_documents` as principal, real query | 200, real chunks returned |
+| `search_documents` as staff (Internal only) | 200, zero rows (no Internal content exists) |
+| `search_documents` as hod vs principal, scholarship query | hod never sees the Restricted chunk; principal does |
+| Cross-tenant isolation | College A's principal gets zero hits searching College B's distinctive content |
+| Hostile-content-in-doc proof | forged boundary + "ignore previous instructions" round-trips as literal, inert `chunkText` |
 
-## Flags
-- The backstop is a detection mechanism, not a prevention mechanism —
-  documented prominently in both `aiToolRegistry.js` and
-  `Module-09-AI.md`. A bad `L3` handler's real side effect (an actual
-  send) would already have happened before this check runs; code
-  review remains the only thing that prevents it.
-- All flags from prior sessions unchanged.
+### Verification
+- Unit: 19/19 new tests (`document-search-service.test.js`).
+- Full backend suite: **520/520**, `--test-concurrency=1`, real `NIM_API_KEY` present, migrated from a clean volume (proves the migration itself, not just an already-migrated DB).
+- Docker Desktop → up, migrated, tested, torn down (`docker compose down`, volume removed once mid-session to clear orphaned data from the bug above, recreated clean).
+
+### Flags
+- No OCR pipeline — `ingestDocument` only supports `text/*` mime types (real documents are PDF/image; not indexable yet, not faked).
+- Ingestion has no HTTP entry point — explicitly invoked only (a backfill CLI/route is a follow-up).
+- No re-ingestion on document versioning — a re-uploaded doc_type's old chunks are neither cleaned up nor refreshed.
+- `DOC_TYPE_CLASSIFICATION` (documentSearchService.js) is a conservative, code-level default, not sourced from BusinessRules.md — same "flag, revisit via ADR" posture as ADR-020.
+- API key never printed/logged/committed.

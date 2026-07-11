@@ -50,6 +50,10 @@ function mapAcademicServiceError(err, res) {
     res.status(409).json({ detail: err.message });
     return true;
   }
+  if (err instanceof academicService.TimetableImportError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -71,6 +75,27 @@ function createTimetablePeriodsRouter() {
         { actorUserId: req.jwtClaims.sub },
       );
       res.status(201).json(period);
+    } catch (err) {
+      if (mapAcademicServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/timetable-periods/import-csv', requireRole('principal'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const { file_name: fileName, file_base64: fileBase64 } = req.body || {};
+      const result = await academicService.importTimetablePeriodsCsv(
+        req.dbClient,
+        { collegeId: req.collegeId, fileName, fileBuffer: fileBase64 ? Buffer.from(fileBase64, 'base64') : null },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json({
+        raw_document_id: result.rawDocumentId,
+        imported: result.imported,
+        skipped: result.skipped,
+        total_rows: result.totalRows,
+      });
     } catch (err) {
       if (mapAcademicServiceError(err, res)) return;
       throw err;

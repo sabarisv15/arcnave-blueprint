@@ -29,6 +29,7 @@ const STAFF_BODY_FIELDS = [
   ['dob', 'dob'],
   ['phone', 'phone'],
   ['department', 'department'],
+  ['department_id', 'departmentId'],
   ['designation', 'designation'],
   ['qualification', 'qualification'],
   ['has_phd', 'hasPhd'],
@@ -64,8 +65,24 @@ function mapStaffServiceError(err, res) {
     res.status(409).json({ detail: err.message });
     return true;
   }
+  if (err instanceof staffService.StaffAccountConflictError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
   if (err instanceof staffService.StaffUserNotFoundError) {
     res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.StaffDepartmentNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.StaffPrincipalAlreadyActiveError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.StaffHodAlreadyActiveError) {
+    res.status(409).json({ detail: err.message });
     return true;
   }
   if (err instanceof staffService.StaffNotFoundError) {
@@ -127,6 +144,36 @@ function createStaffRouter() {
         { actorUserId: req.jwtClaims.sub },
       );
       res.status(201).json(staff);
+    } catch (err) {
+      if (mapStaffServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/staff/hod-accounts', requireRole('principal'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const { username, email } = req.body || {};
+      const result = await staffService.provisionHodAccount(
+        req.dbClient,
+        {
+          collegeId: req.collegeId,
+          username,
+          email,
+          ...bodyToServiceFields(req.body || {}),
+        },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json({
+        user_id: result.user.id,
+        staff_id: result.staff.id,
+        college_id: result.staff.college_id,
+        username: result.user.username,
+        email: result.user.email,
+        role: result.user.role,
+        staff_code: result.staff.staff_code,
+        department_id: result.staff.department_id,
+      });
     } catch (err) {
       if (mapStaffServiceError(err, res)) return;
       throw err;

@@ -67,6 +67,27 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
     assert.equal('aadhaarNumber' in passedFields, false);
   });
 
+  // This session's own task: optional annual income, used for
+  // scholarship eligibility (financeService.checkScholarshipEligibility).
+  await t.test('createStudent passes annualIncome through to the repository', async () => {
+    const createMock = t.mock.method(studentRepository, 'create', async (client, fields) => ({
+      id: 'new-id',
+      college_id: fields.collegeId,
+    }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      createMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    await studentService.createStudent({}, {
+      collegeId: 'c1', rollNo: 'R1', fullName: 'Alice', userId: 'u1', annualIncome: 45000,
+    });
+
+    const passedFields = createMock.mock.calls[0].arguments[1];
+    assert.equal(passedFields.annualIncome, 45000);
+  });
+
   await t.test('createStudent maps a 23505 unique violation to StudentRollNoConflictError', async () => {
     const createMock = t.mock.method(studentRepository, 'create', async () => {
       const err = new Error('duplicate key value violates unique constraint "students_college_id_roll_no_key"');

@@ -42,6 +42,8 @@ const feePaymentRepository = require('../src/repositories/feePaymentRepository')
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const workflowService = require('../src/services/workflowService');
 const staffService = require('../src/services/staffService');
+const studentService = require('../src/services/studentService');
+const configurationService = require('../src/services/configurationService');
 const financeService = require('../src/services/financeService');
 
 test('FinanceService fee_structures validation and audit logging (no DB)', async (t) => {
@@ -674,5 +676,86 @@ test('FinanceService fee_payments validation and audit logging (no DB)', async (
     assert.equal(auditMock.mock.callCount(), 1);
     assert.equal(auditMock.mock.calls[0].arguments[1].action, 'fee_payment_removed');
     assert.equal('remove' in feePaymentRepository, false);
+  });
+});
+
+// BusinessRules.md Finance / this session's own task: "Students below
+// a configured income threshold become scholarship eligible (exact
+// threshold is per-tenant config, not hardcoded)." studentService/
+// configurationService mocked the same way staffService already is
+// above — never studentRepository/configurationRepository directly
+// (CLAUDE.md rule 1).
+test('FinanceService.checkScholarshipEligibility (no DB)', async (t) => {
+  await t.test('throws ScholarshipStudentNotFoundError for a nonexistent student', async () => {
+    const getStudentMock = t.mock.method(studentService, 'getStudent', async () => null);
+    t.after(() => getStudentMock.mock.restore());
+
+    await assert.rejects(
+      () => financeService.checkScholarshipEligibility({}, 'c1', 'missing-student'),
+      financeService.ScholarshipStudentNotFoundError,
+    );
+  });
+
+  await t.test('reports ineligible with reason no_income_on_file when annual_income is null, never reads the threshold config', async () => {
+    const getStudentMock = t.mock.method(studentService, 'getStudent', async () => ({ id: 's1', annual_income: null }));
+    const getConfigMock = t.mock.method(configurationService, 'getConfiguration');
+    t.after(() => {
+      getStudentMock.mock.restore();
+      getConfigMock.mock.restore();
+    });
+
+    const result = await financeService.checkScholarshipEligibility({}, 'c1', 's1');
+
+    assert.equal(result.eligible, false);
+    assert.equal(result.reason, 'no_income_on_file');
+    assert.equal(getConfigMock.mock.callCount(), 0);
+  });
+
+  await t.test('throws ScholarshipThresholdNotConfiguredError when the tenant has no finance.scholarshipIncomeThreshold set', async () => {
+    const getStudentMock = t.mock.method(studentService, 'getStudent', async () => ({ id: 's1', annual_income: 50000 }));
+    const getConfigMock = t.mock.method(configurationService, 'getConfiguration', async () => null);
+    t.after(() => {
+      getStudentMock.mock.restore();
+      getConfigMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => financeService.checkScholarshipEligibility({}, 'c1', 's1'),
+      financeService.ScholarshipThresholdNotConfiguredError,
+    );
+  });
+
+  await t.test('reports eligible when annual_income is below the configured threshold', async () => {
+    const getStudentMock = t.mock.method(studentService, 'getStudent', async () => ({ id: 's1', annual_income: 40000 }));
+    const getConfigMock = t.mock.method(configurationService, 'getConfiguration', async () => ({
+      configuration: { scholarshipIncomeThreshold: 100000 },
+    }));
+    t.after(() => {
+      getStudentMock.mock.restore();
+      getConfigMock.mock.restore();
+    });
+
+    const result = await financeService.checkScholarshipEligibility({}, 'c1', 's1');
+
+    assert.equal(result.eligible, true);
+    assert.equal(result.reason, 'below_threshold');
+    assert.equal(result.annualIncome, 40000);
+    assert.equal(result.threshold, 100000);
+  });
+
+  await t.test('reports ineligible when annual_income is at or above the configured threshold', async () => {
+    const getStudentMock = t.mock.method(studentService, 'getStudent', async () => ({ id: 's1', annual_income: 150000 }));
+    const getConfigMock = t.mock.method(configurationService, 'getConfiguration', async () => ({
+      configuration: { scholarshipIncomeThreshold: 100000 },
+    }));
+    t.after(() => {
+      getStudentMock.mock.restore();
+      getConfigMock.mock.restore();
+    });
+
+    const result = await financeService.checkScholarshipEligibility({}, 'c1', 's1');
+
+    assert.equal(result.eligible, false);
+    assert.equal(result.reason, 'at_or_above_threshold');
   });
 });

@@ -42,6 +42,7 @@ const COLUMNS = [
   ['notes', 'notes'],
   ['licenseNumber', 'license_number'],
   ['bikeNumber', 'bike_number'],
+  ['annualIncome', 'annual_income'],
 ];
 
 async function create(client, fields) {

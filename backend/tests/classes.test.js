@@ -278,10 +278,21 @@ test('classes', async (t) => {
       class_name: 'Before Update Class',
     });
     const updated = await put(baseUrl, `/api/v1/classes/${created.body.id}`, headersFor(collegeA, token), {
-      timetable_status: 'Pending HOD',
+      semester: '2nd Sem',
     });
     assert.equal(updated.status, 200);
-    assert.equal(updated.body.timetable_status, 'Pending HOD');
+    assert.equal(updated.body.semester, '2nd Sem');
+  });
+
+  await t.test('update rejects a direct attempt to set timetable_status to a workflow-managed value', async () => {
+    const token = await login(collegeA, 'principaluser');
+    const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, token), {
+      class_name: 'Workflow Managed Status Class',
+    });
+    const resp = await put(baseUrl, `/api/v1/classes/${created.body.id}`, headersFor(collegeA, token), {
+      timetable_status: 'Approved',
+    });
+    assert.equal(resp.status, 400);
   });
 
   await t.test('update against an unknown id returns 404', async () => {

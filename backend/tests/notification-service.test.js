@@ -120,6 +120,46 @@ test('NotificationService (no live SMTP)', async (t) => {
     assert.equal(result.to, 'staff@college.edu');
     assert.match(result.subject, /active/);
   });
+
+  // This session's own task: password reset and principal invitation
+  // must go out through this existing notification flow — same
+  // send-first, best-effort, deterministic-content treatment as
+  // sendStaffCredentialsEmail above, driven through the same
+  // deterministic stub path (SMTP_HOST unset).
+  await t.test('sendPasswordResetEmail composes the expected subject and delegates to sendEmail', async () => {
+    const originalHost = config.smtp.host;
+    config.smtp.host = null;
+    t.after(() => {
+      config.smtp.host = originalHost;
+    });
+
+    const result = await notificationService.sendPasswordResetEmail({}, {
+      to: 'jdoe@college.edu', token: 'raw-reset-token-123',
+    });
+
+    assert.equal(result.status, 'stubbed');
+    assert.equal(result.to, 'jdoe@college.edu');
+    assert.match(result.subject, /[Rr]eset/);
+  });
+
+  await t.test('sendPrincipalInvitationEmail composes the expected subject and delegates to sendEmail', async () => {
+    const originalHost = config.smtp.host;
+    config.smtp.host = null;
+    t.after(() => {
+      config.smtp.host = originalHost;
+    });
+
+    const result = await notificationService.sendPrincipalInvitationEmail({}, {
+      to: 'newprincipal@example.com',
+      collegeId: 'demo-college',
+      token: 'raw-invite-token-123',
+      expiresAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    assert.equal(result.status, 'stubbed');
+    assert.equal(result.to, 'newprincipal@example.com');
+    assert.match(result.subject, /demo-college/);
+  });
 });
 
 test('NotificationService ledger: draft/submit/approve/reject/dispatch (no DB)', async (t) => {

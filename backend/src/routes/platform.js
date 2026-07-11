@@ -9,6 +9,29 @@ const { platformPool } = require('../db/pool');
 function createPlatformRouter() {
   const router = express.Router();
 
+  // Deliberately unauthenticated, like /invitations/accept on the
+  // tenant side — there is no admin yet to gate this behind. Stays
+  // safe because platformService.bootstrapPlatformAdmin can only ever
+  // succeed once (a real DB-level atomic guard, not a check-then-insert
+  // this route could race); every call after the first is a clean 409.
+  router.post('/bootstrap', asyncHandler(async (req, res) => {
+    const { username, email, password } = req.body || {};
+    try {
+      const admin = await platformService.bootstrapPlatformAdmin(platformPool, { username, email, password });
+      res.status(201).json({ id: admin.id, username: admin.username, email: admin.email });
+    } catch (err) {
+      if (err instanceof platformService.PlatformAdminValidationError) {
+        res.status(400).json({ detail: err.message });
+        return;
+      }
+      if (err instanceof platformService.PlatformAlreadyBootstrappedError) {
+        res.status(409).json({ detail: err.message });
+        return;
+      }
+      throw err;
+    }
+  }));
+
   // No refresh token issued — checked against the deleted Python
   // version rather than assumed: it didn't build refresh rotation for
   // platform admins either (Module-00-Platform.md's Known
@@ -53,6 +76,10 @@ function createPlatformRouter() {
     }
   }));
 
+  // No `token` field in the response — this session's own task
+  // instruction: an invitation token is delivered only via email
+  // (notificationService.sendPrincipalInvitationEmail), never returned
+  // in a normal API response.
   router.post('/colleges/:college_id/invite-principal', requirePlatformAdmin, asyncHandler(async (req, res) => {
     const { email } = req.body || {};
     try {
@@ -62,9 +89,9 @@ function createPlatformRouter() {
         createdBy: req.platformClaims.sub,
       });
       res.json({
+        invitation_id: invitation.invitationId,
         college_id: invitation.collegeId,
         email: invitation.email,
-        token: invitation.token,
         expires_at: invitation.expiresAt,
       });
     } catch (err) {
@@ -72,6 +99,50 @@ function createPlatformRouter() {
         res.status(404).json({ detail: `No college with college_id ${JSON.stringify(req.params.college_id)}` });
         return;
       }
+      throw err;
+    }
+  }));
+
+  function mapInvitationError(err, res) {
+    if (err instanceof platformService.PrincipalInvitationNotFoundError) {
+      res.status(404).json({ detail: err.message });
+      return true;
+    }
+    if (err instanceof platformService.PrincipalInvitationNotPendingError) {
+      res.status(409).json({ detail: err.message });
+      return true;
+    }
+    return false;
+  }
+
+  // Same no-token-in-the-response rule as invite-principal above — a
+  // resend rotates the token and emails it, it never echoes it back.
+  router.post('/invitations/:invitation_id/resend', requirePlatformAdmin, asyncHandler(async (req, res) => {
+    try {
+      const invitation = await platformService.resendPrincipalInvitation(platformPool, req.params.invitation_id);
+      res.json({
+        invitation_id: invitation.invitationId,
+        college_id: invitation.collegeId,
+        email: invitation.email,
+        expires_at: invitation.expiresAt,
+      });
+    } catch (err) {
+      if (mapInvitationError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/invitations/:invitation_id/revoke', requirePlatformAdmin, asyncHandler(async (req, res) => {
+    try {
+      const invitation = await platformService.revokePrincipalInvitation(platformPool, req.params.invitation_id);
+      res.json({
+        invitation_id: invitation.invitationId,
+        college_id: invitation.collegeId,
+        email: invitation.email,
+        revoked_at: invitation.revokedAt,
+      });
+    } catch (err) {
+      if (mapInvitationError(err, res)) return;
       throw err;
     }
   }));

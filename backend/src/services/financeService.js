@@ -56,6 +56,8 @@ const feePaymentRepository = require('../repositories/feePaymentRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const workflowService = require('./workflowService');
 const staffService = require('./staffService');
+const studentService = require('./studentService');
+const configurationService = require('./configurationService');
 
 // Missing academicYear, classId, feeCategory, or amount — fee_structures'
 // own NOT NULL columns (aside from college_id, which always comes from
@@ -117,6 +119,18 @@ class FeePaymentFeeStructureNotFoundError extends Error {}
 // the identical (student_id, fee_structure_id) at the same instant.
 // Same shape as attendanceService.AttendanceSessionConflictError.
 class FeePaymentConflictError extends Error {}
+
+// checkScholarshipEligibility given a studentId with no matching row.
+class ScholarshipStudentNotFoundError extends Error {}
+
+// checkScholarshipEligibility's tenant has never configured
+// ConfigurationService category 'finance''s scholarshipIncomeThreshold
+// key (BusinessRules.md Finance: "exact threshold is per-tenant
+// config, not hardcoded"). Distinct from a normal "not eligible"
+// result: a missing threshold means the question can't be answered
+// yet, an administrative gap this tenant needs to fix, not a real
+// eligibility outcome.
+class ScholarshipThresholdNotConfiguredError extends Error {}
 
 const VALID_FEE_PAYMENT_STATUSES = ['paid', 'not_paid'];
 
@@ -468,6 +482,49 @@ async function removeFeePayment(client, id, { userId } = {}) {
   return payment;
 }
 
+// BusinessRules.md Finance: "Students below a configured income
+// threshold become scholarship eligible" (exact threshold is
+// per-tenant config, not hardcoded). Reads the student's own
+// annual_income through StudentService, never studentRepository
+// directly (CLAUDE.md rule 1/Architecture.md 2.5 — FinanceService owns
+// scholarship eligibility, but a student record is StudentService's
+// table), and the threshold through ConfigurationService category
+// 'finance', key scholarshipIncomeThreshold — never a hardcoded
+// number, per BusinessRules.md's own parenthetical. A student with no
+// annual_income on file is reported ineligible with a distinct reason
+// rather than throwing: "we don't know this student's income" is a
+// normal, expected state (income collection is optional), not an
+// error the caller needs to handle specially.
+async function checkScholarshipEligibility(client, collegeId, studentId) {
+  const student = await studentService.getStudent(client, studentId);
+  if (student === null) {
+    throw new ScholarshipStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
+  }
+
+  if (student.annual_income === null || student.annual_income === undefined) {
+    return {
+      eligible: false, reason: 'no_income_on_file', annualIncome: null, threshold: null,
+    };
+  }
+
+  const config = await configurationService.getConfiguration(client, { collegeId, category: 'finance' });
+  const threshold = config ? config.configuration.scholarshipIncomeThreshold : undefined;
+  if (threshold === undefined || threshold === null) {
+    throw new ScholarshipThresholdNotConfiguredError(
+      `college ${JSON.stringify(collegeId)} has no finance.scholarshipIncomeThreshold configured`,
+    );
+  }
+
+  const annualIncome = Number(student.annual_income);
+  const eligible = annualIncome < Number(threshold);
+  return {
+    eligible,
+    reason: eligible ? 'below_threshold' : 'at_or_above_threshold',
+    annualIncome,
+    threshold: Number(threshold),
+  };
+}
+
 module.exports = {
   FeeStructureValidationError,
   FeeStructureConflictError,
@@ -479,6 +536,8 @@ module.exports = {
   FeePaymentStudentNotFoundError,
   FeePaymentFeeStructureNotFoundError,
   FeePaymentConflictError,
+  ScholarshipStudentNotFoundError,
+  ScholarshipThresholdNotConfiguredError,
   createFeeStructure,
   getFeeStructure,
   updateFeeStructure,
@@ -493,4 +552,5 @@ module.exports = {
   listFeePaymentsForStudent,
   listFeePayments,
   removeFeePayment,
+  checkScholarshipEligibility,
 };

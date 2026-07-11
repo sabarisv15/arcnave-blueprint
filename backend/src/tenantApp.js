@@ -19,6 +19,7 @@ const createAttendanceRouter = require('./routes/attendance');
 const createFinanceRouter = require('./routes/finance');
 const createDocumentsRouter = require('./routes/documents');
 const createReportsRouter = require('./routes/reports');
+const createBackgroundJobsRouter = require('./routes/backgroundJobs');
 const createWorkflowRequestsRouter = require('./routes/workflowRequests');
 const createCollegeProfileRouter = require('./routes/collegeProfile');
 const createDepartmentsRouter = require('./routes/departments');
@@ -112,6 +113,7 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   app.use(createFinanceRouter());
   app.use(createDocumentsRouter());
   app.use(createReportsRouter());
+  app.use(createBackgroundJobsRouter());
   app.use(createWorkflowRequestsRouter());
   app.use(createCollegeProfileRouter());
   app.use(createDepartmentsRouter());

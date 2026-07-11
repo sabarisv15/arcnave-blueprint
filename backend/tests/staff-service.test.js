@@ -19,6 +19,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const staffRepository = require('../src/repositories/staffRepository');
+const authRepository = require('../src/repositories/authRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const workflowService = require('../src/services/workflowService');
 const authService = require('../src/services/authService');
@@ -147,6 +148,21 @@ test('StaffService validation and audit logging (no DB)', async (t) => {
     await assert.rejects(
       () => staffService.createStaff({}, { collegeId: 'c1', userId: 'missing-user', fullName: 'Alice' }),
       staffService.StaffUserNotFoundError,
+    );
+  });
+
+  await t.test('createStaff maps a staff_department_id_fkey violation to StaffDepartmentNotFoundError', async () => {
+    const createMock = t.mock.method(staffRepository, 'create', async () => {
+      const err = new Error('insert or update on table "staff" violates foreign key constraint "staff_department_id_fkey"');
+      err.code = '23503';
+      err.constraint = 'staff_department_id_fkey';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => staffService.createStaff({}, { collegeId: 'c1', userId: 'u1', fullName: 'Alice', departmentId: 'missing-dept' }),
+      staffService.StaffDepartmentNotFoundError,
     );
   });
 
@@ -292,6 +308,7 @@ test('StaffService registration-approval cascade (no DB)', async (t) => {
     const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
     const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Approved', current_step: 2 }));
     const updateMock = t.mock.method(staffRepository, 'update', async (client, id, fields) => ({ id, college_id: 'c1', user_id: 'user-1', staff_code: fields.staffCode }));
+    const getUserMock = t.mock.method(authRepository, 'getUserById', async () => ({ id: 'user-1', role: 'staff' }));
     const activateMock = t.mock.method(authService, 'activateUser', async () => ({
       user: { id: 'user-1', username: 'jdoe', email: 'jdoe@college.edu' },
       plainPassword: 'temp-pass-123',
@@ -303,6 +320,7 @@ test('StaffService registration-approval cascade (no DB)', async (t) => {
       pendingMock.mock.restore();
       approveMock.mock.restore();
       updateMock.mock.restore();
+      getUserMock.mock.restore();
       activateMock.mock.restore();
       emailMock.mock.restore();
       auditMock.mock.restore();
@@ -342,6 +360,7 @@ test('StaffService registration-approval cascade (no DB)', async (t) => {
       }
       return { id, college_id: 'c1', user_id: 'user-1', staff_code: fields.staffCode };
     });
+    const getUserMock = t.mock.method(authRepository, 'getUserById', async () => ({ id: 'user-1', role: 'staff' }));
     const activateMock = t.mock.method(authService, 'activateUser', async () => ({
       user: { id: 'user-1', username: 'jdoe', email: 'jdoe@college.edu' },
       plainPassword: 'temp-pass-123',
@@ -353,6 +372,7 @@ test('StaffService registration-approval cascade (no DB)', async (t) => {
       pendingMock.mock.restore();
       approveMock.mock.restore();
       updateMock.mock.restore();
+      getUserMock.mock.restore();
       activateMock.mock.restore();
       emailMock.mock.restore();
       auditMock.mock.restore();
@@ -386,5 +406,199 @@ test('StaffService registration-approval cascade (no DB)', async (t) => {
     );
     assert.equal(updateMock.mock.callCount(), 0);
     assert.equal(activateMock.mock.callCount(), 0);
+  });
+});
+
+// This session's own task: HOD approver resolution now matches on the
+// departments FK (staff.department_id), not the legacy free-text
+// department column.
+test('StaffService.submitStaffRegistration department_id resolution (no DB)', async (t) => {
+  await t.test('rejects when the staff row has no departmentId set, never calls staffRepository.findByCollegeDepartmentAndRole', async () => {
+    const findMock = t.mock.method(staffRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', department_id: null,
+    }));
+    const findByDeptMock = t.mock.method(staffRepository, 'findByCollegeDepartmentAndRole');
+    t.after(() => {
+      findMock.mock.restore();
+      findByDeptMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => staffService.submitStaffRegistration({}, 'staff-1', { requestedByUserId: 'u1' }),
+      staffService.StaffValidationError,
+    );
+    assert.equal(findByDeptMock.mock.callCount(), 0);
+  });
+
+  await t.test('resolves the HOD by departmentId, not free-text department', async () => {
+    const findMock = t.mock.method(staffRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', department_id: 'dept-1', department: 'Computer Science',
+    }));
+    const findByDeptMock = t.mock.method(staffRepository, 'findByCollegeDepartmentAndRole', async () => ({ user_id: 'hod-user' }));
+    const findByRoleMock = t.mock.method(staffRepository, 'findByCollegeAndRole', async () => ({ user_id: 'principal-user' }));
+    const submitMock = t.mock.method(workflowService, 'submitRequest', async () => ({ id: 'wf-1', status: 'Pending' }));
+    t.after(() => {
+      findMock.mock.restore();
+      findByDeptMock.mock.restore();
+      findByRoleMock.mock.restore();
+      submitMock.mock.restore();
+    });
+
+    await staffService.submitStaffRegistration({}, 'staff-1', { requestedByUserId: 'u1' });
+
+    assert.equal(findByDeptMock.mock.calls[0].arguments[1], 'c1');
+    assert.equal(findByDeptMock.mock.calls[0].arguments[2], 'dept-1');
+    assert.equal(findByDeptMock.mock.calls[0].arguments[3], 'hod');
+  });
+});
+
+// This session's own task: "at most one active Principal per college"
+// / "at most one active HOD per department" — enforced inside
+// approveStaffRegistration's terminal Approved cascade, before
+// authService.activateUser ever runs.
+test('StaffService.assertSingleActiveRoleHolder (via approveStaffRegistration, no DB)', async (t) => {
+  await t.test('a principal activation is blocked when the college already has a different active principal', async () => {
+    const findMock = t.mock.method(staffRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', user_id: 'new-principal-user', department_id: null,
+    }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Approved', current_step: 1 }));
+    const updateMock = t.mock.method(staffRepository, 'update', async (client, id) => ({ id, college_id: 'c1', user_id: 'new-principal-user', staff_code: 'STF-2026-AAAAAA' }));
+    const getUserMock = t.mock.method(authRepository, 'getUserById', async () => ({ id: 'new-principal-user', role: 'principal' }));
+    const findByRoleMock = t.mock.method(staffRepository, 'findByCollegeAndRole', async () => ({ user_id: 'existing-principal-user' }));
+    const activateMock = t.mock.method(authService, 'activateUser');
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+      getUserMock.mock.restore();
+      findByRoleMock.mock.restore();
+      activateMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => staffService.approveStaffRegistration({}, 'staff-1', { actorUserId: 'hod-1' }),
+      staffService.StaffPrincipalAlreadyActiveError,
+    );
+    assert.equal(activateMock.mock.callCount(), 0);
+  });
+
+  await t.test('a principal activation succeeds when the existing active principal IS this same account (idempotent re-approval)', async () => {
+    const findMock = t.mock.method(staffRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', user_id: 'same-user', department_id: null,
+    }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Approved', current_step: 1 }));
+    const updateMock = t.mock.method(staffRepository, 'update', async (client, id) => ({ id, college_id: 'c1', user_id: 'same-user', staff_code: 'STF-2026-BBBBBB' }));
+    const getUserMock = t.mock.method(authRepository, 'getUserById', async () => ({ id: 'same-user', role: 'principal' }));
+    const findByRoleMock = t.mock.method(staffRepository, 'findByCollegeAndRole', async () => ({ user_id: 'same-user' }));
+    const activateMock = t.mock.method(authService, 'activateUser', async () => ({
+      user: { id: 'same-user', username: 'jdoe', email: 'jdoe@college.edu' },
+      plainPassword: 'temp-pass',
+    }));
+    const emailMock = t.mock.method(notificationService, 'sendStaffCredentialsEmail', async () => ({ status: 'stubbed' }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+      getUserMock.mock.restore();
+      findByRoleMock.mock.restore();
+      activateMock.mock.restore();
+      emailMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    await assert.doesNotReject(() => staffService.approveStaffRegistration({}, 'staff-1', { actorUserId: 'hod-1' }));
+    assert.equal(activateMock.mock.callCount(), 1);
+  });
+
+  await t.test('an hod activation is blocked when the department already has a different active hod', async () => {
+    const findMock = t.mock.method(staffRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', user_id: 'new-hod-user', department_id: 'dept-1',
+    }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Approved', current_step: 2 }));
+    const updateMock = t.mock.method(staffRepository, 'update', async (client, id) => ({ id, college_id: 'c1', user_id: 'new-hod-user', department_id: 'dept-1', staff_code: 'STF-2026-CCCCCC' }));
+    const getUserMock = t.mock.method(authRepository, 'getUserById', async () => ({ id: 'new-hod-user', role: 'hod' }));
+    const findByDeptMock = t.mock.method(staffRepository, 'findByCollegeDepartmentAndRole', async () => ({ user_id: 'existing-hod-user' }));
+    const activateMock = t.mock.method(authService, 'activateUser');
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+      getUserMock.mock.restore();
+      findByDeptMock.mock.restore();
+      activateMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => staffService.approveStaffRegistration({}, 'staff-1', { actorUserId: 'principal-1' }),
+      staffService.StaffHodAlreadyActiveError,
+    );
+    assert.equal(activateMock.mock.callCount(), 0);
+  });
+
+  await t.test('an hod activation with no departmentId set is a clear StaffValidationError, not a silent pass', async () => {
+    const findMock = t.mock.method(staffRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', user_id: 'new-hod-user', department_id: null,
+    }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Approved', current_step: 2 }));
+    const updateMock = t.mock.method(staffRepository, 'update', async (client, id) => ({ id, college_id: 'c1', user_id: 'new-hod-user', department_id: null, staff_code: 'STF-2026-DDDDDD' }));
+    const getUserMock = t.mock.method(authRepository, 'getUserById', async () => ({ id: 'new-hod-user', role: 'hod' }));
+    const activateMock = t.mock.method(authService, 'activateUser');
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+      getUserMock.mock.restore();
+      activateMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => staffService.approveStaffRegistration({}, 'staff-1', { actorUserId: 'principal-1' }),
+      staffService.StaffValidationError,
+    );
+    assert.equal(activateMock.mock.callCount(), 0);
+  });
+
+  await t.test('a staff (non-principal, non-hod) activation is never checked against either role', async () => {
+    const findMock = t.mock.method(staffRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', user_id: 'staff-user', department_id: null,
+    }));
+    const pendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Approved', current_step: 2 }));
+    const updateMock = t.mock.method(staffRepository, 'update', async (client, id) => ({ id, college_id: 'c1', user_id: 'staff-user', staff_code: 'STF-2026-EEEEEE' }));
+    const getUserMock = t.mock.method(authRepository, 'getUserById', async () => ({ id: 'staff-user', role: 'staff' }));
+    const findByRoleMock = t.mock.method(staffRepository, 'findByCollegeAndRole');
+    const findByDeptMock = t.mock.method(staffRepository, 'findByCollegeDepartmentAndRole');
+    const activateMock = t.mock.method(authService, 'activateUser', async () => ({
+      user: { id: 'staff-user', username: 'jstaff', email: 'jstaff@college.edu' },
+      plainPassword: 'temp-pass',
+    }));
+    const emailMock = t.mock.method(notificationService, 'sendStaffCredentialsEmail', async () => ({ status: 'stubbed' }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      pendingMock.mock.restore();
+      approveMock.mock.restore();
+      updateMock.mock.restore();
+      getUserMock.mock.restore();
+      findByRoleMock.mock.restore();
+      findByDeptMock.mock.restore();
+      activateMock.mock.restore();
+      emailMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    await assert.doesNotReject(() => staffService.approveStaffRegistration({}, 'staff-1', { actorUserId: 'principal-1' }));
+    assert.equal(findByRoleMock.mock.callCount(), 0);
+    assert.equal(findByDeptMock.mock.callCount(), 0);
+    assert.equal(activateMock.mock.callCount(), 1);
   });
 });

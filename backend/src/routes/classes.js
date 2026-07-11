@@ -4,6 +4,8 @@ const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requireRole } = require('../middleware/rbac');
 const academicService = require('../services/academicService');
+const staffService = require('../services/staffService');
+const workflowService = require('../services/workflowService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -24,6 +26,7 @@ function requireResolvedTenant(req, res) {
 const CLASS_BODY_FIELDS = [
   ['class_name', 'className'],
   ['department', 'department'],
+  ['department_id', 'departmentId'],
   ['semester', 'semester'],
   ['tutor_user_id', 'tutorUserId'],
   ['timetable_status', 'timetableStatus'],
@@ -64,6 +67,38 @@ function mapAcademicServiceError(err, res) {
   }
   if (err instanceof academicService.ClassTutorNotFoundError) {
     res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof academicService.ClassDepartmentNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof academicService.ClassTimetableStatusManagedByWorkflowError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof academicService.ClassTimetableApprovalNotPendingError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.StaffHodNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.StaffPrincipalNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestConflictError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestUserNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestValidationError) {
+    res.status(400).json({ detail: err.message });
     return true;
   }
   return false;
@@ -139,6 +174,27 @@ function createClassesRouter() {
         return;
       }
       res.json(cls);
+    } catch (err) {
+      if (mapAcademicServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // Module 3->4 gap fix: the trigger point for the real HOD->Principal
+  // timetable review chain — same requireAuth (not requireRole)
+  // reasoning staff.js's own submit-registration route gives: the
+  // named actor per BusinessRules.md is whoever submits, and
+  // workflowService's own step-matching + self-approval checks are the
+  // real gate, not this route's RBAC.
+  router.post('/classes/:id/submit-for-approval', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const workflowRequest = await academicService.submitTimetableForApproval(
+        req.dbClient,
+        req.params.id,
+        { requestedByUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(workflowRequest);
     } catch (err) {
       if (mapAcademicServiceError(err, res)) return;
       throw err;

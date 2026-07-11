@@ -100,6 +100,14 @@ function mapFinanceServiceError(err, res) {
     res.status(404).json({ detail: err.message });
     return true;
   }
+  if (err instanceof financeService.ScholarshipStudentNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof financeService.ScholarshipThresholdNotConfiguredError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
   // submitFeeStructureApproval's own error surface, per its file-level
   // comment: resolves the Principal via staffService.findPrincipal
   // (throws if none exists yet) then calls workflowService.submitRequest
@@ -287,6 +295,22 @@ function createFinanceRouter() {
     }
     const payments = await financeService.listFeePaymentsForStudent(req.dbClient, studentId);
     res.json(payments);
+  }));
+
+  // BusinessRules.md Finance / this session's own task: scholarship
+  // eligibility from a student's annual_income against this tenant's
+  // configured threshold. requireAuth, not requireRole('principal')
+  // like the write routes above — this is a read, same reasoning
+  // GET /finance/fee-structures already uses.
+  router.get('/finance/students/:id/scholarship-eligibility', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const result = await financeService.checkScholarshipEligibility(req.dbClient, req.collegeId, req.params.id);
+      res.json(result);
+    } catch (err) {
+      if (mapFinanceServiceError(err, res)) return;
+      throw err;
+    }
   }));
 
   return router;

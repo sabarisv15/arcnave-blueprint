@@ -20,10 +20,12 @@
 // real faculty_allocation row.
 //
 // Classes/periods/allocations are seeded directly through the admin
-// pool, including the raw UPDATE that flips timetable_status to
-// 'Approved' — no real API can do that yet (WorkflowService, Module 8,
-// doesn't exist), exactly the bypass attendanceService.js's own
-// comments describe as the only way to reach that branch today.
+// pool, including a direct INSERT with timetable_status = 'Approved',
+// for fixture speed only — a real API path now exists
+// (academicService.submitTimetableForApproval/approveTimetableApproval,
+// routed through WorkflowService) and is covered end-to-end in
+// timetable-approval.test.js; this file isn't re-proving that chain,
+// just seeding a class that's already past it.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -287,7 +289,7 @@ test('attendance', async (t) => {
     assert.equal(created.status, 200);
 
     // No real code path can lock a session yet (flagged, not solved,
-    // since attendanceService.js's own patch) -- the only way to reach
+    // since attendanceService.js's own patch) — the only way to reach
     // this state today is a direct UPDATE, same bypass used to reach
     // 'Approved' above.
     await adminPool.query('UPDATE attendance_sessions SET locked_at = now() WHERE id = $1', [created.body.id]);

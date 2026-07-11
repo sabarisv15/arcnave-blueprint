@@ -100,6 +100,7 @@ async function seedTenant(adminPool, label) {
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM faculty_allocation WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM documents WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM timetable_periods WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM classes WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
@@ -152,6 +153,41 @@ test('timetable periods', async (t) => {
     assert.equal(resp.body.day_of_week, 'Monday');
     assert.equal(resp.body.hour_index, 1);
     assert.equal(resp.body.college_id, collegeA.collegeId);
+  });
+
+  await t.test('CSV import creates periods and stores the raw file', async () => {
+    const token = await login(collegeA, 'principaluser');
+    const csv = 'day_of_week,hour_index,start_time,end_time\nMonday,41,09:00,10:00\nMonday,42,10:00,11:00';
+    const resp = await post(baseUrl, '/api/v1/timetable-periods/import-csv', headersFor(collegeA, token), {
+      file_name: 'timetable.csv',
+      file_base64: Buffer.from(csv).toString('base64'),
+    });
+    assert.equal(resp.status, 201);
+    assert.equal(resp.body.imported.length, 2);
+    assert.equal(resp.body.skipped.length, 0);
+    assert.ok(resp.body.raw_document_id);
+
+    const raw = await adminPool.query('SELECT doc_type FROM documents WHERE id = $1', [resp.body.raw_document_id]);
+    assert.equal(raw.rows[0].doc_type, 'timetable_import');
+  });
+
+  await t.test('CSV import skips a duplicate-slot row and keeps the valid ones, no 500', async () => {
+    const token = await login(collegeA, 'principaluser');
+    const csv = [
+      'day_of_week,hour_index,start_time,end_time',
+      'Wednesday,51,09:00,10:00',
+      'Wednesday,51,09:00,10:00',
+      'Wednesday,52,10:00,11:00',
+    ].join('\n');
+    const resp = await post(baseUrl, '/api/v1/timetable-periods/import-csv', headersFor(collegeA, token), {
+      file_name: 'timetable-dup.csv',
+      file_base64: Buffer.from(csv).toString('base64'),
+    });
+    assert.equal(resp.status, 201);
+    assert.equal(resp.body.imported.length, 2);
+    assert.equal(resp.body.skipped.length, 1);
+    assert.equal(resp.body.skipped[0].row, 2);
+    assert.equal(resp.body.total_rows, 3);
   });
 
   await t.test('create rejects a missing day_of_week with 400, not a 500', async () => {

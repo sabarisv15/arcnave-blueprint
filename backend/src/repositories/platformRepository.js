@@ -19,6 +19,24 @@ async function getPlatformAdminByUsername(client, username) {
   return result.rows[0] || null;
 }
 
+// The first-run bootstrap this session's own task asks for: creates
+// the very first platform_admins row, but ONLY if none exists yet —
+// expressed as a single atomic statement (INSERT ... SELECT ... WHERE
+// NOT EXISTS), not a check-then-insert, so a race between two
+// concurrent bootstrap calls can never both succeed. RETURNING zero
+// rows (an empty result, not an error) means a platform admin already
+// exists; the service layer maps that to a real, typed error.
+async function bootstrapPlatformAdmin(client, { username, email, passwordHash }) {
+  const result = await client.query(
+    `INSERT INTO platform_admins (username, email, password_hash)
+     SELECT $1, $2, $3
+     WHERE NOT EXISTS (SELECT 1 FROM platform_admins)
+     RETURNING id, username, email, created_at`,
+    [username, email, passwordHash],
+  );
+  return result.rows[0] || null;
+}
+
 async function createCollege(client, { collegeId, name, subdomain, createdBy }) {
   const result = await client.query(
     `INSERT INTO colleges (college_id, name, subdomain, created_by)
@@ -29,4 +47,4 @@ async function createCollege(client, { collegeId, name, subdomain, createdBy }) 
   return result.rows[0];
 }
 
-module.exports = { getPlatformAdminByUsername, createCollege };
+module.exports = { getPlatformAdminByUsername, bootstrapPlatformAdmin, createCollege };
