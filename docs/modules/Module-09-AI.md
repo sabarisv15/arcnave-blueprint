@@ -1,10 +1,11 @@
 # Module 9 — AI
 
 Status: **Tool Registry (+ Policy Gate), Context Builder, Prompt
-Safety Layer, a real LLM call, LLM-driven tool-selection routing, and
-the flagship "AI drafts, human approves, then it sends" path** — three
-real tools now: `get_college_profile` (L1), `draft_notification` (L2),
-`request_notification_send` (L3) — and NVIDIA NIM as the provider (§6's
+Safety Layer, a real LLM call, LLM-driven tool-selection routing, the
+flagship "AI drafts, human approves, then it sends" path, and a
+pgvector-backed RAG slice** — four real tools now: `get_college_profile`
+(L1), `draft_notification` (L2), `request_notification_send` (L3),
+`search_documents` (L1) — and NVIDIA NIM as the provider (§6's
 "provider is swappable" — Gemini was the original placeholder, no key
 ever existed for it in this environment; NIM is a real key the project
 actually has). See AI-Governance.md for the full authority model this
@@ -72,10 +73,26 @@ interface.
 - `backend/src/routes/workflowRequests.js` — gained an
   `entity_type === 'notification'` case in its approve/reject dispatch
   (see "Approval-to-dispatch wiring" below).
-
-No migration this slice — the registry is code, not a persisted table;
-the notification ledger schema (`notifications`/`notification_delivery`)
-already exists from the prior Module 8 extension.
+- `backend/src/services/aiClassificationAccess.js` — the
+  `ROLE_CLASSIFICATION_ACCESS` matrix, pulled out of `aiToolRegistry.js`
+  into its own module (see "RAG slice" below for why).
+- `backend/migrations/1753200000000_module-9-document-chunks-schema.js`
+  — `ai_document_chunks` (pgvector). `docker-compose.yml`'s `db` image
+  changed from `postgres:16` to `pgvector/pgvector:pg16` (a drop-in
+  image with the extension preinstalled) for this migration.
+- `backend/src/repositories/aiDocumentChunkRepository.js` — query
+  mechanics only: `create`, `findByDocumentId`, and `search` (cosine
+  distance via pgvector's `<=>` operator).
+- `backend/src/services/documentSearchService.js` — the RAG slice's
+  Business Service: `ingestDocument` (chunk + embed) and
+  `searchDocuments` (embed query + scoped cosine search).
+- `backend/src/services/documentService.js` — gained the
+  `AADHAAR_DOC_TYPE` exported constant (single source for the one
+  doc_type value CLAUDE.md rule 8 singles out).
+- `backend/src/services/llmProvider.js` — gained `embed(texts,
+  {inputType})` (NIM's `/v1/embeddings`) and `EMBEDDING_DIMENSIONS`.
+- `backend/src/config.js` / `docker-compose.yml` / `.env.example` —
+  `NIM_EMBEDDING_MODEL` (default `nvidia/nv-embedqa-e5-v5`).
 
 ## The Policy Gate (`aiToolRegistry.js`)
 
@@ -107,8 +124,9 @@ post-invocation backstop for `L3` specifically:
    `allowedRoles`; `get_college_profile` is `principal`/
    `college_admin`/`hod`, not plain `staff`.
 4. **Data classification permitted** — `AiToolDataClassificationError`.
-   A conservative, code-level `ROLE_CLASSIFICATION_ACCESS` matrix — a
-   proposed default, not a settled rule, see
+   A conservative, code-level `ROLE_CLASSIFICATION_ACCESS` matrix (now
+   in its own module, `aiClassificationAccess.js` — see "RAG slice"
+   below) — a proposed default, not a settled rule, see
    `docs/adr/ADR-020-Role-Classification-Access.md` — checked
    independently of role permission: a tool with broad `L1` access is
    not automatically entitled to `Confidential`/`Restricted` data just
@@ -234,9 +252,102 @@ things with the result —
   AI action still ties back to the real user whose session triggered
   it.
 
-All three scoped to `principal`/`college_admin`/`hod`, not plain
+The first three scoped to `principal`/`college_admin`/`hod`, not plain
 `staff` — same conservative placeholder `get_college_profile` already
-used, now applied consistently across all three.
+used. `search_documents` (below) is scoped differently, deliberately.
+
+## RAG slice (`documentSearchService.js`, `search_documents`)
+
+Pgvector-backed semantic search over uploaded documents, gated exactly
+like every other tool — "never sanitize then trust" (CLAUDE.md rule 9)
+applies to retrieved chunk text precisely as it does to any other tool
+output, not specially.
+
+**Two-layer classification check, not one.** `search_documents` is
+registered at `Internal` — the LOWEST classification, deliberately, so
+every real role (including `staff`) can call the tool at all. The real
+restriction is a SECOND, independent, per-ROW filter computed inside
+`documentSearchService.searchDocuments` itself: it calls
+`aiClassificationAccess.permittedClassifications(actor.role)` and the
+repository query only ever returns chunks whose own `classification`
+column is in that list. This is why `ROLE_CLASSIFICATION_ACCESS` was
+pulled out of `aiToolRegistry.js` into its own module,
+`aiClassificationAccess.js` — both the Policy Gate's single tool-level
+check and this row-level filter need the identical mapping, and
+duplicating it would risk the two silently drifting apart. Live-verified:
+a `staff` actor (Internal only) querying a college with only
+Confidential/Restricted content gets zero rows; an `hod` actor
+(Internal+Confidential) never sees a Restricted row even when it's the
+closest semantic match (there is no similarity threshold — "zero rows"
+isn't always the right proof, "never see a Restricted row" is); a
+`principal` actor (all three) does see it.
+
+**Classification is per-`doc_type`, set once at ingestion**
+(`documentSearchService.DOC_TYPE_CLASSIFICATION`) — `scholarship_cert`/
+`income_cert`/`community_cert`/`bank_passbook` → `Restricted`;
+`transfer_cert`/`birth_cert`/`disability_cert`/`photo` → `Confidential`;
+the `template` doc_type → `Internal`; anything unrecognized defaults to
+`Confidential` (conservative, not the least-restrictive option). Not
+sourced from BusinessRules.md (which names no document-type-level
+classification) — flagged, same "proposed, not settled" posture
+ADR-020 already takes for the role matrix.
+
+**Aadhaar is never ingested, full stop** (CLAUDE.md rule 8).
+`documentSearchService.classifyDocType` throws
+`DocumentSearchAadhaarBlockedError` for `documentService.AADHAAR_DOC_TYPE`
+before any chunking/embedding happens — not filtered out later at
+search time, refused at the one point that matters: no Aadhaar-derived
+embedding is ever written to `ai_document_chunks` to begin with. Live-
+verified: an aadhaar-doc_type document raises this error, zero chunks
+created.
+
+**No OCR pipeline exists yet** (the Module 6 documents migration's own
+file comment already deferred it to Module 9 — deferred again here).
+`ingestDocument` therefore only supports `text/*` mime types; a PDF/
+image upload throws `DocumentSearchUnsupportedContentError`, never
+mis-chunked from raw binary bytes decoded as if they were UTF-8 text. A
+real, flagged gap, not a silently faked extraction step.
+
+**Ingestion is explicit, not automatic-on-upload — a deliberate
+design change made mid-slice.** The original plan wired ingestion into
+`documentService.uploadDocument` as a best-effort post-upload hook. This
+broke `reports.test.js`: report exports are `text/csv`/similar
+mime types, so every report-generation test would have silently
+triggered a REAL embedding call whenever a real `NIM_API_KEY` happened
+to be present in the environment (as it now is) — a live network call
+hidden inside the committed suite, exactly the "real API calls
+shouldn't run in CI" boundary this project already draws elsewhere (see
+the Live NIM verification section above). It also left orphaned
+`ai_document_chunks` rows that broke the test's own hard-delete cleanup
+(a real FK violation, `ai_document_chunks_document_id_fkey`). Fixed by
+making `ingestDocument` a plain, explicitly-invoked Business Service
+method — never auto-wired into `uploadDocument` — matching the task's
+own "or a separate backfill job" option. `documentService.js` gained
+only the `AADHAAR_DOC_TYPE` constant, nothing else.
+
+**Chunking**: a pure, fixed-size splitter (1000 chars, no sentence
+awareness) — `nvidia/nv-embedqa-e5-v5`'s own 512-token max input is the
+real constraint; 1000 chars stays comfortably under that without a
+token-counting dependency.
+
+**Embedding model**: `nvidia/nv-embedqa-e5-v5` (config
+`NIM_EMBEDDING_MODEL`, a SEPARATE model from the chat-completion
+`NIM_MODEL`) — purpose-built for retrieval, asymmetric
+`input_type: 'passage'` (ingestion) vs `'query'` (search) embeddings, a
+fixed 1024-dimension output (`llmProvider.EMBEDDING_DIMENSIONS`) that
+`ai_document_chunks.embedding vector(1024)`'s column width is sized
+against. `llmProvider.js`'s shared transport (`postJson`) was factored
+out of `postChatCompletion` so `embed()` reuses the identical timeout/
+error-handling mechanics, not a parallel copy.
+
+**Cosine search**: `aiDocumentChunkRepository.search` uses pgvector's
+`<=>` operator (cosine distance, smaller = more similar) against an
+HNSW index (`vector_cosine_ops`) — the natural index for a query
+pattern that is always "nearest N," never an exact match. Joined to
+`documents` so a soft-deleted source document's chunks never surface
+(`d.deleted_at IS NULL`, not a second `deleted_at` duplicated onto the
+chunks table). Tenant-scoped by `college_id`, backstopped by the
+table's own RLS policy same as every other tenant table.
 
 ## Approval-to-dispatch wiring (`routes/workflowRequests.js`)
 
@@ -353,6 +464,67 @@ round-trip against a live Postgres):
   adding the same `notificationService` error mappings
   `routes/workflowRequests.js` already has.
 
+## Live NIM verification (one-off, real API calls — not in the committed suite)
+
+A real `NIM_API_KEY` is now configured; `askAgent`/`POST /ai/ask` was
+exercised against the real NVIDIA NIM endpoint (`meta/llama-3.1-8b-
+instruct`) for the first time, via a one-off script (deleted after
+use — real API calls/quota shouldn't run in CI every commit):
+
+- A question specifically asking for the college profile → the model
+  correctly called `get_college_profile`; the Policy Gate re-validated
+  it, the real profile came back wrapped in the untrusted-data
+  boundary. ~620–760ms.
+- A question with nothing to do with any tool ("what is the capital of
+  France?") → **first attempt incorrectly called `get_college_profile`
+  anyway** — the original `AGENT_SYSTEM_PROMPT` ("if a tool CAN answer,
+  call it") was read too broadly by this model. Fixed by tightening the
+  prompt to require the tool's specific purpose to match the question,
+  with an explicit "don't call a tool for this" example. Re-run: a
+  correct direct answer, `toolUsed: null`. ~290–420ms.
+- A question asking to draft (not send) a fee-reminder email → the
+  model correctly called `draft_notification` only, never
+  `request_notification_send` — a real `Draft` notification row was
+  created, nothing dispatched. ~700–930ms.
+
+`AGENT_SYSTEM_PROMPT` (`aiService.js`) required the one real fix above;
+everything else (tool schemas, Policy Gate re-validation, response
+wrapping) worked correctly against the real API on the first pass.
+
+## Live RAG verification (one-off, real API calls — not in the committed suite)
+
+Real Postgres (pgvector/HNSW), real NIM embeddings
+(`nvidia/nv-embedqa-e5-v5`), via a one-off script (deleted after use):
+
+- Ingested a real `text/plain` `birth_cert` document (College A,
+  containing a forged `===UNTRUSTED_TOOL_DATA_END===` boundary +
+  "ignore previous instructions" phrase) and a `scholarship_cert`
+  document → both chunked (1 chunk each, real embeddings written) and
+  classified `Confidential`/`Restricted` respectively.
+- Ingested an `aadhaar` document → refused with
+  `DocumentSearchAadhaarBlockedError`, zero chunks written.
+- `search_documents` as `principal` for "birth certificate Chennai" →
+  200, real chunks returned.
+- `search_documents` as `staff` (Internal only), same query → 200, zero
+  rows — no Internal-classification content exists in this college at
+  all.
+- `search_documents` as `hod` (Internal+Confidential) for a
+  scholarship-related query → 200, returned chunk(s) never included the
+  Restricted scholarship chunk; the same query as `principal` (all
+  three classifications) DID surface it.
+- Cross-tenant isolation: College A's `principal` searching for College
+  B's distinctive content (a different student's birth certificate,
+  different city) → zero cross-tenant hits.
+- Hostile-content-not-executed proof: the forged boundary + injection
+  phrase embedded in a real ingested document round-tripped through
+  `search_documents` as exact, literal `chunkText` — never re-parsed as
+  a real boundary or acted on.
+
+All real, all passed. Full backend suite re-run after: **520/520**
+(19 new `document-search-service.test.js` unit tests + all prior
+suites), confirmed at `--test-concurrency=1` with the real
+`NIM_API_KEY` present throughout.
+
 ## Known gaps / deferred (explicitly out of this slice)
 
 - **Not per-tenant.** `config.nim.*` is one global provider for the
@@ -360,13 +532,13 @@ round-trip against a live Postgres):
   selection via `ConfigurationService` as a future option — no tenant
   has asked for a different provider yet; building that now would be
   speculative ahead of real demand.
-- **No live-network proof in this environment.** The real NVIDIA NIM
-  endpoint has not been exercised against an actual key from this
-  build/verification pass — `llmProvider.js`'s request shape (including
-  `completeWithTools`' function-calling shape) is verified against
-  NIM's documented OpenAI-compatible contract and against a mocked
-  `fetch` in tests, not a live call, since no `NIM_API_KEY` was
-  available in the environment these tests ran in. The first real call
+- **Live-network proof is now real but thin.** The "Live NIM
+  verification" section above proves the pipeline works against the
+  actual NIM endpoint for exactly three hand-picked questions/tools —
+  it is not a broad or adversarial prompt-injection/robustness test
+  against a real model, and it only ran once, manually, not as part of
+  the committed suite (which still mocks `fetch` for every run — real
+  API calls/quota shouldn't run in CI every commit). The first real call
   should happen once a key is set in `.env` (see `.env.example`).
 - **No token/cost accounting, no streaming, no conversation history,
   no multi-tool turns.** `askAgent` picks and runs at most one tool per
@@ -405,3 +577,24 @@ round-trip against a live Postgres):
   `aiService.js`/`routes/ai.js` to actually resolve `actor.departmentId`
   (from `staffRepository`, not the JWT — no department claim exists
   today), which this slice does not add since nothing needs it yet.
+- **No OCR pipeline.** `search_documents`/`ingestDocument` only work on
+  `text/*` uploads — the overwhelming majority of real documents
+  (certificates, scanned photos) are PDF/image and are simply not
+  indexable yet. A real OCR/text-extraction step is a follow-up, not
+  built here.
+- **Ingestion has no HTTP entry point.** `documentSearchService.
+  ingestDocument` is a plain Business Service function, invoked
+  explicitly (this slice's own live-verification script called it
+  directly against a tenant-scoped transaction) — no route, no backfill
+  job, and no automatic trigger from `uploadDocument` (see the RAG
+  slice section above for why automatic-on-upload was tried and
+  reverted). A real caller (a backfill CLI, or a "index this document"
+  button) is a follow-up.
+- **No re-ingestion on document versioning.** Re-uploading a doc_type
+  creates a new `documents` row (existing versioning convention); old
+  chunks from a prior version are never cleaned up or re-embedded —
+  stale content could remain searchable after a document is
+  superseded. Not addressed this slice.
+- **`DOC_TYPE_CLASSIFICATION`** (`documentSearchService.js`) is a
+  conservative, code-level default, not sourced from BusinessRules.md —
+  same "flagged, revisit via ADR" posture as `ROLE_CLASSIFICATION_ACCESS`.

@@ -34,9 +34,23 @@ class AiServiceValidationError extends Error {}
 // an action no tool performed" — the one thing worth guarding against
 // even at L1 (Inform-only): a model confabulating that it did
 // something the Policy Gate never actually ran.
-const AGENT_SYSTEM_PROMPT = "You are ARCNAVE's campus assistant. If one of the provided tools can answer "
-  + 'the user\'s question, call it. Otherwise, answer directly and concisely. Never claim to have taken '
-  + 'an action (sending a message, changing a record) that no tool actually performed.';
+//
+// The explicit "do NOT call a tool" instruction below was added after
+// a real live-verification run against NVIDIA NIM (meta/llama-3.1-8b-
+// instruct): the model called get_college_profile for "what is the
+// capital of France?" under the original, softer "if a tool CAN
+// answer, call it" wording — a small/tool-happy model reads "can" too
+// broadly. Tightened to require the tool's specific purpose to
+// actually match the question, with an explicit unrelated-question
+// example, which fixed it (see .ai/RESULT.md's "live NIM verification"
+// entry for the before/after).
+const AGENT_SYSTEM_PROMPT = "You are ARCNAVE's campus assistant. Each tool is for a specific, narrow purpose "
+  + '(e.g. reading THIS college\'s own profile, or drafting/sending a notification) — call a tool ONLY when '
+  + "the user's question specifically asks for what that exact tool does. If the question is general "
+  + "knowledge, small talk, or anything the tools don't specifically cover, answer directly yourself and do "
+  + 'NOT call any tool (example: "what is the capital of France?" has nothing to do with any available tool '
+  + '— answer it directly). Never claim to have taken an action (sending a message, changing a record) that '
+  + 'no tool actually performed.';
 
 function listTools() {
   return aiToolRegistry.listTools();

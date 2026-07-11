@@ -1,0 +1,213 @@
+'use strict';
+
+// Unit tests for documentSearchService's business logic — no live
+// Postgres, no live NIM: documentService.downloadDocument,
+// llmProvider.embed, aiDocumentChunkRepository, and auditLogRepository
+// are stubbed via node:test's built-in mock, same technique
+// document-service.test.js/notification-service.test.js already use for
+// their own dependencies. The real cosine-search/RLS/HNSW-index/live-
+// embedding round-trip is a live verification concern (this session's
+// own throwaway script against docker-compose Postgres + a real NIM
+// key), not re-proven here.
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const documentService = require('../src/services/documentService');
+const llmProvider = require('../src/services/llmProvider');
+const auditLogRepository = require('../src/repositories/auditLogRepository');
+const aiDocumentChunkRepository = require('../src/repositories/aiDocumentChunkRepository');
+const documentSearchService = require('../src/services/documentSearchService');
+
+test('documentSearchService.chunkText', async (t) => {
+  await t.test('splits text longer than the chunk size into multiple ordered chunks', () => {
+    const text = 'a'.repeat(2500);
+    const chunks = documentSearchService.chunkText(text);
+    assert.equal(chunks.length, 3);
+    assert.equal(chunks[0].length, 1000);
+    assert.equal(chunks[1].length, 1000);
+    assert.equal(chunks[2].length, 500);
+  });
+
+  await t.test('a short text is a single chunk, trimmed', () => {
+    assert.deepEqual(documentSearchService.chunkText('  hello world  '), ['hello world']);
+  });
+
+  await t.test('blank/whitespace-only text produces zero chunks', () => {
+    assert.deepEqual(documentSearchService.chunkText('   \n\t  '), []);
+  });
+});
+
+test('documentSearchService.classifyDocType', async (t) => {
+  await t.test('refuses an aadhaar document — CLAUDE.md rule 8, never ingested for search', () => {
+    assert.throws(
+      () => documentSearchService.classifyDocType(documentService.AADHAAR_DOC_TYPE),
+      documentSearchService.DocumentSearchAadhaarBlockedError,
+    );
+  });
+
+  await t.test('maps a known sensitive doc_type to Restricted', () => {
+    assert.equal(documentSearchService.classifyDocType('scholarship_cert'), 'Restricted');
+  });
+
+  await t.test('maps a known personal doc_type to Confidential', () => {
+    assert.equal(documentSearchService.classifyDocType('birth_cert'), 'Confidential');
+  });
+
+  await t.test('maps the template doc_type to Internal', () => {
+    assert.equal(documentSearchService.classifyDocType(documentService.TEMPLATE_DOC_TYPE), 'Internal');
+  });
+
+  await t.test('an unknown doc_type gets the conservative Confidential default, not Internal', () => {
+    assert.equal(documentSearchService.classifyDocType('some_future_doc_type'), 'Confidential');
+  });
+});
+
+function mockIngestHappyPath(t, { document, embedResult } = {}) {
+  const downloadMock = t.mock.method(documentService, 'downloadDocument', async () => ({
+    document: document || {
+      id: 'doc-1', college_id: 'college-a', doc_type: 'birth_cert', mime_type: 'text/plain',
+    },
+    buffer: Buffer.from('hello world, this is a real document body.'),
+  }));
+  const embedMock = t.mock.method(llmProvider, 'embed', async () => embedResult || [[0.1, 0.2, 0.3]]);
+  const createMock = t.mock.method(aiDocumentChunkRepository, 'create', async (client, fields) => ({ id: 'chunk-1', ...fields }));
+  const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+  t.after(() => {
+    downloadMock.mock.restore();
+    embedMock.mock.restore();
+    createMock.mock.restore();
+    auditMock.mock.restore();
+  });
+  return {
+    downloadMock, embedMock, createMock, auditMock,
+  };
+}
+
+test('documentSearchService.ingestDocument', async (t) => {
+  await t.test('a missing document throws DocumentSearchNotFoundError', async () => {
+    const downloadMock = t.mock.method(documentService, 'downloadDocument', async () => null);
+    t.after(() => downloadMock.mock.restore());
+
+    await assert.rejects(
+      () => documentSearchService.ingestDocument({}, 'missing-id', { actorUserId: 'u1' }),
+      documentSearchService.DocumentSearchNotFoundError,
+    );
+  });
+
+  await t.test('an aadhaar document is refused before any embedding call', async () => {
+    const { embedMock } = mockIngestHappyPath(t, {
+      document: {
+        id: 'doc-1', college_id: 'college-a', doc_type: documentService.AADHAAR_DOC_TYPE, mime_type: 'text/plain',
+      },
+    });
+
+    await assert.rejects(
+      () => documentSearchService.ingestDocument({}, 'doc-1', { actorUserId: 'u1' }),
+      documentSearchService.DocumentSearchAadhaarBlockedError,
+    );
+    assert.equal(embedMock.mock.callCount(), 0);
+  });
+
+  await t.test('a non-text mime_type (no OCR pipeline) is refused before any embedding call', async () => {
+    const { embedMock } = mockIngestHappyPath(t, {
+      document: {
+        id: 'doc-1', college_id: 'college-a', doc_type: 'birth_cert', mime_type: 'application/pdf',
+      },
+    });
+
+    await assert.rejects(
+      () => documentSearchService.ingestDocument({}, 'doc-1', { actorUserId: 'u1' }),
+      documentSearchService.DocumentSearchUnsupportedContentError,
+    );
+    assert.equal(embedMock.mock.callCount(), 0);
+  });
+
+  await t.test('a real text document is chunked, each chunk embedded as a passage, and stored with its classification', async () => {
+    const { embedMock, createMock, auditMock } = mockIngestHappyPath(t);
+
+    const result = await documentSearchService.ingestDocument({}, 'doc-1', { actorUserId: 'u1' });
+
+    assert.equal(embedMock.mock.callCount(), 1);
+    const [texts, options] = embedMock.mock.calls[0].arguments;
+    assert.deepEqual(texts, ['hello world, this is a real document body.']);
+    assert.equal(options.inputType, 'passage');
+
+    assert.equal(createMock.mock.callCount(), 1);
+    const [, fields] = createMock.mock.calls[0].arguments;
+    assert.equal(fields.collegeId, 'college-a');
+    assert.equal(fields.documentId, 'doc-1');
+    assert.equal(fields.classification, 'Confidential');
+    assert.deepEqual(fields.embedding, [0.1, 0.2, 0.3]);
+
+    assert.equal(auditMock.mock.callCount(), 1);
+    const [, auditFields] = auditMock.mock.calls[0].arguments;
+    assert.equal(auditFields.action, 'ai_document_ingested');
+
+    assert.equal(result.chunkCount, 1);
+    assert.equal(result.classification, 'Confidential');
+  });
+});
+
+test('documentSearchService.searchDocuments', async (t) => {
+  await t.test('rejects a missing/empty query before any embedding call', async () => {
+    const embedMock = t.mock.method(llmProvider, 'embed', async () => [[0.1]]);
+    t.after(() => embedMock.mock.restore());
+
+    await assert.rejects(
+      () => documentSearchService.searchDocuments({}, { query: '' }, { role: 'principal', collegeId: 'college-a' }),
+      documentSearchService.DocumentSearchValidationError,
+    );
+    assert.equal(embedMock.mock.callCount(), 0);
+  });
+
+  await t.test('embeds the query as a query (not a passage) and scopes the repository search to the actor tenant/classifications', async () => {
+    const embedMock = t.mock.method(llmProvider, 'embed', async () => [[0.4, 0.5, 0.6]]);
+    const searchMock = t.mock.method(aiDocumentChunkRepository, 'search', async () => [
+      {
+        document_id: 'doc-1', chunk_index: 0, chunk_text: 'a chunk', classification: 'Internal', doc_type: 'birth_cert', file_name: 'x.txt', distance: 0.1,
+      },
+    ]);
+    t.after(() => {
+      embedMock.mock.restore();
+      searchMock.mock.restore();
+    });
+
+    const results = await documentSearchService.searchDocuments(
+      {},
+      { query: 'what is in my birth certificate?' },
+      { role: 'hod', collegeId: 'college-a' },
+    );
+
+    assert.equal(embedMock.mock.callCount(), 1);
+    const [, embedOptions] = embedMock.mock.calls[0].arguments;
+    assert.equal(embedOptions.inputType, 'query');
+
+    assert.equal(searchMock.mock.callCount(), 1);
+    const [, searchArgs] = searchMock.mock.calls[0].arguments;
+    assert.equal(searchArgs.collegeId, 'college-a');
+    assert.deepEqual(searchArgs.classifications, ['Internal', 'Confidential']);
+    assert.deepEqual(searchArgs.embedding, [0.4, 0.5, 0.6]);
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0].chunkText, 'a chunk');
+  });
+
+  await t.test('an unrecognized role gets no permitted classifications, so the repository is called with an empty list', async () => {
+    const embedMock = t.mock.method(llmProvider, 'embed', async () => [[0.1]]);
+    const searchMock = t.mock.method(aiDocumentChunkRepository, 'search', async () => []);
+    t.after(() => {
+      embedMock.mock.restore();
+      searchMock.mock.restore();
+    });
+
+    const results = await documentSearchService.searchDocuments(
+      {},
+      { query: 'anything' },
+      { role: 'someone_unrecognized', collegeId: 'college-a' },
+    );
+
+    const [, searchArgs] = searchMock.mock.calls[0].arguments;
+    assert.deepEqual(searchArgs.classifications, []);
+    assert.equal(results.length, 0);
+  });
+});

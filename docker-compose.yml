@@ -1,6 +1,12 @@
 services:
   db:
-    image: postgres:16
+    # pgvector/pgvector:pg16, not plain postgres:16 — a drop-in image
+    # (same Postgres 16 build) with the pgvector extension's shared
+    # library preinstalled, needed by the Module 9 RAG slice's
+    # ai_document_chunks migration (CREATE EXTENSION vector). Existing
+    # data in the pgdata volume is unaffected by this swap — same
+    # Postgres major version, only an additional extension available.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-arcnave_admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -66,6 +72,19 @@ services:
       NIM_API_KEY: ${NIM_API_KEY:-}
       NIM_BASE_URL: ${NIM_BASE_URL:-https://integrate.api.nvidia.com/v1}
       NIM_MODEL: ${NIM_MODEL:-meta/llama-3.1-8b-instruct}
+      # Optional — Module 9's RAG slice (services/documentSearchService.js).
+      # A different model from NIM_MODEL above (embeddings, not chat
+      # completion); defaults to a model purpose-built for retrieval.
+      NIM_EMBEDDING_MODEL: ${NIM_EMBEDDING_MODEL:-nvidia/nv-embedqa-e5-v5}
+      # DocumentService's local-disk root (ADR-017), stated explicitly
+      # rather than left to config.js's default so this file and
+      # config.js's own comment agree on exactly where uploaded files
+      # live — and so the document_storage volume mount below is
+      # mounted at a path this project actually declares, not one that
+      # happens to match config.js's fallback by coincidence.
+      DOCUMENT_STORAGE_ROOT: /app/storage
+      DOCUMENT_BACKUP_ROOT: /app/storage-backups
+      DOCUMENT_STORAGE_ENCRYPTION_KEY: ${DOCUMENT_STORAGE_ENCRYPTION_KEY:-local-dev-document-key-change-me}
     ports:
       - "8000:8000"
     volumes:
@@ -76,9 +95,22 @@ services:
       # mounts are applied on top of whatever the image already has at
       # that path.
       - /app/node_modules
+      # ADR-017's own flagged gap, closed: uploaded files must not live
+      # only inside the app container's writable layer. A real named
+      # volume, same durability pattern already proven for Postgres
+      # itself (pgdata below) — survives container recreation
+      # regardless of how this service is deployed, not just because
+      # the ./backend bind mount above happens to cover the same path
+      # in local dev. Same technique already used for /app/node_modules:
+      # a volume mounted at a subpath of an existing bind mount takes
+      # precedence at that exact path.
+      - document_storage:/app/storage
+      - document_storage_backups:/app/storage-backups
     depends_on:
       db:
         condition: service_healthy
 
 volumes:
   pgdata:
+  document_storage:
+  document_storage_backups:

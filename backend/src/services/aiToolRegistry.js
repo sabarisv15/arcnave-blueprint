@@ -50,6 +50,7 @@
 // 404.
 
 const auditLogRepository = require('../repositories/auditLogRepository');
+const aiClassificationAccess = require('./aiClassificationAccess');
 
 class AiToolNotFoundError extends Error {}
 class AiToolLevelNotSupportedError extends Error {}
@@ -76,22 +77,6 @@ class AiToolL3BypassError extends Error {}
 // list being non-empty for L3 is not itself a safety guarantee — the
 // handler's own Business Service call is).
 const SUPPORTED_LEVELS = ['L1', 'L2', 'L3'];
-
-// Conservative default, not sourced from BusinessRules.md (which does
-// not yet define an AI-actor/data-classification matrix) — revisit via
-// ADR alongside the R0-R5 risk ladder when the first tool needing
-// Confidential/Restricted access for a wider role is proposed. Every
-// real login role in this codebase (principal, college_admin, hod,
-// staff — see routes/*.js's requireRole call sites) gets Internal;
-// Confidential (parent phone, marks) is withheld from plain staff;
-// Restricted (fee details, staff salary) is withheld from everyone
-// until a real tool needs it.
-const ROLE_CLASSIFICATION_ACCESS = {
-  principal: ['Internal', 'Confidential', 'Restricted'],
-  college_admin: ['Internal', 'Confidential'],
-  hod: ['Internal', 'Confidential'],
-  staff: ['Internal'],
-};
 
 const registry = new Map();
 
@@ -156,7 +141,7 @@ function assertPolicyAllows(tool, actor, params) {
     );
   }
 
-  const permittedClassifications = ROLE_CLASSIFICATION_ACCESS[actor.role] || [];
+  const permittedClassifications = aiClassificationAccess.permittedClassifications(actor.role);
   if (!permittedClassifications.includes(tool.dataClassification)) {
     throw new AiToolDataClassificationError(
       `role ${JSON.stringify(actor.role)} is not permitted to access `
@@ -372,6 +357,40 @@ registerTool({
     params.notificationId,
     { requestedByUserId: actor.userId },
   ),
+});
+
+// --- Real tool #4 — RAG ------------------------------------------------
+// search_documents: L1/Inform (a pure read, no external effect).
+// Registered at Internal — the tool's own declared CEILING for the
+// Policy Gate's single tool-level check, deliberately the lowest
+// classification so every real role may call it at all — the REAL,
+// finer-grained restriction (which individual chunks a given role may
+// actually see back) is row-level, computed inside
+// documentSearchService.searchDocuments via aiClassificationAccess.
+// permittedClassifications(actor.role), never in this tool entry
+// itself (CLAUDE.md rule 1: no business logic in the wrapper). This
+// mirrors AI-Governance.md §4's own point that action level and data
+// classification are independent checks — here that independence runs
+// one layer deeper, down to individual rows within one tool call.
+const documentSearchService = require('./documentSearchService');
+
+registerTool({
+  name: 'search_documents',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: "Semantic search over the college's own uploaded documents (certificates, templates, etc.) — "
+    + 'returns the most relevant text chunks for a natural-language query, scoped to what the acting role is '
+    + 'permitted to see.',
+  allowedRoles: ['principal', 'college_admin', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'A natural-language question or search phrase.' },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => documentSearchService.searchDocuments(client, { query: params.query }, actor),
 });
 
 module.exports = {

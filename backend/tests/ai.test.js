@@ -301,24 +301,33 @@ test('ai', async (t) => {
   // llmProvider tests use, just proven here through the real route +
   // real auth + a real tool invocation instead of a fake dbClient.
 
-  await t.test('question with the LLM provider unconfigured (this environment\'s default) returns 503, and the tool invocation itself still succeeded and is still audit-logged', async () => {
-    assert.equal(config.nim.apiKey, null, 'test assumes no NIM_API_KEY is set in this environment');
+  await t.test('question with the LLM provider unconfigured returns 503, and the tool invocation itself still succeeded and is still audit-logged', async () => {
+    // Forced null for this test's own scope, not assumed from the
+    // environment — a real NIM_API_KEY may legitimately be configured
+    // now (see docs/modules/Module-09-AI.md's live-verification entry),
+    // so this test must not depend on the ambient environment state.
+    const originalApiKey = config.nim.apiKey;
+    config.nim.apiKey = null;
 
-    const token = await login(collegeA, 'principaluser');
-    const resp = await post(
-      baseUrl,
-      '/api/v1/ai/tools/get_college_profile/invoke',
-      headersFor(collegeA, token),
-      { params: {}, question: 'What college is this?' },
-    );
-    assert.equal(resp.status, 503);
+    try {
+      const token = await login(collegeA, 'principaluser');
+      const resp = await post(
+        baseUrl,
+        '/api/v1/ai/tools/get_college_profile/invoke',
+        headersFor(collegeA, token),
+        { params: {}, question: 'What college is this?' },
+      );
+      assert.equal(resp.status, 503);
 
-    const rows = await adminPool.query(
-      `SELECT metadata FROM audit_log
-       WHERE college_id = $1 AND action = 'ai_tool_invoked' AND user_id = $2`,
-      [collegeA.collegeId, collegeA.userIds.principaluser],
-    );
-    assert.ok(rows.rows.length >= 1, 'the tool call itself must still be audit-logged even though the LLM step failed');
+      const rows = await adminPool.query(
+        `SELECT metadata FROM audit_log
+         WHERE college_id = $1 AND action = 'ai_tool_invoked' AND user_id = $2`,
+        [collegeA.collegeId, collegeA.userIds.principaluser],
+      );
+      assert.ok(rows.rows.length >= 1, 'the tool call itself must still be audit-logged even though the LLM step failed');
+    } finally {
+      config.nim.apiKey = originalApiKey;
+    }
   });
 
   await t.test('an empty question returns 400 (AiServiceValidationError), not a 500 or a silent LLM call', async () => {
@@ -383,11 +392,18 @@ test('ai', async (t) => {
     assert.equal(resp.status, 401);
   });
 
-  await t.test('POST /ai/ask with the LLM provider unconfigured (this environment\'s default) returns 503', async () => {
-    assert.equal(config.nim.apiKey, null, 'test assumes no NIM_API_KEY is set in this environment');
-    const token = await login(collegeA, 'principaluser');
-    const resp = await post(baseUrl, '/api/v1/ai/ask', headersFor(collegeA, token), { question: 'What college is this?' });
-    assert.equal(resp.status, 503);
+  await t.test('POST /ai/ask with the LLM provider unconfigured returns 503', async () => {
+    // Forced null for this test's own scope — see the equivalent fix
+    // above; a real NIM_API_KEY may legitimately be configured now.
+    const originalApiKey = config.nim.apiKey;
+    config.nim.apiKey = null;
+    try {
+      const token = await login(collegeA, 'principaluser');
+      const resp = await post(baseUrl, '/api/v1/ai/ask', headersFor(collegeA, token), { question: 'What college is this?' });
+      assert.equal(resp.status, 503);
+    } finally {
+      config.nim.apiKey = originalApiKey;
+    }
   });
 
   await t.test('POST /ai/ask: the LLM picks the registered tool -> the Policy Gate re-validates -> the tool actually runs, real data returned', async () => {

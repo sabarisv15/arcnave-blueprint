@@ -45,20 +45,20 @@ function isConfigured() {
 // must not hang the caller's own request indefinitely.
 const REQUEST_TIMEOUT_MS = 30000;
 
-// Shared transport for both complete() and completeWithTools() below —
+// Shared transport for complete()/completeWithTools()/embed() below —
 // the timeout/fetch/status-check/JSON-parse mechanics are identical
-// either way; only the request body and how the response is read back
-// differ per caller. Not configured-checked here — both callers must
-// still hit that check first via the same LlmNotConfiguredError,
-// mirrored in each so the "not configured" path never even builds a
-// request body.
-async function postChatCompletion(body) {
+// across all three; only the URL path, the request body, and how the
+// response is read back differ per caller. Not configured-checked
+// here — every caller must still hit that check first via the same
+// LlmNotConfiguredError, mirrored in each so the "not configured" path
+// never even builds a request body.
+async function postJson(path, body) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   let response;
   try {
-    response = await fetch(`${config.nim.baseUrl}/chat/completions`, {
+    response = await fetch(`${config.nim.baseUrl}${path}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -83,6 +83,10 @@ async function postChatCompletion(body) {
   } catch (err) {
     throw new LlmRequestError(`LLM provider returned a non-JSON response: ${err.message}`);
   }
+}
+
+async function postChatCompletion(body) {
+  return postJson('/chat/completions', body);
 }
 
 // systemPrompt/userPrompt are plain strings — aiPromptSafetyLayer.js's
@@ -177,10 +181,68 @@ async function completeWithTools({ systemPrompt, userPrompt, tools }) {
   return { type: 'answer', text: message.content };
 }
 
+// Module 9's RAG slice (documentSearchService.js) — the ONE place that
+// knows NIM's own /v1/embeddings shape, same "provider-specific shape
+// lives only in this file" reasoning complete()/completeWithTools()
+// above already follow. nv-embedqa-e5-v5 (config.nim.embeddingModel's
+// default) always returns 1024-dimension vectors — the exact width
+// the ai_document_chunks migration's embedding column is fixed at;
+// this constant documents that fact, it doesn't enforce it (a caller
+// changing NIM_EMBEDDING_MODEL to a different-dimension model would
+// need a matching migration, not just a config change).
+const EMBEDDING_DIMENSIONS = 1024;
+
+// texts: a non-empty array of strings, embedded in one batched request
+// (nv-embedqa-e5-v5 accepts a batch, so a caller embedding several
+// chunks doesn't need one round-trip each). inputType: 'passage' when
+// embedding content to be indexed/searched-for, 'query' when embedding
+// the search question itself — this model's own asymmetric embedding
+// convention (a matching query/passage pair is deliberately embedded
+// slightly differently for better retrieval quality); there is no
+// default, a caller must always choose, since silently getting this
+// wrong degrades search quality without ever raising a visible error.
+// Returns embeddings in the same order as `texts` (re-sorted by the
+// response's own `index` field — NIM does not guarantee response order
+// matches request order for a batch).
+async function embed(texts, { inputType } = {}) {
+  if (!isConfigured()) {
+    throw new LlmNotConfiguredError('no LLM provider is configured (NIM_API_KEY is unset)');
+  }
+  if (!Array.isArray(texts) || texts.length === 0) {
+    throw new LlmRequestError('embed() requires a non-empty array of texts');
+  }
+  if (inputType !== 'query' && inputType !== 'passage') {
+    throw new LlmRequestError(`embed() inputType must be 'query' or 'passage', got ${JSON.stringify(inputType)}`);
+  }
+
+  const payload = await postJson('/embeddings', {
+    model: config.nim.embeddingModel,
+    input: texts,
+    input_type: inputType,
+    // Rather than erroring on a chunk that exceeds the model's own
+    // 512-token max input — documentSearchService.js's own CHUNK_SIZE_CHARS
+    // keeps chunks well under that in practice, this is a defensive
+    // fallback, not the primary length control.
+    truncate: 'END',
+  });
+
+  const data = Array.isArray(payload && payload.data) ? payload.data : null;
+  if (!data || data.length !== texts.length) {
+    throw new LlmRequestError('LLM embeddings provider response did not contain one embedding per input text');
+  }
+
+  return data
+    .slice()
+    .sort((a, b) => a.index - b.index)
+    .map((item) => item.embedding);
+}
+
 module.exports = {
   LlmNotConfiguredError,
   LlmRequestError,
+  EMBEDDING_DIMENSIONS,
   isConfigured,
   complete,
   completeWithTools,
+  embed,
 };

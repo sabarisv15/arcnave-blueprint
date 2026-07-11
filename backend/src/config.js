@@ -67,6 +67,16 @@ module.exports = {
   // rule yet — nothing in BusinessRules.md specifies this.
   principalInvitationExpireHours: Number(process.env.PRINCIPAL_INVITATION_EXPIRE_HOURS) || 72,
 
+  // How long a password-reset token (services/authService.js
+  // requestPasswordReset) stays acceptable. Deliberately much shorter
+  // than principalInvitationExpireHours above: a reset token is
+  // self-service and emailed to an address that may not be as tightly
+  // controlled as a platform admin's own invite flow, so a short
+  // window bounds the damage if an inbox is compromised. A safe
+  // default, not a business rule — nothing in BusinessRules.md
+  // specifies this either.
+  passwordResetTokenExpireHours: Number(process.env.PASSWORD_RESET_TOKEN_EXPIRE_HOURS) || 2,
+
   // Local-disk root DocumentService writes uploaded files under (see
   // ADR-017). Not a secret — a plain path, defaulted like appName/
   // logLevel rather than required() like the connection strings above.
@@ -74,6 +84,8 @@ module.exports = {
   // a flagged gap, not solved by this default (see ADR-017's
   // Consequences).
   documentStorageRoot: process.env.DOCUMENT_STORAGE_ROOT || path.join(__dirname, '../storage'),
+  documentBackupRoot: process.env.DOCUMENT_BACKUP_ROOT || path.join(__dirname, '../storage-backups'),
+  documentStorageEncryptionKey: process.env.DOCUMENT_STORAGE_ENCRYPTION_KEY || 'local-dev-document-key-change-me',
 
   // NotificationService's real email channel (Module 8). Deliberately
   // NOT required() like the connection strings/JWT secrets above:
@@ -109,5 +121,14 @@ module.exports = {
     apiKey: process.env.NIM_API_KEY || null,
     baseUrl: process.env.NIM_BASE_URL || 'https://integrate.api.nvidia.com/v1',
     model: process.env.NIM_MODEL || 'meta/llama-3.1-8b-instruct',
+    // The RAG slice's embedding model — a SEPARATE model from `model`
+    // above (chat completion and embeddings are different model
+    // families even within one provider). nv-embedqa-e5-v5 is
+    // purpose-built for retrieval (asymmetric query/passage embeddings
+    // — see llmProvider.js's embed()) and fixes the embedding
+    // dimension the ai_document_chunks migration's vector(1024) column
+    // is sized against; changing this to a model with a different
+    // output dimension needs a new migration, not just this env var.
+    embeddingModel: process.env.NIM_EMBEDDING_MODEL || 'nvidia/nv-embedqa-e5-v5',
   },
 };
