@@ -231,6 +231,12 @@ export default function PrincipalDashboard() {
   const [exportFormat, setExportFormat] = useState('csv');
   const [exportingStudents, setExportingStudents] = useState(false);
 
+  // Analytics (Module 10, second slice) — real API (routes/analytics.js),
+  // read-only, no write action of its own to trigger — loaded eagerly
+  // in loadData below alongside everything else this dashboard already
+  // fetches upfront, same convention realStaffList/pendingApprovals use.
+  const [attendanceRateByClass, setAttendanceRateByClass] = useState([]);
+
   const loadData = async () => {
     setLoading(true);
     try {
@@ -305,6 +311,14 @@ export default function PrincipalDashboard() {
       });
       if (pendingApprovalsRes.ok) {
         setPendingApprovals((await pendingApprovalsRes.json()) || []);
+      }
+
+      // 8. Module 10 (Analytics) second slice — attendance rate by class.
+      const attendanceRateRes = await fetch('/api/v1/analytics/attendance-rate', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (attendanceRateRes.ok) {
+        setAttendanceRateByClass((await attendanceRateRes.json()) || []);
       }
     } catch (e) {
       console.error(e);
@@ -1818,6 +1832,59 @@ export default function PrincipalDashboard() {
                   {exportingStudents ? 'Exporting…' : 'Export Students'}
                 </button>
               </div>
+            </div>
+
+            {/* Module 10 (Analytics) second slice — attendance rate by
+                class, read-only, GET /api/v1/analytics/attendance-rate.
+                Reuses the .data-table/badge-* classes LowAttendanceModal.jsx
+                already established rather than a new chart dependency —
+                nothing in package.json today needs one for a class-count
+                table this small. */}
+            <div className="card p-6 space-y-4">
+              <div className="flex justify-between items-center border-b pb-3 border-slate-50">
+                <div>
+                  <h3 className="font-extrabold text-slate-805 text-sm flex items-center gap-1.5">
+                    <Gauge className="w-4 h-4 text-indigo-500" />
+                    Attendance Rate by Class
+                  </h3>
+                  <p className="text-slate-450 text-[10px] font-semibold mt-0.5">
+                    All-time, based on marked attendance sessions only.
+                  </p>
+                </div>
+              </div>
+
+              {attendanceRateByClass.length === 0 ? (
+                <p className="text-center text-slate-500 font-semibold py-8 text-sm">
+                  No attendance has been marked for any class yet.
+                </p>
+              ) : (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Class</th>
+                      <th className="text-center">Sessions Marked</th>
+                      <th className="text-center">Attendance Rate</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {attendanceRateByClass.map((row) => {
+                      const rate = row.attendanceRatePercent;
+                      const badgeClass = rate === null
+                        ? 'badge'
+                        : rate < 60 ? 'badge badge-rose' : rate < 75 ? 'badge badge-amber' : 'badge badge-emerald';
+                      return (
+                        <tr key={row.classId}>
+                          <td className="font-bold text-slate-700">{row.className}</td>
+                          <td className="text-center">{row.sessionsCount}</td>
+                          <td className="text-center">
+                            <span className={badgeClass}>{rate === null ? 'No data' : `${rate}%`}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
         )}

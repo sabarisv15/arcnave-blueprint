@@ -1,28 +1,26 @@
 # RESULT
 
-## Attendance-rate-by-class slice (Module 10 — Analytics, first slice)
+## API + UI slice (Module 10 — Analytics, second slice, closes Module 10)
 
-Confirmed against Architecture.md 2.7: CLAUDE.md rule 4 governs
-repository-to-repository function calls, not SQL table access —
-`staffRepository.js` already JOINs `users` (a different domain's
-table) directly, same precedent used here for `analyticsRepository`
-JOINing `attendance_sessions` to `classes`. No migration needed (no
-new table); no API/UI yet, per the task brief.
+`GET /api/v1/analytics/attendance-rate` — thin route over the first
+slice's `analyticsService.getAttendanceRateByClass`, no reshaping. Plus
+one dashboard panel. Module 10 is now closed end to end.
 
 ### Files changed
-- `backend/src/repositories/analyticsRepository.js` — new: `attendanceRateByClass` (raw sums only, JOINs `attendance_sessions`↔`classes`, RLS-scoped, `deleted_at IS NULL`, optional `classId` filter).
-- `backend/src/services/analyticsService.js` — new: `getAttendanceRateByClass` (percentage + rounding; `null` rate, not `0`, for zero-session classes).
-- `backend/tests/analytics-service.test.js` — new, 5 live-Postgres tests (rate math, soft-delete exclusion, classId filter, cross-tenant isolation, zero-session class).
-- `docs/modules/Module-10-Analytics.md` — new module doc (metric definition, cross-domain-JOIN justification, RLS reasoning, known gaps).
+- `backend/src/routes/analytics.js` — new: `GET /analytics/attendance-rate`, `requireRole('principal', 'hod')`, optional `?class_id=`.
+- `backend/src/tenantApp.js` — registers the new router.
+- `backend/tests/analytics.test.js` — new, 7 live-Postgres HTTP tests (401, 403, principal happy path, hod happy path, `class_id` filter, empty-data tenant).
+- `frontend/src/pages/PrincipalDashboard.jsx` — new panel in the existing `reports` tab: attendance-rate-by-class table, reusing `.data-table`/`badge-*` CSS (no new dependency); fetched in the existing `loadData`.
+- `docs/modules/Module-10-Analytics.md` — second-slice section (RBAC reasoning, UI reasoning, verification table); closed the "no API/UI" gap entry.
 - `.ai/TASK.md`, `.ai/RESULT.md` — this entry.
 
 ### Verification
-- New: 5/5 (`analytics-service.test.js`), real Postgres, two tenants.
-- Full backend suite: **608/608**, `--test-concurrency=1`, real Docker Postgres (pgvector image, pre-existing volume reused, not a fresh migrate).
-- Docker: brought up, tested, torn down (`docker compose down`, volume left intact).
+- New: 7/7 (`analytics.test.js`), real Postgres, real HTTP.
+- Full backend suite: **615/615** (608 prior + 7 new), `--test-concurrency=1`, real Docker Postgres.
+- Frontend: `npm run build` — clean, no errors.
+- Docker: brought up, tested, torn down.
 
 ### Flags
-- No API/UI — `getAttendanceRateByClass` has no route yet.
-- Finance metrics skipped this slice (more sensitive; pattern proven on Attendance first).
-- No time-window filtering (all-time aggregate); no per-student breakdown.
-- Repo pre-existing state: on session start, `git status` showed ~480 lines of staged deletions across 9 migrations/repositories/services/tests (module 9's document-chunks/OCR/background-jobs slice) plus unstaged modifications almost everywhere else — pre-existing uncommitted work from a prior session, untouched by this slice. Not committed or resolved here; flagging so it isn't mistaken for something this session did.
+- No HOD dashboard panel yet — `HodDashboard.jsx` has no Reports-equivalent tab to place one in; the route already permits `hod`, so this is purely a follow-up UI slice, not a backend gap.
+- No browser session available in this environment to visually confirm the rendered panel — verified by building cleanly and by the API's real response shape matching what the panel code reads (`classId`/`className`/`sessionsCount`/`attendanceRatePercent`), not by looking at it. Flagging per CLAUDE.md's own "say so explicitly" instruction rather than claiming a visual check that didn't happen.
+- Everything else carried over from the first slice's flags still applies (no time-window filtering, no per-student breakdown, Finance metrics skipped).

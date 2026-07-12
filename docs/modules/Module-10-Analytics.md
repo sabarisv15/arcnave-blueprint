@@ -1,5 +1,46 @@
 # Module 10 — Analytics
 
+## Second slice: API + UI (closes Module 10)
+
+`GET /api/v1/analytics/attendance-rate` (`backend/src/routes/analytics.js`,
+registered in `tenantApp.js`) — a thin wrapper over the first slice's
+`analyticsService.getAttendanceRateByClass`, no reshaping. Optional
+`?class_id=` query param (snake_case, matching `attendance.js`'s own
+convention); `collegeId` is always `req.collegeId`, never a query
+param.
+
+**RBAC**: `requireRole('principal', 'hod')`. No existing route in this
+codebase combines these two roles — `reports.js`'s writes gate
+`principal`-only; `attendance.js`'s reads defer entirely to
+`attendanceService`'s own per-actor authorization rule instead of
+gating at the route. This endpoint has no service-level authorization
+logic of its own (it's a pure aggregate read, not a per-row decision),
+so the route itself has to be the real, conservative gate — same
+reasoning `reports.js`'s own comment gives for why its routes are
+conservative. Both roles are named because both are real consumers:
+`PrincipalDashboard.jsx` surfaces it today, and `hod` is included so
+`HodDashboard.jsx` can add the same panel later without a second
+route change. Ordinary staff have no BusinessRules.md-named need to
+see another tutor's class-level attendance rate.
+
+**UI**: one panel added to `PrincipalDashboard.jsx`'s existing
+`reports` tab — the only dashboard with a Reports tab today
+(`HodDashboard.jsx` has none yet). Reuses the `.data-table`/`badge-*`
+CSS classes `LowAttendanceModal.jsx` already established; no chart
+library added (none exists in `package.json`, and a table fits a
+per-class list this small). A `null` `attendanceRatePercent` (a class
+with zero recorded students) renders "No data", not a `0%` badge —
+matches the service's own reasoning for returning `null` rather than
+`0` in that case.
+
+**Live verification**: real Postgres, HTTP integration test
+(`analytics.test.js`) — 401 unauthenticated, 403 staff, 200 principal
+and 200 hod (identical data), `class_id` filter narrows to one class,
+a tenant with zero `attendance_sessions` gets `200 []`, not an error.
+Frontend: `npm run build` clean; no browser session available in this
+environment to visually confirm the rendered panel — flagged, not
+faked.
+
 ## First slice: attendance-rate-by-class (read-only aggregate)
 
 `AnalyticsRepository` + `AnalyticsService`, per Architecture.md 2.5/
@@ -67,11 +108,12 @@ Real Postgres, two tenants seeded directly via the admin pool, real
 Full backend suite re-run after: no regressions (see `.ai/RESULT.md`
 for the exact count).
 
-## Known gaps / deferred (explicitly out of this slice)
+## Known gaps / deferred
 
-- **No API/UI.** `AnalyticsService.getAttendanceRateByClass` has no
-  route yet — a dashboard/report consumer is a follow-up, per this
-  slice's own brief.
+- **No HOD dashboard panel yet.** `requireRole` already permits `hod`,
+  but `HodDashboard.jsx` has no Reports-equivalent tab to place it in
+  today — the route is ready; the second dashboard's panel is a
+  follow-up.
 - **Finance metrics skipped.** More sensitive than attendance;
   deferred until this pattern (repository aggregate + service-level
   rate math + RLS-via-JOIN) is proven once, here, first.
