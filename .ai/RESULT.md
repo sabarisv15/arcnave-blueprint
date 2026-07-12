@@ -1,60 +1,28 @@
 # RESULT
 
-## RAG slice (search_documents, closes Module 9)
+## Attendance-rate-by-class slice (Module 10 — Analytics, first slice)
 
-Confirmed NIM has a real embeddings endpoint (`/v1/embeddings`,
-OpenAI-compatible) — used it, not a second provider. Model:
-`nvidia/nv-embedqa-e5-v5` (1024-dim, asymmetric query/passage
-embeddings, purpose-built for retrieval).
+Confirmed against Architecture.md 2.7: CLAUDE.md rule 4 governs
+repository-to-repository function calls, not SQL table access —
+`staffRepository.js` already JOINs `users` (a different domain's
+table) directly, same precedent used here for `analyticsRepository`
+JOINing `attendance_sessions` to `classes`. No migration needed (no
+new table); no API/UI yet, per the task brief.
 
 ### Files changed
-- `docker-compose.yml` — `db` image `postgres:16` → `pgvector/pgvector:pg16` (drop-in, extension preinstalled).
-- `backend/migrations/1753200000000_module-9-document-chunks-schema.js` — `ai_document_chunks` (pgvector, HNSW cosine index, RLS, no UPDATE/DELETE grant).
-- `backend/src/repositories/aiDocumentChunkRepository.js` — new: `create`, `findByDocumentId`, `search` (cosine `<=>`, joined to `documents` to exclude soft-deleted).
-- `backend/src/services/documentSearchService.js` — new Business Service: `ingestDocument` (chunk+embed), `searchDocuments` (embed query + row-level classification filter), doc_type→classification map, Aadhaar block.
-- `backend/src/services/documentService.js` — gained `AADHAAR_DOC_TYPE` exported constant only (no auto-ingest hook — see below).
-- `backend/src/services/aiClassificationAccess.js` — new: `ROLE_CLASSIFICATION_ACCESS` pulled out of `aiToolRegistry.js` so both the Policy Gate and `documentSearchService`'s row-level filter share one source.
-- `backend/src/services/aiToolRegistry.js` — registers `search_documents` (L1/Internal, `allowedRoles` includes `staff`); sources the classification matrix from the new shared module.
-- `backend/src/services/llmProvider.js` — new `embed(texts, {inputType})` + `EMBEDDING_DIMENSIONS`; shared transport factored into `postJson`.
-- `backend/src/config.js` / `.env.example` — `NIM_EMBEDDING_MODEL`.
-- `backend/tests/document-search-service.test.js` — new, 19 unit tests (chunking, classification mapping, Aadhaar block, mocked ingest/search).
-- `docs/modules/Module-09-AI.md` — RAG slice section + live verification results + new Known Gaps.
+- `backend/src/repositories/analyticsRepository.js` — new: `attendanceRateByClass` (raw sums only, JOINs `attendance_sessions`↔`classes`, RLS-scoped, `deleted_at IS NULL`, optional `classId` filter).
+- `backend/src/services/analyticsService.js` — new: `getAttendanceRateByClass` (percentage + rounding; `null` rate, not `0`, for zero-session classes).
+- `backend/tests/analytics-service.test.js` — new, 5 live-Postgres tests (rate math, soft-delete exclusion, classId filter, cross-tenant isolation, zero-session class).
+- `docs/modules/Module-10-Analytics.md` — new module doc (metric definition, cross-domain-JOIN justification, RLS reasoning, known gaps).
 - `.ai/TASK.md`, `.ai/RESULT.md` — this entry.
 
-### A real bug caught and fixed mid-slice
-First design auto-wired ingestion into `documentService.uploadDocument`
-(best-effort, post-upload). This broke `reports.test.js`: report
-exports are `text/csv`, so every report-generation test would silently
-attempt a REAL embedding call whenever a real `NIM_API_KEY` happens to
-be configured (as it now is) — a live network call hidden inside the
-committed suite. It also left orphaned `ai_document_chunks` rows that
-broke the test's hard-delete cleanup (`ai_document_chunks_document_id_fkey`
-violation). Fixed by making `ingestDocument` explicit-only — never
-auto-wired into `uploadDocument` — per the task's own "or a separate
-backfill job" option. Confirmed with a from-scratch Docker rebuild +
-full suite re-run: 520/520 clean.
-
-### Live verification (one-off script, deleted after use)
-Real Postgres (pgvector/HNSW) + real NIM embeddings:
-
-| Proof | Result |
-|---|---|
-| Ingest real `birth_cert` (Confidential) + `scholarship_cert` (Restricted) docs | chunked, embedded, classified correctly |
-| Ingest `aadhaar` doc | refused (`DocumentSearchAadhaarBlockedError`), zero chunks written |
-| `search_documents` as principal, real query | 200, real chunks returned |
-| `search_documents` as staff (Internal only) | 200, zero rows (no Internal content exists) |
-| `search_documents` as hod vs principal, scholarship query | hod never sees the Restricted chunk; principal does |
-| Cross-tenant isolation | College A's principal gets zero hits searching College B's distinctive content |
-| Hostile-content-in-doc proof | forged boundary + "ignore previous instructions" round-trips as literal, inert `chunkText` |
-
 ### Verification
-- Unit: 19/19 new tests (`document-search-service.test.js`).
-- Full backend suite: **520/520**, `--test-concurrency=1`, real `NIM_API_KEY` present, migrated from a clean volume (proves the migration itself, not just an already-migrated DB).
-- Docker Desktop → up, migrated, tested, torn down (`docker compose down`, volume removed once mid-session to clear orphaned data from the bug above, recreated clean).
+- New: 5/5 (`analytics-service.test.js`), real Postgres, two tenants.
+- Full backend suite: **608/608**, `--test-concurrency=1`, real Docker Postgres (pgvector image, pre-existing volume reused, not a fresh migrate).
+- Docker: brought up, tested, torn down (`docker compose down`, volume left intact).
 
 ### Flags
-- No OCR pipeline — `ingestDocument` only supports `text/*` mime types (real documents are PDF/image; not indexable yet, not faked).
-- Ingestion has no HTTP entry point — explicitly invoked only (a backfill CLI/route is a follow-up).
-- No re-ingestion on document versioning — a re-uploaded doc_type's old chunks are neither cleaned up nor refreshed.
-- `DOC_TYPE_CLASSIFICATION` (documentSearchService.js) is a conservative, code-level default, not sourced from BusinessRules.md — same "flag, revisit via ADR" posture as ADR-020.
-- API key never printed/logged/committed.
+- No API/UI — `getAttendanceRateByClass` has no route yet.
+- Finance metrics skipped this slice (more sensitive; pattern proven on Attendance first).
+- No time-window filtering (all-time aggregate); no per-student breakdown.
+- Repo pre-existing state: on session start, `git status` showed ~480 lines of staged deletions across 9 migrations/repositories/services/tests (module 9's document-chunks/OCR/background-jobs slice) plus unstaged modifications almost everywhere else — pre-existing uncommitted work from a prior session, untouched by this slice. Not committed or resolved here; flagging so it isn't mistaken for something this session did.
