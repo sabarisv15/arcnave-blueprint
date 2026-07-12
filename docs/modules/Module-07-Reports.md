@@ -49,8 +49,12 @@ Students button, downloads via the existing
 Blob-download pattern.
 
 ## Known gaps / deferred
-- Only one report type (`student_export`) — attendance/fee reports
-  not built, no real screen has asked yet.
+- ~~Only one report type (`student_export`) — attendance/fee reports
+  not built~~ — **resolved**: `reportService.js`'s
+  `generateAttendanceReport`/`generateFinanceReport` are real,
+  repository-backed (`attendanceRepository.list`/`financeRepository.list`/
+  `feePaymentRepository.list`), routed via `POST /reports/attendance`
+  and `POST /reports/finance` — not stubs.
 - Template-fill (bonafide-certificate style: merge data into a stored
   template) is a different capability, belongs to Module 6
   (`DocumentService` template ownership), not started.

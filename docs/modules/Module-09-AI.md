@@ -577,11 +577,19 @@ suites), confirmed at `--test-concurrency=1` with the real
   `aiService.js`/`routes/ai.js` to actually resolve `actor.departmentId`
   (from `staffRepository`, not the JWT — no department claim exists
   today), which this slice does not add since nothing needs it yet.
-- **No OCR pipeline.** `search_documents`/`ingestDocument` only work on
-  `text/*` uploads — the overwhelming majority of real documents
-  (certificates, scanned photos) are PDF/image and are simply not
-  indexable yet. A real OCR/text-extraction step is a follow-up, not
-  built here.
+- **RAG ingestion (`search_documents`/`ingestDocument`) still only
+  works on `text/*` uploads** — the overwhelming majority of real
+  documents (certificates, scanned photos) are PDF/image and are
+  simply not indexable yet. Still true, unchanged.
+- ~~No OCR pipeline exists at all~~ — **corrected, not resolved**: a
+  separate `POST /documents/:id/ocr` route
+  (`ocrService.processDocument`, `ocr_results` table) does exist and
+  is wired end to end (route → service → repository) — but
+  `ocrService.js`'s `extractReadableText` is a byte filter (strips
+  non-ASCII bytes from the raw buffer), not real optical character
+  recognition. It works on genuinely text-encoded uploads; it does
+  **not** extract text from image/scanned content — the actual gap is
+  "no real OCR engine," not "no pipeline."
 - **Ingestion has no HTTP entry point.** `documentSearchService.
   ingestDocument` is a plain Business Service function, invoked
   explicitly (this slice's own live-verification script called it

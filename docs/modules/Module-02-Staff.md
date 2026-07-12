@@ -24,8 +24,14 @@ that's WorkflowService (Module 8), deliberately unbuilt, not stubbed.
 Add/Edit Staff modal repointed to the real API (`49c2c36`).
 
 ## Known gaps / deferred
-- Staff registration/approval workflow — Module 8.
-- Credential generation/emailing on approval — Module 8.
+- ~~Staff registration/approval workflow — Module 8.~~ — **resolved**:
+  `staffService.js`'s `approveStaffRegistration`/`rejectStaffRegistration`
+  call real `workflowService.approveRequest`/`rejectRequest` (submitted
+  via `workflowService.submitRequest`), not a placeholder.
+- ~~Credential generation/emailing on approval — Module 8.~~ —
+  **resolved**: `approveStaffRegistration` generates a temporary
+  password via `authService.activateUser` and hands off to
+  `notificationService` for the credential email.
 
 ## Commits
 `31f5a8b` migration+repo · `86fa63b` service · `8333dec` API ·

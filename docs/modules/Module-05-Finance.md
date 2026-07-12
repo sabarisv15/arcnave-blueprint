@@ -30,10 +30,15 @@ Finance step in `StudentEditorModal.jsx` (mark paid/not-paid,
 self-approving would defeat the pending-approval gate, `6957f02`).
 
 ## Known gaps / deferred
-- `WorkflowService` approval on fee-structure status changes — Module 8.
-- Student `annual_income` field missing — blocks scholarship
-  eligibility (BusinessRules: income-threshold eligibility), unrelated
-  to Finance itself, needs a Student/Module 1 follow-up.
+- ~~`WorkflowService` approval on fee-structure status changes —
+  Module 8.~~ — **resolved**: `financeService.js`'s
+  `approveFeeStructure`/`rejectFeeStructure` call real
+  `workflowService.approveRequest`/`rejectRequest` (submitted via
+  `workflowService.submitRequest`), not a placeholder.
+- ~~Student `annual_income` field missing — blocks scholarship
+  eligibility~~ — **resolved**: column added (migration
+  `1753500000000_student-annual-income.js`), consumed by
+  `financeService.js`'s real eligibility calc (~line 504-519).
 
 ## Commits
 `326e8b5` fee_structures migration+repo · `c1b7aac` fee_payments
