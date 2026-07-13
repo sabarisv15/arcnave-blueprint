@@ -104,6 +104,21 @@ class NotificationNoPendingRequestError extends Error {}
 // enumerating every non-Pending status separately.
 class NotificationNotApprovedError extends Error {}
 
+// dispatchApprovedNotification called for a notification whose channel
+// has no real provider integration yet (sms, whatsapp — the two
+// channels Architecture.md 2.8 names as future work, same "no CHECK
+// constraint, real values enforced in code" convention this file's own
+// VALID_ORIGINS already uses). Thrown BEFORE any send attempt or
+// repository write, never swallowed into a fake 'sent'/'stubbed'
+// delivery row the way email's own best-effort philosophy works: an
+// email that fails to send is a real attempt with a real outcome to
+// record; sms/whatsapp today have no attempt to make at all, so
+// recording one would misrepresent what happened. The notification
+// stays 'Approved' (never advances to 'Dispatched') — a real send can
+// be retried later once a provider exists, same reasoning a failed
+// email is left retriable rather than silently marked done.
+class NotificationChannelNotImplementedError extends Error {}
+
 // Built fresh per call, not cached: nodemailer.createTransport is a
 // cheap, synchronous object construction (the real network connection
 // only happens lazily inside sendMail itself), so there's no real cost
@@ -152,6 +167,28 @@ async function sendEmail(client, { to, subject, body }) {
     logWarn('notification_email_failed', { to, subject, error: err.message });
     return { channel: 'email', status: 'failed', to, subject, error: err.message };
   }
+}
+
+// No SMS provider integration exists yet (no Twilio/similar config
+// anywhere in config.js/.env.example) — this always throws, never
+// silently no-ops or fakes a 'sent'/'stubbed' result the way
+// getTransporter()-is-null does for email. Email's stub behavior is
+// correct there because SMTP is a real, working channel with a
+// documented dev-mode fallback; sms has no working channel at all yet,
+// so pretending otherwise would hide a real gap rather than flag it.
+// eslint-disable-next-line no-unused-vars
+async function sendSms(client, { to, body }) {
+  throw new NotificationChannelNotImplementedError('sms dispatch has no provider integration yet');
+}
+
+// Same reasoning as sendSms above, separate function (not a shared
+// "non-email" stub) because a real WhatsApp integration (e.g. the
+// WhatsApp Business API) and a real SMS integration (e.g. Twilio) are
+// different providers with different credentials/APIs — collapsing
+// them into one stub now would just have to be un-collapsed later.
+// eslint-disable-next-line no-unused-vars
+async function sendWhatsapp(client, { to, body }) {
+  throw new NotificationChannelNotImplementedError('whatsapp dispatch has no provider integration yet');
 }
 
 // The one composed notification this slice actually needs:
@@ -365,14 +402,32 @@ async function rejectNotification(client, notificationId, { actorUserId, remarks
   return notification;
 }
 
-// Only callable once a notification is actually 'Approved'. Always
-// attempts a real send (sendEmail — the only real channel today),
-// always writes exactly one notification_delivery row recording
-// whatever sendEmail actually returned, and always advances status to
-// 'Dispatched' regardless of send outcome — see the file-level comment
-// for why a failed send doesn't block that transition (best-effort
-// delivery, same philosophy sendStaffCredentialsEmail's own caller
-// already relies on).
+// channel -> sender function, keyed exactly on the values
+// draftNotification actually accepts (no CHECK constraint on the
+// column — see the migration's own comment — so this map, not the
+// database, is what "a known channel" means). Deliberately NOT a
+// fallback-to-email default for an unrecognized value: silently
+// routing an sms/whatsapp notification through email would send it to
+// whatever's in to_address as if it were an email address, which for
+// a phone number is simply wrong, not a reasonable degradation.
+const CHANNEL_SENDERS = {
+  email: sendEmail,
+  sms: sendSms,
+  whatsapp: sendWhatsapp,
+};
+
+// Only callable once a notification is actually 'Approved'. Branches
+// on the notification's own `channel` (CHANNEL_SENDERS above) — email
+// keeps its exact prior behavior (always attempts, always records
+// whatever sendEmail returned, always advances to 'Dispatched'
+// regardless of outcome — best-effort delivery, same philosophy
+// sendStaffCredentialsEmail's own caller already relies on). sms/
+// whatsapp (and any other unrecognized channel) call a sender that
+// throws NotificationChannelNotImplementedError BEFORE any
+// notification_delivery row is written or status changes — see that
+// error class's own comment for why this is a thrown, visible failure
+// rather than a recorded 'not_implemented' delivery attempt: there is
+// no real attempt to record.
 async function dispatchApprovedNotification(client, notificationId) {
   const notification = await notificationRepository.findById(client, notificationId);
   if (notification === null) {
@@ -384,7 +439,14 @@ async function dispatchApprovedNotification(client, notificationId) {
     );
   }
 
-  const sendResult = await sendEmail(client, {
+  const sender = CHANNEL_SENDERS[notification.channel];
+  if (!sender) {
+    throw new NotificationChannelNotImplementedError(
+      `channel ${JSON.stringify(notification.channel)} has no dispatch implementation`,
+    );
+  }
+
+  const sendResult = await sender(client, {
     to: notification.to_address,
     subject: notification.subject,
     body: notification.body,
@@ -428,7 +490,10 @@ module.exports = {
   NotificationUserNotFoundError,
   NotificationNoPendingRequestError,
   NotificationNotApprovedError,
+  NotificationChannelNotImplementedError,
   sendEmail,
+  sendSms,
+  sendWhatsapp,
   sendStaffCredentialsEmail,
   sendPasswordResetEmail,
   sendPrincipalInvitationEmail,

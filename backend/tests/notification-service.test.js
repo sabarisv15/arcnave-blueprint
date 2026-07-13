@@ -378,7 +378,7 @@ test('NotificationService ledger: draft/submit/approve/reject/dispatch (no DB)',
     config.smtp.host = null;
 
     const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
-      id, college_id: 'c1', status: 'Approved', to_address: 'a@b.com', subject: 'Hi', body: 'hello', drafted_by_user_id: 'drafter-1',
+      id, college_id: 'c1', status: 'Approved', channel: 'email', to_address: 'a@b.com', subject: 'Hi', body: 'hello', drafted_by_user_id: 'drafter-1',
     }));
     const deliveryMock = t.mock.method(notificationRepository, 'recordDeliveryAttempt', async (client, fields) => ({ id: 'delivery-1', ...fields }));
     const updateMock = t.mock.method(notificationRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
@@ -400,5 +400,39 @@ test('NotificationService ledger: draft/submit/approve/reject/dispatch (no DB)',
     assert.equal(auditMock.mock.calls[0].arguments[1].action, 'notification_dispatched');
     assert.equal(auditMock.mock.calls[0].arguments[1].userId, 'drafter-1');
     assert.equal(auditMock.mock.calls[0].arguments[1].metadata.deliveryStatus, 'stubbed');
+  });
+
+  for (const channel of ['sms', 'whatsapp']) {
+    await t.test(`dispatchApprovedNotification throws NotificationChannelNotImplementedError for channel=${channel}, writes no delivery row, and does not advance status`, async () => {
+      const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
+        id, college_id: 'c1', status: 'Approved', channel, to_address: '+1555', subject: null, body: 'hello', drafted_by_user_id: 'drafter-1',
+      }));
+      const deliveryMock = t.mock.method(notificationRepository, 'recordDeliveryAttempt', async () => { throw new Error('must not be called'); });
+      const updateMock = t.mock.method(notificationRepository, 'update', async () => { throw new Error('must not be called'); });
+      t.after(() => {
+        findMock.mock.restore();
+        deliveryMock.mock.restore();
+        updateMock.mock.restore();
+      });
+
+      await assert.rejects(
+        () => notificationService.dispatchApprovedNotification({}, 'notif-1'),
+        notificationService.NotificationChannelNotImplementedError,
+      );
+      assert.equal(deliveryMock.mock.callCount(), 0);
+      assert.equal(updateMock.mock.callCount(), 0);
+    });
+  }
+
+  await t.test('dispatchApprovedNotification throws NotificationChannelNotImplementedError for an unrecognized channel', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', status: 'Approved', channel: 'carrier_pigeon', to_address: 'x', subject: null, body: 'hello', drafted_by_user_id: 'drafter-1',
+    }));
+    t.after(() => findMock.mock.restore());
+
+    await assert.rejects(
+      () => notificationService.dispatchApprovedNotification({}, 'notif-1'),
+      notificationService.NotificationChannelNotImplementedError,
+    );
   });
 });
