@@ -81,7 +81,7 @@ function mapStudentServiceError(err, res) {
 function createStudentsRouter() {
   const router = express.Router();
 
-  // RBAC here is a deliberately conservative placeholder, not a final
+  // RBAC here is a deliberately conservative default, not a final
   // decision — same situation configurations.js was already in and
   // handled the same way. BusinessRules.md's real rule (only the
   // assigned Class Tutor may edit; only faculty assigned via the
@@ -90,9 +90,10 @@ function createStudentsRouter() {
   // open, to be settled in Module 2), and there's no timetable/
   // assignment data to check against yet either (Module 3, not
   // built). Until then: any authenticated tenant user may read,
-  // requireRole('principal') gates writes — a real, working role
-  // already used elsewhere in this codebase, not a guess at the
-  // eventual Class Tutor model. Must be revisited once Module 2
+  // requirePermission('students.create'/'update'/'delete') (mapped to
+  // ['principal'] in middleware/permissions.js) gates writes — a real,
+  // working role already used elsewhere in this codebase, not a guess
+  // at the eventual Class Tutor model. Must be revisited once Module 2
   // resolves that question.
 
   router.post('/students', requirePermission('students.create'), asyncHandler(async (req, res) => {

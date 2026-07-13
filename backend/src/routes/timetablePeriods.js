@@ -60,11 +60,13 @@ function mapAcademicServiceError(err, res) {
 function createTimetablePeriodsRouter() {
   const router = express.Router();
 
-  // RBAC here is the same deliberately conservative placeholder
+  // RBAC here is the same deliberately conservative default
   // classes.js/staff.js/students.js use, not a final decision.
   // BusinessRules.md names no specific actor for "who may define the
-  // bell schedule" — requireRole('principal') gates writes,
-  // requireAuth gates reads, same as every other Module 3 route.
+  // bell schedule" — requirePermission('timetable_periods.create'/
+  // 'import_csv'/'delete') (mapped to ['principal'] in
+  // middleware/permissions.js) gates writes, requireAuth gates reads,
+  // same as every other Module 3 route.
 
   router.post('/timetable-periods', requirePermission('timetable_periods.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;

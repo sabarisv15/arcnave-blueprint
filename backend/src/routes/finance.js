@@ -137,20 +137,24 @@ function mapFinanceServiceError(err, res) {
 function createFinanceRouter() {
   const router = express.Router();
 
-  // RBAC here is the same deliberately conservative placeholder
+  // RBAC here is the same deliberately conservative default
   // classes.js/staff.js/students.js/facultyAllocation.js use, not a
   // final decision. financeService has no authorization logic of its
   // own (unlike attendanceService.markAttendance's real
   // assertCanMark) — the route is the only gate, so it has to be
-  // conservative. requireRole('principal') gates every write (both
-  // fee_structures' create/update and fee_payments' mark — the latter
-  // is "a simple write, no WorkflowService gate" per this session's
-  // own framing, but it is still a write nothing in BusinessRules.md
-  // names a specific actor for, e.g. an accounts clerk or class tutor,
-  // so it gets the same placeholder treatment every other
-  // not-yet-named actor gets in this codebase); requireAuth gates
-  // reads. Must be revisited once a real role model exists for "who
-  // may change fee structures" / "who may mark a student's fee paid."
+  // conservative. requirePermission('finance.fee_structures.create'/
+  // 'update'/'finance.fee_payments.create') (all mapped to
+  // ['principal'] in middleware/permissions.js) gates every write
+  // (both fee_structures' create/update and fee_payments' mark — the
+  // latter is "a simple write, no WorkflowService gate" per this
+  // session's own framing, but it is still a write nothing in
+  // BusinessRules.md names a specific actor for, e.g. an accounts
+  // clerk or class tutor, so it gets the same conservative-default
+  // treatment every other not-yet-named actor gets in this codebase);
+  // requireAuth gates reads. Must be revisited once a real role model
+  // exists for "who may change fee structures" / "who may mark a
+  // student's fee paid" — that's a new permission mapping at that
+  // point, not a new mechanism.
 
   // Scope note: only the five endpoints this session's own task names
   // are built — create/update/list for fee_structures, mark/
@@ -202,8 +206,8 @@ function createFinanceRouter() {
   // way to actually start the real approval chain. This is that
   // trigger point.
   //
-  // requireAuth, deliberately NOT requireRole('principal') like
-  // create/update above — same reasoning routes/staff.js's own
+  // requireAuth, deliberately NOT the principal-mapped permission gate
+  // create/update above use — same reasoning routes/staff.js's own
   // submit-registration route now documents: this chain is single-step,
   // Principal-only (financeService.js's own header comment). Gating
   // submission to principal-only would mean requestedByUserId is
@@ -299,9 +303,9 @@ function createFinanceRouter() {
 
   // BusinessRules.md Finance / this session's own task: scholarship
   // eligibility from a student's annual_income against this tenant's
-  // configured threshold. requireAuth, not requireRole('principal')
-  // like the write routes above — this is a read, same reasoning
-  // GET /finance/fee-structures already uses.
+  // configured threshold. requireAuth, not the principal-mapped
+  // permission gate the write routes above use — this is a read, same
+  // reasoning GET /finance/fee-structures already uses.
   router.get('/finance/students/:id/scholarship-eligibility', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {

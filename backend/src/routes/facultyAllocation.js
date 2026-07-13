@@ -68,14 +68,15 @@ function mapAcademicServiceError(err, res) {
 function createFacultyAllocationRouter() {
   const router = express.Router();
 
-  // RBAC here is the same deliberately conservative placeholder
+  // RBAC here is the same deliberately conservative default
   // classes.js/staff.js/students.js use, not a final decision.
   // BusinessRules.md names no specific actor for "who may assign
   // faculty to a period" (unlike "Class Tutor is assigned only by
   // HOD") — academicService.js's own .ai/TASK.md already left this to
   // the route/RBAC layer, not invented at either layer.
-  // requireRole('principal') gates writes, requireAuth gates reads,
-  // same as every other Module 3 route.
+  // requirePermission('faculty_allocation.create'/'delete') (mapped to
+  // ['principal']) gates writes, requireAuth gates reads, same as
+  // every other Module 3 route.
 
   router.post('/faculty-allocation', requirePermission('faculty_allocation.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;

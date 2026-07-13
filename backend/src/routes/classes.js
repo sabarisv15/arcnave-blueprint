@@ -107,20 +107,20 @@ function mapAcademicServiceError(err, res) {
 function createClassesRouter() {
   const router = express.Router();
 
-  // RBAC here is the same deliberately conservative placeholder
+  // RBAC here is the same deliberately conservative default
   // staff.js/students.js use, not a final decision. BusinessRules.md's
   // real rules ("Class Tutor is assigned only by HOD", the HOD/
-  // Principal timetable review chain) can't be enforced correctly
-  // today: no WorkflowService (Module 8) exists, and academicService
-  // itself models no pending/approval transition logic yet (see this
-  // slice's .ai/TASK.md). requireRole('principal') gates writes —
-  // Principal is the one existing role that's genuinely the final
-  // authority in every real chain BusinessRules.md describes (both
-  // the Staff and HOD registration chains end with Principal's final
-  // approval, and Principal is also the final timetable-review gate
-  // per PrincipalDashboard.jsx); requireAuth gates reads. Must be
-  // revisited once WorkflowService exists and can express "HOD may
-  // assign a Class Tutor for their own department" precisely.
+  // Principal timetable review chain) go through the real
+  // submitTimetableForApproval/approveTimetableApproval chain now
+  // (WorkflowService, Module 8) for the review itself, but plain
+  // create/update/delete on a class row is still gated by
+  // requirePermission('classes.create'/'update'/'delete') — mapped to
+  // ['principal'] in middleware/permissions.js — since Principal is
+  // the one existing role that's genuinely the final authority in
+  // every real chain BusinessRules.md describes; requireAuth gates
+  // reads. Revisit once BusinessRules.md names a narrower actor (e.g.
+  // "HOD may assign a Class Tutor for their own department") — that's
+  // a new permission mapping at that point, not a new mechanism.
 
   router.post('/classes', requirePermission('classes.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;

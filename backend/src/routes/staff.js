@@ -122,18 +122,18 @@ function mapStaffServiceError(err, res) {
 function createStaffRouter() {
   const router = express.Router();
 
-  // RBAC here is the same deliberately conservative placeholder
+  // RBAC here is the same deliberately conservative default
   // students.js uses, not a final decision. BusinessRules.md's real
   // Staff registration chain (Faculty submits -> HOD approves ->
-  // Principal approves -> WorkflowService) can't be enforced today:
-  // no WorkflowService (Module 8) exists, and staffService itself
-  // doesn't model a pending/approval state (see the Module 2 first
-  // slice's scope boundary). requireRole('principal') gates writes —
-  // both the Staff and HOD registration chains BusinessRules.md
-  // describes end with Principal's final approval, so Principal is
-  // the one existing role that's genuinely the final authority in
-  // every real chain; requireAuth gates reads. Must be revisited once
-  // WorkflowService exists.
+  // Principal approves) now runs through the real WorkflowService
+  // (Module 8, see submitStaffRegistration/approveStaffRegistration
+  // below), but plain create/update/delete on a staff row is still
+  // gated by requirePermission('staff.create'/'update'/'delete')
+  // (mapped to ['principal'] in middleware/permissions.js) — both the
+  // Staff and HOD registration chains BusinessRules.md describes end
+  // with Principal's final approval, so Principal is the one existing
+  // role that's genuinely the final authority in every real chain;
+  // requireAuth gates reads.
 
   router.post('/staff', requirePermission('staff.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
@@ -228,11 +228,11 @@ function createStaffRouter() {
   // created above has no way to actually enter the real
   // Faculty->HOD->Principal chain. This is that trigger point.
   //
-  // requireAuth, deliberately NOT requireRole('principal') like
-  // create/update above: BusinessRules.md names a real actor for this
-  // one action ("Faculty submits"), unlike create/update which have no
-  // named actor and so fall back to this router's conservative
-  // placeholder. Gating submission to principal-only would actively
+  // requireAuth, deliberately NOT the principal-mapped permission gate
+  // create/update above use: BusinessRules.md names a real actor for
+  // this one action ("Faculty submits"), unlike create/update which
+  // have no named actor and so fall back to this router's conservative
+  // default. Gating submission to principal-only would actively
   // break the feature for the common single-principal-per-college
   // case — requestedByUserId would equal the Principal's own user_id,
   // which is also the resolved final-step approver in every chain

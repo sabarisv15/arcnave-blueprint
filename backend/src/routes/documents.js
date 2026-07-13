@@ -94,13 +94,16 @@ function mapOcrServiceError(err, res) {
 function createDocumentsRouter() {
   const router = express.Router();
 
-  // RBAC is the same deliberately conservative placeholder
+  // RBAC is the same deliberately conservative default
   // students.js/staff.js/finance.js all use, not a final decision —
   // BusinessRules.md names no specific actor for document upload/
-  // verification. requireRole('principal') gates every write;
-  // requireAuth gates every read. Revisit once a real role model names
-  // who may upload/verify a student's documents (most likely the class
-  // tutor, per BusinessRules.md's Staff section — not assumed here).
+  // verification. requirePermission('documents.upload'/'documents.review'/
+  // 'documents.delete') (mapped to ['principal'] in
+  // middleware/permissions.js) gates every write; requireAuth gates
+  // every read. Revisit once a real role model names who may upload/
+  // verify a student's documents (most likely the class tutor, per
+  // BusinessRules.md's Staff section — not assumed here) — that's a
+  // new permission mapping at that point, not a new mechanism.
 
   // A route-level body-size limit, not a global one: base64 adds ~33%
   // overhead over raw bytes, and this is the only endpoint in the app
@@ -128,8 +131,10 @@ function createDocumentsRouter() {
 
   // Template-fill: upload is college_admin only (BusinessRules.md's
   // College Admin resolution, item 2 — "uploading/managing college
-  // document templates"), unlike the requireRole('principal') every
-  // other write on this router uses. Calls uploadTemplate specifically
+  // document templates"), via requirePermission('documents.templates.upload')
+  // (mapped to ['college_admin']), unlike the principal-mapped
+  // permissions every other write on this router uses. Calls
+  // uploadTemplate specifically
   // (not the general POST /documents above), which fixes
   // doc_type='template'/student_id=null structurally — a caller here
   // cannot forge a template row with a student_id, or a student
