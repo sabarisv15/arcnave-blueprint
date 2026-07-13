@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireRole } = require('../middleware/rbac');
+const { requirePermission } = require('../middleware/rbac');
 const collegeProfileService = require('../services/collegeProfileService');
 
 function requireResolvedTenant(req, res) {
@@ -38,7 +38,7 @@ function bodyToFields(body, fieldMap) {
 function createCollegeProfileRouter() {
   const router = express.Router();
 
-  router.get('/college-profile', requireRole('college_admin'), asyncHandler(async (req, res) => {
+  router.get('/college-profile', requirePermission('college_profile.read'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const profile = await collegeProfileService.getProfile(req.dbClient, req.collegeId);
     if (profile === null) {
@@ -48,7 +48,7 @@ function createCollegeProfileRouter() {
     res.json(profile);
   }));
 
-  router.put('/college-profile', requireRole('college_admin'), asyncHandler(async (req, res) => {
+  router.put('/college-profile', requirePermission('college_profile.update'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const profile = await collegeProfileService.updateProfile(
       req.dbClient,

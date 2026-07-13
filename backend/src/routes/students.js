@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const studentService = require('../services/studentService');
 
 function requireResolvedTenant(req, res) {
@@ -95,7 +95,7 @@ function createStudentsRouter() {
   // eventual Class Tutor model. Must be revisited once Module 2
   // resolves that question.
 
-  router.post('/students', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/students', requirePermission('students.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const student = await studentService.createStudent(req.dbClient, {
@@ -133,7 +133,7 @@ function createStudentsRouter() {
     res.json(students);
   }));
 
-  router.put('/students/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.put('/students/:id', requirePermission('students.update'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const student = await studentService.updateStudent(
@@ -153,7 +153,7 @@ function createStudentsRouter() {
     }
   }));
 
-  router.delete('/students/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.delete('/students/:id', requirePermission('students.delete'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const student = await studentService.removeStudent(req.dbClient, req.params.id, { userId: req.jwtClaims.sub });
     if (student === null) {

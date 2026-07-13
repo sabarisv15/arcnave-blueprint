@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const configurationService = require('../services/configurationService');
 
 function requireResolvedTenant(req, res) {
@@ -45,7 +45,7 @@ function createConfigurationsRouter() {
   // principal). Ported as-is, conservative default and all, not
   // silently resolved or silently loosened — worth revisiting once a
   // real category has a real business rule about who can change it.
-  router.put('/configurations/:category', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.put('/configurations/:category', requirePermission('configurations.update'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { configuration, expected_version: rawExpectedVersion } = req.body || {};
     const expectedVersion = rawExpectedVersion === undefined ? null : rawExpectedVersion;

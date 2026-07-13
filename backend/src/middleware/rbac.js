@@ -1,5 +1,7 @@
 'use strict';
 
+const { roleHasPermission } = require('./permissions');
+
 // Tenant-side RBAC only. Super Admin / Platform operations are not "a
 // role" inside this model at all — BusinessRules.md and ADR-010 both
 // treat the platform path as structurally separate from tenant RBAC,
@@ -71,4 +73,27 @@ function requireRole(...allowedRoles) {
   };
 }
 
-module.exports = { requireAuth, requireRole };
+// The real permission model every route now declares against, instead
+// of an inline requireRole('a', 'b') role list: routes name WHAT they
+// need (`requirePermission('students.create')`), and permissions.js's
+// PERMISSION_ROLES table is the one place that maps that to WHO may do
+// it. Same 401-vs-403 split as requireRole above, same reasoning.
+// requireRole itself is untouched and still exported — it's the
+// generic primitive requirePermission is built on, not a competing
+// mechanism, and rbac.test.js still exercises it directly against a
+// throwaway test route.
+function requirePermission(permission) {
+  return (req, res, next) => {
+    if (!isValidAccessClaims(req.jwtClaims)) {
+      res.status(401).json({ detail: 'Authentication required' });
+      return;
+    }
+    if (!roleHasPermission(req.jwtClaims.role, permission)) {
+      res.status(403).json({ detail: 'Insufficient role' });
+      return;
+    }
+    next();
+  };
+}
+
+module.exports = { requireAuth, requireRole, requirePermission };

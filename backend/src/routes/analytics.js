@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireRole } = require('../middleware/rbac');
+const { requirePermission } = require('../middleware/rbac');
 const analyticsService = require('../services/analyticsService');
 
 function requireResolvedTenant(req, res) {
@@ -16,8 +16,10 @@ function requireResolvedTenant(req, res) {
 function createAnalyticsRouter() {
   const router = express.Router();
 
-  // requireRole('principal', 'hod'), not requireRole('principal') alone
-  // like reports.js's writes, and not requireAuth like attendance.js's
+  // requirePermission('analytics.attendance_rate.read') —
+  // permissions.js maps this to ['principal', 'hod'], the same pair
+  // this route always used, not requireRole('principal') alone like
+  // reports.js's writes, and not requireAuth like attendance.js's
   // reads: this is a read-only, no-side-effect oversight metric (no
   // service-level per-actor authorization logic of its own to defer
   // to, unlike attendance.js's markAttendance), so the route itself is
@@ -33,7 +35,7 @@ function createAnalyticsRouter() {
   // slice's own brief; the route is a thin wrapper, same "the service
   // decides the shape" convention every other route in this codebase
   // already follows.
-  router.get('/analytics/attendance-rate', requireRole('principal', 'hod'), asyncHandler(async (req, res) => {
+  router.get('/analytics/attendance-rate', requirePermission('analytics.attendance_rate.read'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { class_id: classId } = req.query;
     const rows = await analyticsService.getAttendanceRateByClass(req.dbClient, { classId });

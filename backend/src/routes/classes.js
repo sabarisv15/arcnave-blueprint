@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const academicService = require('../services/academicService');
 const staffService = require('../services/staffService');
 const workflowService = require('../services/workflowService');
@@ -122,7 +122,7 @@ function createClassesRouter() {
   // revisited once WorkflowService exists and can express "HOD may
   // assign a Class Tutor for their own department" precisely.
 
-  router.post('/classes', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/classes', requirePermission('classes.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const cls = await academicService.createClass(
@@ -160,7 +160,7 @@ function createClassesRouter() {
     res.json(classes);
   }));
 
-  router.put('/classes/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.put('/classes/:id', requirePermission('classes.update'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const cls = await academicService.updateClass(
@@ -201,7 +201,7 @@ function createClassesRouter() {
     }
   }));
 
-  router.delete('/classes/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.delete('/classes/:id', requirePermission('classes.delete'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const cls = await academicService.removeClass(req.dbClient, req.params.id, { userId: req.jwtClaims.sub });
     if (cls === null) {

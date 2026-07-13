@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const financeService = require('../services/financeService');
 const staffService = require('../services/staffService');
 const workflowService = require('../services/workflowService');
@@ -161,7 +161,7 @@ function createFinanceRouter() {
   // own .ai/RESULT.md). Add it in a later slice if a real screen needs
   // it, not speculatively here.
 
-  router.post('/finance/fee-structures', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/finance/fee-structures', requirePermission('finance.fee_structures.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const feeStructure = await financeService.createFeeStructure(
@@ -176,7 +176,7 @@ function createFinanceRouter() {
     }
   }));
 
-  router.put('/finance/fee-structures/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.put('/finance/fee-structures/:id', requirePermission('finance.fee_structures.update'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const feeStructure = await financeService.updateFeeStructure(
@@ -265,7 +265,7 @@ function createFinanceRouter() {
   // create from update, so there's nothing here to key a 201 off of
   // without changing markFeePayment's own contract, which this slice
   // doesn't do.
-  router.post('/finance/fee-payments', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/finance/fee-payments', requirePermission('finance.fee_payments.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const payment = await financeService.markFeePayment(

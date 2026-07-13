@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireRole } = require('../middleware/rbac');
+const { requirePermission } = require('../middleware/rbac');
 const collegeProfileService = require('../services/collegeProfileService');
 
 function requireResolvedTenant(req, res) {
@@ -45,13 +45,13 @@ function mapDepartmentError(err, res) {
 function createDepartmentsRouter() {
   const router = express.Router();
 
-  router.get('/departments', requireRole('college_admin'), asyncHandler(async (req, res) => {
+  router.get('/departments', requirePermission('departments.read'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const departments = await collegeProfileService.listDepartments(req.dbClient, req.collegeId);
     res.json(departments);
   }));
 
-  router.post('/departments', requireRole('college_admin'), asyncHandler(async (req, res) => {
+  router.post('/departments', requirePermission('departments.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const department = await collegeProfileService.createDepartment(
@@ -66,7 +66,7 @@ function createDepartmentsRouter() {
     }
   }));
 
-  router.get('/departments/:id', requireRole('college_admin'), asyncHandler(async (req, res) => {
+  router.get('/departments/:id', requirePermission('departments.read'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const department = await collegeProfileService.getDepartment(req.dbClient, req.params.id);
     if (department === null) {
@@ -76,7 +76,7 @@ function createDepartmentsRouter() {
     res.json(department);
   }));
 
-  router.put('/departments/:id', requireRole('college_admin'), asyncHandler(async (req, res) => {
+  router.put('/departments/:id', requirePermission('departments.update'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const department = await collegeProfileService.updateDepartment(
@@ -96,7 +96,7 @@ function createDepartmentsRouter() {
     }
   }));
 
-  router.delete('/departments/:id', requireRole('college_admin'), asyncHandler(async (req, res) => {
+  router.delete('/departments/:id', requirePermission('departments.delete'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const department = await collegeProfileService.removeDepartment(
       req.dbClient,

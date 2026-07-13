@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const documentService = require('../services/documentService');
 const ocrService = require('../services/ocrService');
 
@@ -101,7 +101,7 @@ function createDocumentsRouter() {
   // A route-level body-size limit, not a global one: base64 adds ~33%
   // overhead over raw bytes, and this is the only endpoint in the app
   // that needs headroom above express.json()'s default 100kb.
-  router.post('/documents', requireRole('principal'), express.json({ limit: '15mb' }), asyncHandler(async (req, res) => {
+  router.post('/documents', requirePermission('documents.upload'), express.json({ limit: '15mb' }), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { file_base64: fileBase64 } = req.body || {};
     if (typeof fileBase64 !== 'string' || fileBase64.length === 0) {
@@ -130,7 +130,7 @@ function createDocumentsRouter() {
   // doc_type='template'/student_id=null structurally — a caller here
   // cannot forge a template row with a student_id, or a student
   // document silently tagged as a template.
-  router.post('/documents/templates', requireRole('college_admin'), express.json({ limit: '15mb' }), asyncHandler(async (req, res) => {
+  router.post('/documents/templates', requirePermission('documents.templates.upload'), express.json({ limit: '15mb' }), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { file_base64: fileBase64, file_name: fileName, mime_type: mimeType } = req.body || {};
     if (typeof fileBase64 !== 'string' || fileBase64.length === 0) {
@@ -217,7 +217,7 @@ function createDocumentsRouter() {
   // slice needs, not a general/unscoped list, same restraint
   // finance.js's own GET /finance/fee-payments documents for the
   // identical shape.
-  router.post('/documents/:id/ocr', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/documents/:id/ocr', requirePermission('documents.ocr.run'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const result = await ocrService.processDocument(req.dbClient, req.params.id, { actorUserId: req.jwtClaims.sub });
@@ -245,7 +245,7 @@ function createDocumentsRouter() {
     res.json(documents);
   }));
 
-  router.post('/documents/:id/review', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/documents/:id/review', requirePermission('documents.review'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const document = await documentService.reviewDocument(
@@ -265,7 +265,7 @@ function createDocumentsRouter() {
     }
   }));
 
-  router.delete('/documents/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.delete('/documents/:id', requirePermission('documents.delete'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const document = await documentService.removeDocument(req.dbClient, req.params.id, { userId: req.jwtClaims.sub });
     if (document === null) {

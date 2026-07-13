@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const backgroundJobService = require('../services/backgroundJobService');
 
 function requireResolvedTenant(req, res) {
@@ -16,7 +16,7 @@ function requireResolvedTenant(req, res) {
 function createBackgroundJobsRouter() {
   const router = express.Router();
 
-  router.post('/background-jobs', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/background-jobs', requirePermission('background_jobs.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const body = req.body || {};
     const job = await backgroundJobService.enqueue(req.dbClient, {

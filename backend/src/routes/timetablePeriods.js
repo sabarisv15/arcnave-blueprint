@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const academicService = require('../services/academicService');
 
 function requireResolvedTenant(req, res) {
@@ -66,7 +66,7 @@ function createTimetablePeriodsRouter() {
   // bell schedule" — requireRole('principal') gates writes,
   // requireAuth gates reads, same as every other Module 3 route.
 
-  router.post('/timetable-periods', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/timetable-periods', requirePermission('timetable_periods.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const period = await academicService.createTimetablePeriod(
@@ -81,7 +81,7 @@ function createTimetablePeriodsRouter() {
     }
   }));
 
-  router.post('/timetable-periods/import-csv', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/timetable-periods/import-csv', requirePermission('timetable_periods.import_csv'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const { file_name: fileName, file_base64: fileBase64 } = req.body || {};
@@ -125,7 +125,7 @@ function createTimetablePeriodsRouter() {
     res.json(periods);
   }));
 
-  router.delete('/timetable-periods/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.delete('/timetable-periods/:id', requirePermission('timetable_periods.delete'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const period = await academicService.removeTimetablePeriod(req.dbClient, req.params.id, { actorUserId: req.jwtClaims.sub });

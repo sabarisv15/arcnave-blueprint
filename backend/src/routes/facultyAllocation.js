@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const academicService = require('../services/academicService');
 
 function requireResolvedTenant(req, res) {
@@ -77,7 +77,7 @@ function createFacultyAllocationRouter() {
   // requireRole('principal') gates writes, requireAuth gates reads,
   // same as every other Module 3 route.
 
-  router.post('/faculty-allocation', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/faculty-allocation', requirePermission('faculty_allocation.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const allocation = await academicService.assignFacultyAllocation(
@@ -125,7 +125,7 @@ function createFacultyAllocationRouter() {
     res.json(allocations);
   }));
 
-  router.delete('/faculty-allocation/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.delete('/faculty-allocation/:id', requirePermission('faculty_allocation.delete'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const allocation = await academicService.removeFacultyAllocation(req.dbClient, req.params.id, { actorUserId: req.jwtClaims.sub });
     if (allocation === null) {

@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const staffService = require('../services/staffService');
 const workflowService = require('../services/workflowService');
 
@@ -135,7 +135,7 @@ function createStaffRouter() {
   // every real chain; requireAuth gates reads. Must be revisited once
   // WorkflowService exists.
 
-  router.post('/staff', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/staff', requirePermission('staff.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const staff = await staffService.createStaff(
@@ -150,7 +150,7 @@ function createStaffRouter() {
     }
   }));
 
-  router.post('/staff/hod-accounts', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/staff/hod-accounts', requirePermission('staff.hod_accounts.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const { username, email } = req.body || {};
@@ -203,7 +203,7 @@ function createStaffRouter() {
     res.json(staff);
   }));
 
-  router.put('/staff/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.put('/staff/:id', requirePermission('staff.update'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const staff = await staffService.updateStaff(
@@ -257,7 +257,7 @@ function createStaffRouter() {
     }
   }));
 
-  router.delete('/staff/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.delete('/staff/:id', requirePermission('staff.delete'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const staff = await staffService.removeStaff(req.dbClient, req.params.id, { userId: req.jwtClaims.sub });
     if (staff === null) {
