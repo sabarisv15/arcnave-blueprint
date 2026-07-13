@@ -282,6 +282,12 @@ export default function HodDashboard() {
   const [aiRecommendationDismissed, setAiRecommendationDismissed] = useState(false);
   const [hoveredChartIndex, setHoveredChartIndex] = useState(null);
 
+  // Module 10 (Analytics) — attendance rate by class, same panel as
+  // PrincipalDashboard.jsx's 'reports' tab. Backend already grants hod
+  // this permission (analytics.attendance_rate.read); only the UI was
+  // missing.
+  const [attendanceRateByClass, setAttendanceRateByClass] = useState([]);
+
   // Overview pagination state
   const [overviewPage, setOverviewPage] = useState(1);
   const studentsPerPage = 5;
@@ -469,6 +475,14 @@ export default function HodDashboard() {
       if (handleAuthError(realStaffRes)) return;
       if (realStaffRes.ok) {
         setRealStaffList((await realStaffRes.json()) || []);
+      }
+
+      const attendanceRateRes = await fetch('/api/v1/analytics/attendance-rate', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (handleAuthError(attendanceRateRes)) return;
+      if (attendanceRateRes.ok) {
+        setAttendanceRateByClass((await attendanceRateRes.json()) || []);
       }
 
     } catch (e) {
@@ -841,7 +855,8 @@ export default function HodDashboard() {
     { id: 'overview', label: 'Overview', icon: BarChart3 },
     { id: 'pending_approvals', label: 'Pending Approvals', icon: FileCheck },
     { id: 'academic', label: 'Academic Dashboard', icon: Bot },
-    { id: 'admin', label: 'Admin Suite & Approvals', icon: Settings }
+    { id: 'admin', label: 'Admin Suite & Approvals', icon: Settings },
+    { id: 'reports', label: 'Reports', icon: Gauge }
   ];
 
   return (
@@ -2346,6 +2361,59 @@ export default function HodDashboard() {
                   </div>
                 </div>
 
+            </div>
+          </div>
+        )}
+
+        {viewSection === 'reports' && (
+          <div className="space-y-8 animate-slide-up">
+            {/* Same panel as PrincipalDashboard.jsx's 'reports' tab —
+                GET /api/v1/analytics/attendance-rate, read-only. */}
+            <div className="card p-6 space-y-4">
+              <div className="flex justify-between items-center border-b pb-3 border-slate-50">
+                <div>
+                  <h3 className="font-extrabold text-slate-805 text-sm flex items-center gap-1.5">
+                    <Gauge className="w-4 h-4 text-indigo-500" />
+                    Attendance Rate by Class
+                  </h3>
+                  <p className="text-slate-450 text-[10px] font-semibold mt-0.5">
+                    All-time, based on marked attendance sessions only.
+                  </p>
+                </div>
+              </div>
+
+              {attendanceRateByClass.length === 0 ? (
+                <p className="text-center text-slate-500 font-semibold py-8 text-sm">
+                  No attendance has been marked for any class yet.
+                </p>
+              ) : (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Class</th>
+                      <th className="text-center">Sessions Marked</th>
+                      <th className="text-center">Attendance Rate</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {attendanceRateByClass.map((row) => {
+                      const rate = row.attendanceRatePercent;
+                      const badgeClass = rate === null
+                        ? 'badge'
+                        : rate < 60 ? 'badge badge-rose' : rate < 75 ? 'badge badge-amber' : 'badge badge-emerald';
+                      return (
+                        <tr key={row.classId}>
+                          <td className="font-bold text-slate-700">{row.className}</td>
+                          <td className="text-center">{row.sessionsCount}</td>
+                          <td className="text-center">
+                            <span className={badgeClass}>{rate === null ? 'No data' : `${rate}%`}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
         )}
