@@ -616,9 +616,15 @@ async function importTimetablePeriodsCsv(client, { collegeId, fileName = 'timeta
   for (const name of required) {
     if (!headers.includes(name)) throw new TimetableImportError(`csv missing ${name}`);
   }
+  // class_id/subject/staff_user_id are optional: a plain bell-schedule
+  // CSV (just the 4 required columns) still imports periods only, same
+  // as before. Only rows that carry all three also get a
+  // faculty_allocation row and a classes.timetable_data entry.
+  const hasAllocationColumns = ['class_id', 'subject', 'staff_user_id'].every((name) => headers.includes(name));
 
   const imported = [];
   const skipped = [];
+  const timetableDataByClassId = new Map();
   let rowNumber = 0;
   for (const line of lines.slice(1)) {
     rowNumber += 1;
@@ -636,18 +642,42 @@ async function importTimetablePeriodsCsv(client, { collegeId, fileName = 'timeta
       // eslint-disable-next-line no-await-in-loop
       await client.query(`SAVEPOINT ${savepoint}`);
       // eslint-disable-next-line no-await-in-loop
-      await createTimetablePeriod(client, {
+      const period = await createTimetablePeriod(client, {
         collegeId,
         dayOfWeek: row.day_of_week,
         hourIndex: Number(row.hour_index),
         startTime: row.start_time,
         endTime: row.end_time,
       }, { actorUserId });
+      if (hasAllocationColumns && row.class_id && row.subject && row.staff_user_id) {
+        // eslint-disable-next-line no-await-in-loop
+        await assignFacultyAllocation(client, {
+          collegeId,
+          classId: row.class_id,
+          periodId: period.id,
+          subject: row.subject,
+          staffUserId: row.staff_user_id,
+        }, { actorUserId });
+        if (!timetableDataByClassId.has(row.class_id)) timetableDataByClassId.set(row.class_id, []);
+        timetableDataByClassId.get(row.class_id).push({
+          periodId: period.id,
+          dayOfWeek: row.day_of_week,
+          hourIndex: Number(row.hour_index),
+          startTime: row.start_time,
+          endTime: row.end_time,
+          subject: row.subject,
+          staffUserId: row.staff_user_id,
+        });
+      }
       // eslint-disable-next-line no-await-in-loop
       await client.query(`RELEASE SAVEPOINT ${savepoint}`);
       imported.push({ row: rowNumber, dayOfWeek: row.day_of_week, hourIndex: Number(row.hour_index) });
     } catch (err) {
-      if (err instanceof TimetablePeriodSlotTakenError) {
+      if (
+        err instanceof TimetablePeriodSlotTakenError
+        || err instanceof FacultyAllocationPeriodTakenError
+        || err instanceof FacultyAllocationStaffConflictError
+      ) {
         // eslint-disable-next-line no-await-in-loop
         await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
         skipped.push({ row: rowNumber, reason: err.message });
@@ -655,6 +685,21 @@ async function importTimetablePeriodsCsv(client, { collegeId, fileName = 'timeta
         throw err;
       }
     }
+  }
+
+  // Merge, don't overwrite: a class's timetable_data may already carry
+  // entries from a prior import or manual update.
+  for (const [classId, entries] of timetableDataByClassId.entries()) {
+    // eslint-disable-next-line no-await-in-loop
+    const cls = await classRepository.findById(client, classId);
+    if (cls === null) continue;
+    const existing = Array.isArray(cls.timetable_data) ? cls.timetable_data : [];
+    // node-pg serializes a raw JS array parameter as a Postgres ARRAY
+    // literal, not JSON text — invalid for a jsonb column. Must be
+    // JSON.stringify'd first, same driver quirk workflowRepository.js's
+    // own toRow() already works around for approverChain/actionManifest.
+    // eslint-disable-next-line no-await-in-loop
+    await classRepository.update(client, classId, { timetableData: JSON.stringify([...existing, ...entries]) });
   }
 
   return { rawDocumentId: rawDocument.id, imported, skipped, totalRows: lines.length - 1 };
