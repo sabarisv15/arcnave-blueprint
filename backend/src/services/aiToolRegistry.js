@@ -36,9 +36,43 @@
 // call actually does — this is enforced by registration-time
 // discipline/code review, the same way rule 1 ("no handler contains
 // its own validation/query construction") is: see request_notification_send
-// below for the one real example. The R0-R5 risk ladder and Action
-// Manifest are explicitly deferred (see Module-09-AI.md) — this gate
-// is the L1/L2/L3 action-level + data-classification check only.
+// below for the one real example.
+//
+// R0-R5 risk ladder + Action Manifest (this session's own task):
+// AI-Governance.md names L1/L2/L3 (action level) and Internal/
+// Confidential/Restricted (data classification) as its two axes, but
+// never actually specifies an "R0-R5" ladder anywhere in the doc — this
+// is this slice's own, explicitly-flagged interpretation, not a spec
+// transcription. RISK_MATRIX below derives a tool's risk level
+// deterministically from its own already-declared level +
+// dataClassification (never a third, independently-set field that
+// could drift from those two), monotonically non-decreasing in both
+// axes, capped at R5 for the single most dangerous combination (L3 +
+// Restricted). The ladder currently informs the Action Manifest
+// (below) — it makes an AI action's real risk visible to the human
+// approver at approval time — but it does NOT add a second, automated
+// hard-block beyond AI-Governance.md's existing "L3 always requires
+// human approval, no exceptions" rule. A real escalation policy (e.g.
+// "R5 requires two independent approvers") is a follow-up, deliberately
+// not invented here: `request_notification_send` (R4: L3+Confidential)
+// is the only real L3 tool that exists today, and no R5 tool exists
+// yet to design that policy against without guessing.
+//
+// The Action Manifest is a structured record of what an L3 tool call
+// actually is — toolName, actionLevel, dataClassification, riskLevel,
+// the actor who invoked it, and the params it was called with —
+// attached to the workflow_requests row it creates (via
+// workflowService.submitRequest's new optional actionManifest
+// parameter, migration 1754100000000) so the human approver can see
+// what they're actually approving, not just an entity_type/entity_id
+// pair. Built fresh per call inside invokeTool (buildActionManifest
+// below), passed to the handler as a 4th argument — L1/L2 handlers
+// never see it (JS silently ignores an extra argument a function
+// doesn't declare), only an L3 handler that explicitly accepts and
+// forwards it (see request_notification_send) actually attaches one.
+// Not an LLM-generated summary — every field is either a hard fact
+// this file already computes (level/classification/risk) or the
+// caller-supplied params/actor identity, never free text a model wrote.
 //
 // Every Policy Gate rejection also writes an `ai_tool_denied` audit_log
 // row (which check failed, for whom) — a security-relevant event
@@ -88,27 +122,78 @@ const registry = new Map();
 // doesn't use.
 const DEFAULT_PARAMS_SCHEMA = { type: 'object', properties: {}, additionalProperties: false };
 
+// R0-R5 risk ladder — see the file-level comment for what this is and
+// (importantly) is not. Deliberately a plain lookup table, not a
+// formula: a formula invites someone to "simplify" it in a way that
+// silently changes a risk level nobody reviewed, where an explicit
+// table makes every one of the 9 real (level, classification)
+// combinations a reviewable, individual decision. Monotonic by
+// construction — reading down any column or across any row, the
+// number never decreases.
+const RISK_MATRIX = {
+  L1: { Internal: 0, Confidential: 1, Restricted: 1 },
+  L2: { Internal: 2, Confidential: 2, Restricted: 3 },
+  L3: { Internal: 3, Confidential: 4, Restricted: 5 },
+};
+
+function computeRiskLevel(level, dataClassification) {
+  const row = RISK_MATRIX[level];
+  const risk = row && row[dataClassification];
+  return typeof risk === 'number' ? risk : null;
+}
+
 function registerTool(tool) {
   if (!tool || !tool.name || !tool.level || !tool.dataClassification || typeof tool.handler !== 'function') {
     throw new Error('tool must have {name, level, dataClassification, handler}');
   }
-  registry.set(tool.name, tool);
+  // Computed at registration time from the tool's own declared level +
+  // dataClassification, never a third field a registration could set
+  // independently (and so never a field that could disagree with
+  // them) — see RISK_MATRIX's own comment.
+  registry.set(tool.name, { ...tool, riskLevel: computeRiskLevel(tool.level, tool.dataClassification) });
 }
 
 function getTool(name) {
   return registry.get(name) || null;
 }
 
+// The Action Manifest (see file-level comment) — a plain, fully-
+// deterministic object, never LLM-generated text. Only called for L3
+// tools (invokeTool below) since AI-Governance.md's approval
+// requirement — the whole reason a manifest needs to travel with a
+// request at all — only applies to L3; an L1/L2 call has no approval
+// step for a human to inspect this against.
+function buildActionManifest(tool, actor, params) {
+  return {
+    toolName: tool.name,
+    actionLevel: tool.level,
+    dataClassification: tool.dataClassification,
+    riskLevel: tool.riskLevel,
+    actorUserId: actor.userId,
+    actorRole: actor.role,
+    collegeId: actor.collegeId,
+    params: params || {},
+    requestedAt: new Date().toISOString(),
+    manifestVersion: 1,
+  };
+}
+
 // `params` is a JSON-Schema-shaped description of the tool's caller-
 // supplied arguments — exposed so aiService.askAgent can hand the
 // whole list to llmProvider.completeWithTools as a function-calling
 // schema (name + description + params, this slice's own build brief).
-// Never the tool's internal logic, just its own declared input shape.
+// riskLevel is exposed alongside for the same reason — a caller (or a
+// future dashboard) can see a tool's real risk without recomputing
+// RISK_MATRIX itself. Never the tool's internal logic, just its own
+// declared input shape + derived risk.
 function listTools() {
-  return Array.from(registry.values()).map(({ name, level, dataClassification, description, params }) => ({
+  return Array.from(registry.values()).map(({
+    name, level, dataClassification, riskLevel, description, params,
+  }) => ({
     name,
     level,
     dataClassification,
+    riskLevel,
     description,
     params: params || DEFAULT_PARAMS_SCHEMA,
   }));
@@ -230,7 +315,15 @@ async function invokeTool(name, { client, actor, params } = {}) {
     throw err;
   }
 
-  const result = await tool.handler(client, params || {}, actor);
+  // Action Manifest — built only for L3 (see buildActionManifest's own
+  // comment for why L1/L2 don't get one) and passed as a 4th handler
+  // argument. Every existing L1/L2 handler's signature is (client,
+  // params, actor) — JS silently ignores an argument a function
+  // doesn't declare, so this is not a breaking change to any of them;
+  // only a handler that explicitly adds a 4th parameter (see
+  // request_notification_send below) actually receives and forwards it.
+  const manifest = tool.level === 'L3' ? buildActionManifest(tool, actor, params || {}) : undefined;
+  const result = await tool.handler(client, params || {}, actor, manifest);
 
   // The runtime backstop — see AiToolL3BypassError's own comment.
   // Only meaningful for L3 (submission-only) tools; L1/L2 handlers are
@@ -337,6 +430,15 @@ registerTool({
 // that every AI action still ties back to the real user whose session
 // triggered it, origin distinguishes who drafted the content, not
 // whether a user was present.
+//
+// The 4th handler argument (manifest) is this tool's Action Manifest —
+// built by invokeTool above only because this tool is L3 — forwarded
+// straight through to notificationService.submitForApproval, which
+// forwards it again to workflowService.submitRequest, which persists it
+// on the workflow_requests row this call creates. The human approving
+// this request (routes/workflowRequests.js) can now see the tool name,
+// risk level, and exact params an AI action submitted, not just
+// "notification, entity id X."
 registerTool({
   name: 'request_notification_send',
   level: 'L3',
@@ -352,10 +454,10 @@ registerTool({
     required: ['notificationId'],
     additionalProperties: false,
   },
-  handler: (client, params, actor) => notificationService.submitForApproval(
+  handler: (client, params, actor, manifest) => notificationService.submitForApproval(
     client,
     params.notificationId,
-    { requestedByUserId: actor.userId },
+    { requestedByUserId: actor.userId, actionManifest: manifest },
   ),
 });
 
@@ -405,4 +507,6 @@ module.exports = {
   getTool,
   listTools,
   invokeTool,
+  computeRiskLevel,
+  buildActionManifest,
 };

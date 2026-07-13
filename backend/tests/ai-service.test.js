@@ -64,6 +64,77 @@ test('aiToolRegistry: listTools returns the real registered tool, including its 
   assert.deepEqual(profile.params, { type: 'object', properties: {}, additionalProperties: false });
 });
 
+// R0-R5 risk ladder — computeRiskLevel is a pure function over the
+// same RISK_MATRIX every registered tool's own riskLevel is derived
+// from at registration time (see registerTool's own comment) — tested
+// directly here so the matrix's exact values are pinned down, not just
+// exercised incidentally through whichever real tools happen to exist.
+test('aiToolRegistry.computeRiskLevel: monotonic R0-R5 ladder derived from (level, dataClassification)', () => {
+  assert.equal(aiToolRegistry.computeRiskLevel('L1', 'Internal'), 0);
+  assert.equal(aiToolRegistry.computeRiskLevel('L1', 'Confidential'), 1);
+  assert.equal(aiToolRegistry.computeRiskLevel('L1', 'Restricted'), 1);
+  assert.equal(aiToolRegistry.computeRiskLevel('L2', 'Internal'), 2);
+  assert.equal(aiToolRegistry.computeRiskLevel('L2', 'Restricted'), 3);
+  assert.equal(aiToolRegistry.computeRiskLevel('L3', 'Internal'), 3);
+  assert.equal(aiToolRegistry.computeRiskLevel('L3', 'Confidential'), 4);
+  assert.equal(aiToolRegistry.computeRiskLevel('L3', 'Restricted'), 5);
+  assert.equal(aiToolRegistry.computeRiskLevel('L9', 'Internal'), null);
+});
+
+test('aiToolRegistry: real registered tools carry the correct derived riskLevel via listTools', () => {
+  const tools = aiToolRegistry.listTools();
+  const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+  assert.equal(byName.get_college_profile.riskLevel, 0); // L1 + Internal
+  assert.equal(byName.draft_notification.riskLevel, 2); // L2 + Confidential
+  assert.equal(byName.request_notification_send.riskLevel, 4); // L3 + Confidential
+  assert.equal(byName.search_documents.riskLevel, 0); // L1 + Internal
+});
+
+test('Action Manifest: invokeTool builds and passes a real manifest to an L3 handler, and passes none to L1/L2', async () => {
+  let capturedL3Manifest;
+  aiToolRegistry.registerTool({
+    name: 'test_only_l3_manifest_tool',
+    level: 'L3',
+    dataClassification: 'Restricted',
+    description: 'test fixture',
+    allowedRoles: ['principal'],
+    handler: async (client, params, actor, manifest) => {
+      capturedL3Manifest = manifest;
+      return { ok: 'l3', workflow_request_id: 'wf-manifest-1', status: 'Pending' };
+    },
+  });
+  let capturedL2Manifest = 'not-yet-called';
+  aiToolRegistry.registerTool({
+    name: 'test_only_l2_manifest_tool',
+    level: 'L2',
+    dataClassification: 'Internal',
+    description: 'test fixture',
+    allowedRoles: ['principal'],
+    handler: async (client, params, actor, manifest) => {
+      capturedL2Manifest = manifest;
+      return { ok: 'l2' };
+    },
+  });
+
+  const client = fakeClient();
+  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+
+  await aiToolRegistry.invokeTool('test_only_l3_manifest_tool', { client, actor, params: { foo: 'bar' } });
+  assert.equal(capturedL3Manifest.toolName, 'test_only_l3_manifest_tool');
+  assert.equal(capturedL3Manifest.actionLevel, 'L3');
+  assert.equal(capturedL3Manifest.dataClassification, 'Restricted');
+  assert.equal(capturedL3Manifest.riskLevel, 5);
+  assert.equal(capturedL3Manifest.actorUserId, 'u1');
+  assert.equal(capturedL3Manifest.actorRole, 'principal');
+  assert.equal(capturedL3Manifest.collegeId, 'college-a');
+  assert.deepEqual(capturedL3Manifest.params, { foo: 'bar' });
+  assert.ok(capturedL3Manifest.requestedAt);
+  assert.equal(capturedL3Manifest.manifestVersion, 1);
+
+  await aiToolRegistry.invokeTool('test_only_l2_manifest_tool', { client, actor, params: {} });
+  assert.equal(capturedL2Manifest, undefined, 'an L2 handler must never receive an Action Manifest');
+});
+
 test('aiToolRegistry: invoking an unknown tool throws AiToolNotFoundError and writes no ai_tool_denied row (no real tool to have denied)', async () => {
   const client = fakeClient();
   await assert.rejects(

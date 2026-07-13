@@ -546,17 +546,26 @@ suites), confirmed at `--test-concurrency=1` with the real
   there is no back-and-forth where a tool's result informs a second
   tool call in the same turn, and no usage metering. All explicitly out
   of this slice.
-- **R0-R5 risk ladder** not built, even though real `L2`/`L3` tools now
-  exist. Defer via ADR — an overlay on top of `L1`/`L2`/`L3`, not a
-  replacement for this gate — now that there's a real `L3` tool to
-  design it against instead of a hypothetical one.
-- **Action Manifest** not built. `request_notification_send`'s
-  `workflow_requests` row carries only what `submitRequest` always
-  persists (entity type/id, approver chain, origin) — no evidence
-  snapshot, affected-record count, policy result+version, or
-  reversibility flag yet. Defer to extending Module 8's
-  `workflow_requests` payload with those fields — not an LLM-generated
-  summary — now that a real `L3` AI action exists to design it against.
+- ~~R0-R5 risk ladder not built~~ — **built**: `aiToolRegistry.js`'s
+  `RISK_MATRIX` derives a deterministic R0-R5 risk level from a tool's
+  own already-declared `level`+`dataClassification` (never a third,
+  independently-set field), exposed via `listTools()` and attached to
+  every L3 call's Action Manifest. This is this session's own explicit
+  interpretation of "R0-R5" — AI-Governance.md itself never specifies
+  the ladder's shape — and it currently informs the manifest a human
+  approver sees, not a second automated hard-block on top of L3's
+  existing "always requires approval" rule. An escalation policy (e.g.
+  R5 requiring two approvers) is still a real follow-up: no R5 tool
+  exists yet to design that against.
+- ~~Action Manifest not built~~ — **built**: `workflow_requests` gained
+  a nullable `action_manifest` JSONB column (migration
+  `1754100000000`), populated only for AI-initiated L3 submissions via
+  `workflowService.submitRequest`'s new optional `actionManifest`
+  parameter. `aiToolRegistry.buildActionManifest` produces it
+  (toolName, actionLevel, dataClassification, riskLevel, actor
+  identity, params, timestamp) — a plain deterministic object, never
+  LLM-generated text, per this doc's own original instruction.
+  `request_notification_send` is the one real producer today.
 - **L3 safety now has a runtime backstop (`AiToolL3BypassError`), but
   it's a post-hoc detector, not a preventive block.** It checks the
   handler's RETURN VALUE after the handler has already run — it cannot

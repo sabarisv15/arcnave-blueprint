@@ -130,7 +130,18 @@ function assertValidApproverChain(approverChain) {
   });
 }
 
-async function submitRequest(client, { collegeId, entityType, entityId, requestedByUserId, origin, approverChain }) {
+// actionManifest is optional and origin-agnostic in this function's own
+// signature (any caller could pass one), but in practice only ever
+// arrives from an AI L3 tool call today — aiToolRegistry.js's
+// buildActionManifest is the one real producer (AI-Governance.md §1's
+// Action Manifest, deferred until a real L3 tool existed to design it
+// against — see that file's own comment). Every human-initiated
+// submitRequest call (staffService/financeService/notificationService's
+// human path) simply omits it, leaving the column null — not backfilled,
+// not required.
+async function submitRequest(client, {
+  collegeId, entityType, entityId, requestedByUserId, origin, approverChain, actionManifest,
+}) {
   if (!collegeId || !entityType || !entityId || !requestedByUserId || !origin) {
     throw new WorkflowRequestValidationError(
       'collegeId, entityType, entityId, requestedByUserId, and origin are required',
@@ -148,6 +159,7 @@ async function submitRequest(client, { collegeId, entityType, entityId, requeste
       requestedByUserId,
       origin,
       approverChain,
+      actionManifest: actionManifest || null,
     });
   } catch (err) {
     if (err.code === '23505' && err.constraint === 'workflow_requests_entity_pending_key') {

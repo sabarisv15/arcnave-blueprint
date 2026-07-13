@@ -314,7 +314,15 @@ async function draftNotification(client, { collegeId, channel, toAddress, subjec
 // the notification's OWN already-stored origin rather than accepting a
 // second one — the two must always agree, so there is only ever one
 // place origin is supplied.
-async function submitForApproval(client, notificationId, { requestedByUserId } = {}) {
+//
+// actionManifest is optional and simply forwarded to
+// workflowService.submitRequest — this function has no opinion about
+// its shape or contents (aiToolRegistry.js's request_notification_send
+// handler is the one real caller that supplies one; the human REST
+// route, routes/notifications.js, never does). Same "thin passthrough,
+// not a second source of truth" reasoning this file already applies
+// everywhere else.
+async function submitForApproval(client, notificationId, { requestedByUserId, actionManifest } = {}) {
   if (!requestedByUserId) {
     throw new NotificationValidationError('requestedByUserId is required');
   }
@@ -336,6 +344,7 @@ async function submitForApproval(client, notificationId, { requestedByUserId } =
     requestedByUserId,
     origin: notification.origin,
     approverChain: [{ step: 1, role: 'principal', user_id: principal.user_id }],
+    actionManifest,
   });
 
   return notificationRepository.update(client, notificationId, { workflowRequestId: request.id });
