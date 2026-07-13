@@ -200,4 +200,76 @@ test('DocumentService validation, actor stamping, and audit logging (no DB, no f
     assert.equal(result.document.id, 'doc-1');
     assert.equal(result.buffer.toString(), 'bytes-for-c1/s1/aadhaar/x.pdf');
   });
+
+  await t.test('uploadTemplate rejects a non-.docx buffer at upload time, without touching storage or the DB', async () => {
+    const { buildPathMock, createMock } = mockHappyPath(t);
+
+    await assert.rejects(
+      () => documentService.uploadTemplate({}, {
+        collegeId: 'c1', fileName: 'not-a-docx.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', fileBuffer: Buffer.from('plain text, not a zip'),
+      }, { actorUserId: 'u1' }),
+      documentService.DocumentInvalidTemplateError,
+    );
+    assert.equal(buildPathMock.mock.callCount(), 0);
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('uploadTemplate rejects a real zip that isn\'t a .docx (no word/document.xml)', async () => {
+    mockHappyPath(t);
+    const zip = new PizZip();
+    zip.file('not-a-word-doc.txt', 'hello');
+    const plainZipBuffer = zip.generate({ type: 'nodebuffer' });
+
+    await assert.rejects(
+      () => documentService.uploadTemplate({}, {
+        collegeId: 'c1', fileName: 'fake.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', fileBuffer: plainZipBuffer,
+      }, { actorUserId: 'u1' }),
+      documentService.DocumentInvalidTemplateError,
+    );
+  });
+
+  await t.test('uploadTemplate accepts a real .docx (valid zip with word/document.xml)', async () => {
+    const { createMock } = mockHappyPath(t);
+
+    await documentService.uploadTemplate({}, {
+      collegeId: 'c1', fileName: 'real.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', fileBuffer: buildFakeDocxBuffer(),
+    }, { actorUserId: 'u1' });
+
+    assert.equal(createMock.mock.callCount(), 1);
+  });
+
+  await t.test('mergeDocumentTemplate persists the merged bytes as a new document via uploadDocument', async () => {
+    const { buildPathMock, writeFileMock, createMock } = mockHappyPath(t);
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async () => ({
+      id: 'tmpl-1', doc_type: documentService.TEMPLATE_DOC_TYPE, college_id: 'c1', file_name: 'cert.docx', storage_path: 'c1/templates/cert.docx',
+    }));
+    const readFileMock = t.mock.method(fileStorage, 'readFile', async () => Buffer.from('template-bytes'));
+    const mergeMock = t.mock.method(templateMerger, 'mergeTemplate', () => Buffer.from('merged-bytes'));
+    t.after(() => {
+      findByIdMock.mock.restore();
+      readFileMock.mock.restore();
+      mergeMock.mock.restore();
+    });
+
+    const result = await documentService.mergeDocumentTemplate({}, 'tmpl-1', { name: 'Jane' }, { actorUserId: 'u1' });
+
+    assert.equal(createMock.mock.callCount(), 1);
+    const [, fields] = createMock.mock.calls[0].arguments;
+    assert.equal(fields.docType, 'merged_document');
+    assert.equal(fields.fileName, 'merged-cert.docx');
+    assert.equal(buildPathMock.mock.callCount(), 1);
+    assert.equal(writeFileMock.mock.callCount(), 1);
+    assert.ok(writeFileMock.mock.calls[0].arguments[1].equals(Buffer.from('merged-bytes')));
+    assert.ok(result.buffer.equals(Buffer.from('merged-bytes')));
+  });
+
+  await t.test('mergeDocumentTemplate returns null without persisting anything when the id doesn\'t exist', async () => {
+    const { createMock } = mockHappyPath(t);
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async () => null);
+    t.after(() => findByIdMock.mock.restore());
+
+    const result = await documentService.mergeDocumentTemplate({}, 'missing', {}, { actorUserId: 'u1' });
+    assert.equal(result, null);
+    assert.equal(createMock.mock.callCount(), 0);
+  });
 });

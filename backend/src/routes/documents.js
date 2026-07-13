@@ -169,22 +169,24 @@ function createDocumentsRouter() {
 
   // The one real caller this slice names: merge arbitrary
   // caller-supplied fields (e.g. a real student record) into a stored
-  // template and stream the result back — same real-bytes response
-  // shape as GET /documents/:id/download just below, not a stored
-  // document (nothing here calls uploadDocument; the merged bytes
-  // exist only in this one response). requireAuth: generating a
-  // document from a template is a read of existing data, not a write
-  // to any row.
+  // template, persist the merged bytes as a new document (via
+  // mergeDocumentTemplate -> uploadDocument), and stream the same
+  // bytes back in the response.
   router.post('/documents/:id/merge', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
-      const result = await documentService.mergeDocumentTemplate(req.dbClient, req.params.id, (req.body && req.body.fields) || {});
+      const result = await documentService.mergeDocumentTemplate(
+        req.dbClient,
+        req.params.id,
+        (req.body && req.body.fields) || {},
+        { actorUserId: req.jwtClaims.sub },
+      );
       if (result === null) {
         res.status(404).json({ detail: `No document found with id ${JSON.stringify(req.params.id)}` });
         return;
       }
       res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-      res.set('Content-Disposition', `attachment; filename="merged-${safeHeaderFileName(result.document.file_name)}"`);
+      res.set('Content-Disposition', `attachment; filename="${safeHeaderFileName(result.document.file_name)}"`);
       res.send(result.buffer);
     } catch (err) {
       if (mapDocumentServiceError(err, res)) return;

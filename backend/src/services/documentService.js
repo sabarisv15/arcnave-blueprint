@@ -218,12 +218,24 @@ class DocumentNotATemplateError extends Error {}
 // wrong reason. Only once the row is confirmed to really be a
 // template does this read its bytes (fileStorage.readFile, the same
 // path downloadDocument itself uses -- no second storage mechanism).
+// The doc_type merged output is persisted under -- separate from
+// TEMPLATE_DOC_TYPE so a merged result never gets picked up by
+// listTemplates as if it were itself a fillable template.
+const MERGED_DOC_TYPE = 'merged_document';
+
 // `fields` is whatever flat object the caller sends (e.g. a real
 // student record) -- CLAUDE.md rule 9 still holds here exactly as
 // templateMerger.js's own file comment describes: every value is
 // inserted as literal text, never interpreted as instructions,
 // regardless of where it came from.
-async function mergeDocumentTemplate(client, templateId, fields) {
+//
+// The merged bytes are persisted as a new document row (via
+// uploadDocument -- the one function allowed to write storage/
+// documents, CLAUDE.md rule 2) rather than only streamed back: without
+// this, a merged certificate/report existed nowhere after the response
+// left the server, unlike every other generated artifact this
+// codebase keeps.
+async function mergeDocumentTemplate(client, templateId, fields, { actorUserId } = {}) {
   const document = await documentRepository.findById(client, templateId);
   if (document === null) {
     return null;
@@ -236,7 +248,16 @@ async function mergeDocumentTemplate(client, templateId, fields) {
 
   const templateBuffer = await fileStorage.readFile(document.storage_path);
   const buffer = templateMerger.mergeTemplate(templateBuffer, fields);
-  return { document, buffer };
+
+  const mergedDocument = await uploadDocument(client, {
+    collegeId: document.college_id,
+    docType: MERGED_DOC_TYPE,
+    fileName: `merged-${document.file_name}`,
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    fileBuffer: buffer,
+  }, { actorUserId });
+
+  return { document: mergedDocument, buffer };
 }
 
 // The only path that mutates an existing document row. Stamps
