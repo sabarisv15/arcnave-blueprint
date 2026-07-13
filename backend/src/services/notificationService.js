@@ -51,6 +51,7 @@
 // already-approved notification stuck.
 
 const nodemailer = require('nodemailer');
+const twilioClient = require('../notificationProviders/twilioClient');
 const config = require('../config');
 const { logInfo, logWarn } = require('../logging/logger');
 const notificationRepository = require('../repositories/notificationRepository');
@@ -105,18 +106,17 @@ class NotificationNoPendingRequestError extends Error {}
 class NotificationNotApprovedError extends Error {}
 
 // dispatchApprovedNotification called for a notification whose channel
-// has no real provider integration yet (sms, whatsapp — the two
-// channels Architecture.md 2.8 names as future work, same "no CHECK
-// constraint, real values enforced in code" convention this file's own
-// VALID_ORIGINS already uses). Thrown BEFORE any send attempt or
+// isn't in CHANNEL_SENDERS at all (not email/sms/whatsapp — every
+// channel Architecture.md 2.8 names now has a real sender; this is
+// only reachable for some other value, since notifications.channel
+// has no CHECK constraint enforcing a known set at the DB level — see
+// the migration's own comment). Thrown BEFORE any send attempt or
 // repository write, never swallowed into a fake 'sent'/'stubbed'
-// delivery row the way email's own best-effort philosophy works: an
-// email that fails to send is a real attempt with a real outcome to
-// record; sms/whatsapp today have no attempt to make at all, so
-// recording one would misrepresent what happened. The notification
-// stays 'Approved' (never advances to 'Dispatched') — a real send can
-// be retried later once a provider exists, same reasoning a failed
-// email is left retriable rather than silently marked done.
+// delivery row the way a real channel's best-effort philosophy works:
+// there is no sender at all to have attempted anything with. The
+// notification stays 'Approved' (never advances to 'Dispatched') — the
+// same "leave it retriable, don't silently mark done" reasoning a
+// failed real send already gets.
 class NotificationChannelNotImplementedError extends Error {}
 
 // Built fresh per call, not cached: nodemailer.createTransport is a
@@ -169,26 +169,88 @@ async function sendEmail(client, { to, subject, body }) {
   }
 }
 
-// No SMS provider integration exists yet (no Twilio/similar config
-// anywhere in config.js/.env.example) — this always throws, never
-// silently no-ops or fakes a 'sent'/'stubbed' result the way
-// getTransporter()-is-null does for email. Email's stub behavior is
-// correct there because SMTP is a real, working channel with a
-// documented dev-mode fallback; sms has no working channel at all yet,
-// so pretending otherwise would hide a real gap rather than flag it.
-// eslint-disable-next-line no-unused-vars
+// Twilio SMS API (via notificationProviders/twilioClient.js — never
+// the SDK directly here, so this stays mockable at the module-property
+// boundary this codebase's tests already rely on). No
+// TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM_NUMBER configured is the expected
+// default in dev/test: sendSms logs the message instead of attempting
+// to send (the exact same "would send: {...}" stub shape sendEmail
+// already uses for an unconfigured SMTP_HOST — never a fake 'sent'
+// status). Requires ALL three, not just credentials — a
+// partially-configured account (e.g. accountSid/authToken set but
+// fromNumber forgotten) is still "not configured," same as SMTP
+// needing more than just a host. Once real config IS present, this
+// always attempts a real send; a delivery failure is recorded as
+// 'failed' (never thrown), same best-effort philosophy every other
+// channel here already follows — dispatchApprovedNotification's own
+// "always advance to Dispatched regardless of outcome" behavior is
+// unchanged by adding a real provider.
 async function sendSms(client, { to, body }) {
-  throw new NotificationChannelNotImplementedError('sms dispatch has no provider integration yet');
+  if (!to || !body) {
+    throw new NotificationValidationError('to and body are required');
+  }
+
+  if (!config.twilio.accountSid || !config.twilio.authToken || !config.twilio.fromNumber) {
+    logWarn('notification_sms_stubbed', { to });
+    return { channel: 'sms', status: 'stubbed', to, body };
+  }
+
+  try {
+    const message = await twilioClient.sendMessage({
+      accountSid: config.twilio.accountSid,
+      authToken: config.twilio.authToken,
+      to,
+      from: config.twilio.fromNumber,
+      body,
+    });
+    logInfo('notification_sms_sent', { to, sid: message.sid });
+    return {
+      channel: 'sms', status: 'sent', to, body, providerId: message.sid,
+    };
+  } catch (err) {
+    logWarn('notification_sms_failed', { to, error: err.message });
+    return {
+      channel: 'sms', status: 'failed', to, body, error: err.message,
+    };
+  }
 }
 
-// Same reasoning as sendSms above, separate function (not a shared
-// "non-email" stub) because a real WhatsApp integration (e.g. the
-// WhatsApp Business API) and a real SMS integration (e.g. Twilio) are
-// different providers with different credentials/APIs — collapsing
-// them into one stub now would just have to be un-collapsed later.
-// eslint-disable-next-line no-unused-vars
+// Twilio WhatsApp API — the same underlying twilioClient.sendMessage
+// call as sendSms, but both `from` and `to` need the `whatsapp:` scheme
+// prefix Twilio's WhatsApp channel requires (a plain E.164 number
+// there routes as SMS instead), and the sender identity is its own
+// configured value (TWILIO_WHATSAPP_FROM), not TWILIO_FROM_NUMBER — a
+// WhatsApp-enabled sender is provisioned separately from a plain SMS
+// number, same reasoning this file already kept sendSms/sendWhatsapp
+// as two functions rather than one shared "non-email" stub.
 async function sendWhatsapp(client, { to, body }) {
-  throw new NotificationChannelNotImplementedError('whatsapp dispatch has no provider integration yet');
+  if (!to || !body) {
+    throw new NotificationValidationError('to and body are required');
+  }
+
+  if (!config.twilio.accountSid || !config.twilio.authToken || !config.twilio.whatsappFrom) {
+    logWarn('notification_whatsapp_stubbed', { to });
+    return { channel: 'whatsapp', status: 'stubbed', to, body };
+  }
+
+  try {
+    const message = await twilioClient.sendMessage({
+      accountSid: config.twilio.accountSid,
+      authToken: config.twilio.authToken,
+      to: `whatsapp:${to}`,
+      from: `whatsapp:${config.twilio.whatsappFrom}`,
+      body,
+    });
+    logInfo('notification_whatsapp_sent', { to, sid: message.sid });
+    return {
+      channel: 'whatsapp', status: 'sent', to, body, providerId: message.sid,
+    };
+  } catch (err) {
+    logWarn('notification_whatsapp_failed', { to, error: err.message });
+    return {
+      channel: 'whatsapp', status: 'failed', to, body, error: err.message,
+    };
+  }
 }
 
 // The one composed notification this slice actually needs:
@@ -426,17 +488,18 @@ const CHANNEL_SENDERS = {
 };
 
 // Only callable once a notification is actually 'Approved'. Branches
-// on the notification's own `channel` (CHANNEL_SENDERS above) — email
-// keeps its exact prior behavior (always attempts, always records
-// whatever sendEmail returned, always advances to 'Dispatched'
-// regardless of outcome — best-effort delivery, same philosophy
-// sendStaffCredentialsEmail's own caller already relies on). sms/
-// whatsapp (and any other unrecognized channel) call a sender that
-// throws NotificationChannelNotImplementedError BEFORE any
+// on the notification's own `channel` (CHANNEL_SENDERS above) — email/
+// sms/whatsapp all now share the exact same best-effort philosophy:
+// always attempt, always record whatever the sender returned
+// ('sent'/'stubbed'/'failed'), always advance to 'Dispatched'
+// regardless of outcome (same reasoning sendStaffCredentialsEmail's
+// own caller already relies on for email). Only a genuinely
+// unrecognized channel (not in CHANNEL_SENDERS at all) still throws
+// NotificationChannelNotImplementedError BEFORE any
 // notification_delivery row is written or status changes — see that
-// error class's own comment for why this is a thrown, visible failure
-// rather than a recorded 'not_implemented' delivery attempt: there is
-// no real attempt to record.
+// error class's own comment for why that case is a thrown, visible
+// failure rather than a recorded attempt: there is no real sender to
+// have attempted anything with.
 async function dispatchApprovedNotification(client, notificationId) {
   const notification = await notificationRepository.findById(client, notificationId);
   if (notification === null) {

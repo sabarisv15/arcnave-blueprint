@@ -105,18 +105,36 @@ module.exports = {
     fromAddress: process.env.SMTP_FROM_ADDRESS || 'no-reply@arcnave.local',
   },
 
-  // NVIDIA NIM (OpenAI-compatible /chat/completions) — the LLM
-  // services/llmProvider.js calls at the end of Module 9's pipeline
-  // (Tool Registry -> Context Builder -> Prompt Safety Layer -> LLM,
-  // AI-Governance.md §2). Optional, same reasoning as smtp above:
-  // unset apiKey means the LLM step is simply unavailable
-  // (llmProvider.complete throws LlmNotConfiguredError, mapped to a
+  // NotificationService's real sms/whatsapp channels (Twilio). Same
+  // "unconfigured means a log-only stub, not a crash" treatment smtp
+  // above already gets: accountSid/authToken/fromNumber/whatsappFrom
+  // all default to null, and notificationService.sendSms/sendWhatsapp
+  // check for that exact null before ever constructing a Twilio client
+  // — never a hardcoded fallback that could silently start making real
+  // (and billed) API calls.
+  twilio: {
+    accountSid: process.env.TWILIO_ACCOUNT_SID || null,
+    authToken: process.env.TWILIO_AUTH_TOKEN || null,
+    fromNumber: process.env.TWILIO_FROM_NUMBER || null,
+    // Twilio's WhatsApp API requires its own sender identity, distinct
+    // from the plain SMS fromNumber above (a WhatsApp-enabled number is
+    // provisioned separately) — same reasoning sendSms/sendWhatsapp are
+    // two separate functions, not one shared "non-email" stub.
+    whatsappFrom: process.env.TWILIO_WHATSAPP_FROM || null,
+  },
+
+  // NVIDIA NIM (OpenAI-compatible /chat/completions) — the GLOBAL
+  // default provider ConfigurationService.getAiConfig falls back to
+  // for a college with no college_ai_config row of its own (see
+  // services/aiProviders/nim.js and services/configurationService.js).
+  // Optional, same reasoning as smtp above: unset apiKey means the LLM
+  // step is simply unavailable (LlmNotConfiguredError, mapped to a
   // real 503 by routes/ai.js) rather than a startup failure — this
   // app must keep running (every non-LLM route, including the plain
   // tool-invoke path with no `question`) whether or not a provider key
-  // exists. Global only, not per-tenant, despite AI-Governance.md §6
-  // naming ConfigurationService/per-tenant provider selection as a
-  // future option — no tenant has asked for a different provider yet.
+  // exists. Per-tenant override now exists (college_ai_config) — this
+  // remains the fallback every pre-existing college without a row
+  // still gets, unchanged from before that table existed.
   nim: {
     apiKey: process.env.NIM_API_KEY || null,
     baseUrl: process.env.NIM_BASE_URL || 'https://integrate.api.nvidia.com/v1',
@@ -125,10 +143,11 @@ module.exports = {
     // above (chat completion and embeddings are different model
     // families even within one provider). nv-embedqa-e5-v5 is
     // purpose-built for retrieval (asymmetric query/passage embeddings
-    // — see llmProvider.js's embed()) and fixes the embedding
-    // dimension the ai_document_chunks migration's vector(1024) column
-    // is sized against; changing this to a model with a different
-    // output dimension needs a new migration, not just this env var.
+    // — see services/aiProviders/nim.js's embed()) and fixes the
+    // embedding dimension the ai_document_chunks migration's
+    // vector(1024) column is sized against; changing this to a model
+    // with a different output dimension needs a new migration, not
+    // just this env var.
     embeddingModel: process.env.NIM_EMBEDDING_MODEL || 'nvidia/nv-embedqa-e5-v5',
   },
 };

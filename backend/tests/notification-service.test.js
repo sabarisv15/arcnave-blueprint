@@ -34,6 +34,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const nodemailer = require('nodemailer');
+const twilioClient = require('../src/notificationProviders/twilioClient');
 const config = require('../src/config');
 const notificationRepository = require('../src/repositories/notificationRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
@@ -403,26 +404,82 @@ test('NotificationService ledger: draft/submit/approve/reject/dispatch (no DB)',
   });
 
   for (const channel of ['sms', 'whatsapp']) {
-    await t.test(`dispatchApprovedNotification throws NotificationChannelNotImplementedError for channel=${channel}, writes no delivery row, and does not advance status`, async () => {
+    await t.test(`dispatchApprovedNotification: channel=${channel} with no Twilio credentials configured (this test env's default) dispatches as 'stubbed', same best-effort shape as email's own stub`, async () => {
       const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
         id, college_id: 'c1', status: 'Approved', channel, to_address: '+1555', subject: null, body: 'hello', drafted_by_user_id: 'drafter-1',
       }));
-      const deliveryMock = t.mock.method(notificationRepository, 'recordDeliveryAttempt', async () => { throw new Error('must not be called'); });
-      const updateMock = t.mock.method(notificationRepository, 'update', async () => { throw new Error('must not be called'); });
+      const deliveryMock = t.mock.method(notificationRepository, 'recordDeliveryAttempt', async (client, fields) => ({ id: 'delivery-1', ...fields }));
+      const updateMock = t.mock.method(notificationRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
+      const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
       t.after(() => {
         findMock.mock.restore();
         deliveryMock.mock.restore();
         updateMock.mock.restore();
+        auditMock.mock.restore();
       });
 
-      await assert.rejects(
-        () => notificationService.dispatchApprovedNotification({}, 'notif-1'),
-        notificationService.NotificationChannelNotImplementedError,
-      );
-      assert.equal(deliveryMock.mock.callCount(), 0);
-      assert.equal(updateMock.mock.callCount(), 0);
+      const { notification, delivery } = await notificationService.dispatchApprovedNotification({}, 'notif-1');
+
+      assert.equal(notification.status, 'Dispatched');
+      assert.equal(delivery.status, 'stubbed');
+      assert.equal(deliveryMock.mock.calls[0].arguments[1].notificationId, 'notif-1');
     });
   }
+
+  await t.test('sendSms: real Twilio config sends for real (never a stub) and records the provider message sid', async (t2) => {
+    const originalTwilio = { ...config.twilio };
+    config.twilio.accountSid = 'AC_test_sid';
+    config.twilio.authToken = 'test_auth_token';
+    config.twilio.fromNumber = '+15550001111';
+
+    const sendMessageMock = t2.mock.method(twilioClient, 'sendMessage', async (args) => ({ sid: 'SM_fake_sid_for_test', ...args }));
+    t2.after(() => {
+      Object.assign(config.twilio, originalTwilio);
+      sendMessageMock.mock.restore();
+    });
+
+    const result = await notificationService.sendSms({}, { to: '+15551234567', body: 'hello sms' });
+    assert.equal(result.status, 'sent');
+    assert.equal(result.providerId, 'SM_fake_sid_for_test');
+    assert.equal(sendMessageMock.mock.calls[0].arguments[0].to, '+15551234567');
+    assert.equal(sendMessageMock.mock.calls[0].arguments[0].from, '+15550001111');
+  });
+
+  await t.test('sendSms: no Twilio config (this test env\'s default) stubs, never calls twilioClient.sendMessage', async (t2) => {
+    const sendMessageMock = t2.mock.method(twilioClient, 'sendMessage', async () => { throw new Error('must not be called'); });
+    t2.after(() => sendMessageMock.mock.restore());
+
+    const result = await notificationService.sendSms({}, { to: '+15551234567', body: 'hello sms' });
+    assert.equal(result.status, 'stubbed');
+    assert.equal(sendMessageMock.mock.callCount(), 0);
+  });
+
+  await t.test('sendWhatsapp: real Twilio config sends for real with the whatsapp: scheme prefix on to/from', async (t2) => {
+    const originalTwilio = { ...config.twilio };
+    config.twilio.accountSid = 'AC_test_sid';
+    config.twilio.authToken = 'test_auth_token';
+    config.twilio.whatsappFrom = '+15550002222';
+
+    const sendMessageMock = t2.mock.method(twilioClient, 'sendMessage', async (args) => ({ sid: 'SM_fake_sid_for_test', ...args }));
+    t2.after(() => {
+      Object.assign(config.twilio, originalTwilio);
+      sendMessageMock.mock.restore();
+    });
+
+    const result = await notificationService.sendWhatsapp({}, { to: '+15551234567', body: 'hello whatsapp' });
+    assert.equal(result.status, 'sent');
+    assert.equal(sendMessageMock.mock.calls[0].arguments[0].to, 'whatsapp:+15551234567');
+    assert.equal(sendMessageMock.mock.calls[0].arguments[0].from, 'whatsapp:+15550002222');
+  });
+
+  await t.test('sendSms/sendWhatsapp: reject missing to/body before any Twilio call', async (t2) => {
+    const sendMessageMock = t2.mock.method(twilioClient, 'sendMessage', async () => { throw new Error('must not be called'); });
+    t2.after(() => sendMessageMock.mock.restore());
+
+    await assert.rejects(() => notificationService.sendSms({}, { body: 'x' }), notificationService.NotificationValidationError);
+    await assert.rejects(() => notificationService.sendWhatsapp({}, { to: '+1555' }), notificationService.NotificationValidationError);
+    assert.equal(sendMessageMock.mock.callCount(), 0);
+  });
 
   await t.test('dispatchApprovedNotification throws NotificationChannelNotImplementedError for an unrecognized channel', async () => {
     const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
