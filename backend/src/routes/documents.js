@@ -68,6 +68,10 @@ function mapDocumentServiceError(err, res) {
     res.status(400).json({ detail: err.message });
     return true;
   }
+  if (err instanceof documentService.DocumentInvalidTemplateError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
   if (err instanceof documentService.TemplateMergeError) {
     res.status(400).json({ detail: err.message });
     return true;

@@ -19,10 +19,18 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const PizZip = require('pizzip');
 const documentRepository = require('../src/repositories/documentRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const fileStorage = require('../src/storage/fileStorage');
+const templateMerger = require('../src/generators/templateMerger');
 const documentService = require('../src/services/documentService');
+
+function buildFakeDocxBuffer() {
+  const zip = new PizZip();
+  zip.file('word/document.xml', '<xml>hi</xml>');
+  return zip.generate({ type: 'nodebuffer' });
+}
 
 function mockHappyPath(t, { createResult, updateResult } = {}) {
   const buildPathMock = t.mock.method(fileStorage, 'buildStoragePath', () => 'c1/s1/aadhaar/123-file.pdf');

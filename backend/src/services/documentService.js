@@ -24,6 +24,7 @@
 // documentRepository has no hard-delete function at all, so there is
 // no branch here that could accidentally do so.
 
+const PizZip = require('pizzip');
 const documentRepository = require('../repositories/documentRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const fileStorage = require('../storage/fileStorage');
@@ -66,6 +67,28 @@ const TEMPLATE_DOC_TYPE = 'template';
 // for the literal value, same reasoning TEMPLATE_DOC_TYPE already
 // establishes for its own known-value constant.
 const AADHAAR_DOC_TYPE = 'aadhaar';
+
+// uploadTemplate rejects a non-.docx upload with this at upload time,
+// rather than only discovering it later at mergeTemplate time (a
+// corrupt/wrong-type template could otherwise sit in storage,
+// undetected, until the first merge attempt).
+class DocumentInvalidTemplateError extends Error {}
+
+// Same structural check mergeTemplate's own PizZip(templateBuffer)
+// already relies on to prove "this is a real .docx" — a .docx is a
+// zip with a word/document.xml entry, not just any zip. Reused here,
+// not duplicated: both call sites agree on what "valid .docx" means.
+function assertValidDocxTemplate(fileBuffer) {
+  let zip;
+  try {
+    zip = new PizZip(fileBuffer);
+  } catch (err) {
+    throw new DocumentInvalidTemplateError(`file is not a valid .docx: ${err.message}`);
+  }
+  if (!zip.file('word/document.xml')) {
+    throw new DocumentInvalidTemplateError('file is not a valid .docx: missing word/document.xml');
+  }
+}
 
 function assertValidReviewStatus(status) {
   if (!VALID_REVIEW_STATUSES.includes(status)) {
@@ -131,6 +154,9 @@ async function uploadDocument(client, { collegeId, studentId, docType, fileName,
 // time); mergeTemplate below is what actually needs a valid .docx, and
 // it validates that at merge time, not here.
 async function uploadTemplate(client, { collegeId, fileName, mimeType, fileBuffer }, { actorUserId } = {}) {
+  if (fileBuffer) {
+    assertValidDocxTemplate(fileBuffer);
+  }
   return uploadDocument(
     client,
     { collegeId, studentId: null, docType: TEMPLATE_DOC_TYPE, fileName, mimeType, fileBuffer },
@@ -276,6 +302,7 @@ module.exports = {
   DocumentReviewStatusError,
   TemplateMergeError: templateMerger.TemplateMergeError,
   DocumentNotATemplateError,
+  DocumentInvalidTemplateError,
   TEMPLATE_DOC_TYPE,
   AADHAAR_DOC_TYPE,
   uploadDocument,
