@@ -131,18 +131,27 @@ function createAttendanceRouter() {
     res.json(session);
   }));
 
-  // Both class_id and session_date are required — unlike
-  // facultyAllocation.js's "exactly one of two" list filter,
-  // attendanceService.listAttendanceSessionsForClassAndDate takes
-  // both as required positional arguments, not an either/or choice.
+  // class_id is always required. session_date (exact match) keeps its
+  // original required-together contract — no breaking change for any
+  // existing caller. start_date/end_date are new and optional: either
+  // may be given instead of session_date to widen the same read into a
+  // range, and omitting both start_date and end_date (with no
+  // session_date) means all-time for that class, not a 400.
   router.get('/attendance', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
-    const { class_id: classId, session_date: sessionDate } = req.query;
-    if (!classId || !sessionDate) {
-      res.status(400).json({ detail: 'class_id and session_date query parameters are both required' });
+    const {
+      class_id: classId, session_date: sessionDate, start_date: startDate, end_date: endDate,
+    } = req.query;
+    if (!classId) {
+      res.status(400).json({ detail: 'class_id query parameter is required' });
       return;
     }
-    const sessions = await attendanceService.listAttendanceSessionsForClassAndDate(req.dbClient, classId, sessionDate);
+    if (sessionDate) {
+      const sessions = await attendanceService.listAttendanceSessionsForClassAndDate(req.dbClient, classId, sessionDate);
+      res.json(sessions);
+      return;
+    }
+    const sessions = await attendanceService.listAttendanceSessionsForClassInRange(req.dbClient, classId, { startDate, endDate });
     res.json(sessions);
   }));
 

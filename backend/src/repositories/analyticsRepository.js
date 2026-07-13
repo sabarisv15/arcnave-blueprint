@@ -40,12 +40,22 @@
 // class, not a computed rate: division-by-zero (a class with zero
 // total_students recorded) and rounding are business-logic judgment
 // calls that belong in AnalyticsService, not baked into the query.
-async function attendanceRateByClass(client, { classId } = {}) {
+async function attendanceRateByClass(client, {
+  classId, startDate, endDate,
+} = {}) {
   const conditions = ['a.deleted_at IS NULL'];
   const values = [];
   if (classId !== undefined) {
     values.push(classId);
     conditions.push(`a.class_id = $${values.length}`);
+  }
+  if (startDate !== undefined) {
+    values.push(startDate);
+    conditions.push(`a.session_date >= $${values.length}`);
+  }
+  if (endDate !== undefined) {
+    values.push(endDate);
+    conditions.push(`a.session_date <= $${values.length}`);
   }
 
   const result = await client.query(

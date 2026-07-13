@@ -24,8 +24,8 @@ function round(value, decimals) {
   return Math.round(value * factor) / factor;
 }
 
-async function getAttendanceRateByClass(client, { classId } = {}) {
-  const rows = await analyticsRepository.attendanceRateByClass(client, { classId });
+async function getAttendanceRateByClass(client, { classId, startDate, endDate } = {}) {
+  const rows = await analyticsRepository.attendanceRateByClass(client, { classId, startDate, endDate });
 
   return rows.map((row) => {
     const totalMarked = Number(row.total_marked);

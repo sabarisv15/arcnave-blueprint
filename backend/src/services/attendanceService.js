@@ -278,6 +278,13 @@ async function listAttendanceSessionsForClassAndDate(client, classId, sessionDat
   return attendanceRepository.findByClassAndDate(client, classId, sessionDate);
 }
 
+// The range counterpart of the exact-date lookup above — startDate/
+// endDate are both optional, so omitting either (or both) means
+// all-time for this class, not zero rows.
+async function listAttendanceSessionsForClassInRange(client, classId, { startDate, endDate } = {}) {
+  return attendanceRepository.findByClassAndDateRange(client, classId, { startDate, endDate });
+}
+
 module.exports = {
   AttendanceValidationError,
   AttendanceClassNotFoundError,
@@ -288,4 +295,5 @@ module.exports = {
   markAttendance,
   getAttendanceSession,
   listAttendanceSessionsForClassAndDate,
+  listAttendanceSessionsForClassInRange,
 };

@@ -218,6 +218,26 @@ test('analytics API', async (t) => {
     assert.equal(resp.body[0].classId, collegeA.classIds.b);
   });
 
+  await t.test('start_date/end_date narrows the window (class A has one session on each of 2026-07-01 and 2026-07-02)', async () => {
+    const token = await login(collegeA, 'principaluser');
+    const resp = await get(
+      baseUrl,
+      `/api/v1/analytics/attendance-rate?class_id=${collegeA.classIds.a}&start_date=2026-07-01&end_date=2026-07-01`,
+      headersFor(collegeA, token),
+    );
+    assert.equal(resp.status, 200);
+    assert.equal(resp.body.length, 1);
+    assert.equal(resp.body[0].sessionsCount, 1);
+
+    const outOfRange = await get(
+      baseUrl,
+      `/api/v1/analytics/attendance-rate?class_id=${collegeA.classIds.a}&start_date=1900-01-01&end_date=1900-01-02`,
+      headersFor(collegeA, token),
+    );
+    assert.equal(outOfRange.status, 200);
+    assert.equal(outOfRange.body.length, 0);
+  });
+
   await t.test('a tenant with zero attendance_sessions gets 200 with an empty array, not an error', async () => {
     const token = await login(emptyCollege, 'principaluser');
     const resp = await get(baseUrl, '/api/v1/analytics/attendance-rate', headersFor(emptyCollege, token));

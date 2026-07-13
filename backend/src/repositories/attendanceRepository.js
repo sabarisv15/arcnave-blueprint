@@ -88,6 +88,32 @@ async function findByClassAndDate(client, classId, sessionDate) {
   return result.rows;
 }
 
+// startDate/endDate are both optional — omitting either (or both)
+// means "no lower/upper bound," not "no rows," so a bare classId
+// still returns that class's full all-time history, same "no filter
+// means all-time" convention analyticsRepository.attendanceRateByClass
+// uses for its own optional startDate/endDate.
+async function findByClassAndDateRange(client, classId, { startDate, endDate } = {}) {
+  const conditions = ['class_id = $1', 'deleted_at IS NULL'];
+  const values = [classId];
+  if (startDate !== undefined) {
+    values.push(startDate);
+    conditions.push(`session_date >= $${values.length}`);
+  }
+  if (endDate !== undefined) {
+    values.push(endDate);
+    conditions.push(`session_date <= $${values.length}`);
+  }
+
+  const result = await client.query(
+    `SELECT * FROM attendance_sessions
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY session_date, hour_index`,
+    values,
+  );
+  return result.rows;
+}
+
 async function update(client, id, fields) {
   const entries = COLUMNS.filter(([key]) => fields[key] !== undefined);
   if (entries.length === 0) {
@@ -134,6 +160,7 @@ module.exports = {
   findById,
   findByClassSessionAndHour,
   findByClassAndDate,
+  findByClassAndDateRange,
   update,
   softDelete,
   list,

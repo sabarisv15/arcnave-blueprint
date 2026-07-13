@@ -37,8 +37,8 @@ function createAnalyticsRouter() {
   // already follows.
   router.get('/analytics/attendance-rate', requirePermission('analytics.attendance_rate.read'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
-    const { class_id: classId } = req.query;
-    const rows = await analyticsService.getAttendanceRateByClass(req.dbClient, { classId });
+    const { class_id: classId, start_date: startDate, end_date: endDate } = req.query;
+    const rows = await analyticsService.getAttendanceRateByClass(req.dbClient, { classId, startDate, endDate });
     res.json(rows);
   }));
 
