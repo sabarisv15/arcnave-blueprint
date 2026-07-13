@@ -66,6 +66,18 @@ const PERMISSION_ROLES = {
   'finance.fee_structures.update': ['principal'],
   'finance.fee_payments.create': ['principal'],
 
+  // routes/notifications.js (Module 8 second slice — human-facing
+  // route for the ledger) — same allowedRoles as the AI-tool path's
+  // draft_notification/request_notification_send in aiToolRegistry.js,
+  // so a human and an AI acting on a college's behalf have identical
+  // reach; staff is excluded from both for the same reason: nothing in
+  // BusinessRules.md's Notifications section names ordinary staff as a
+  // drafter, only that drafts (human- or AI-origin) require Principal
+  // approval before dispatch.
+  'notifications.draft': ['principal', 'college_admin', 'hod'],
+  'notifications.submit': ['principal', 'college_admin', 'hod'],
+  'notifications.read': ['principal', 'college_admin', 'hod'],
+
   // routes/reports.js — all three POST /reports/* routes shared one
   // requireRole('principal') each; one permission covers all three,
   // same as before.

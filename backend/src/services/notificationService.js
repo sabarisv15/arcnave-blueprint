@@ -411,6 +411,17 @@ async function dispatchApprovedNotification(client, notificationId) {
   return { notification: updated, delivery };
 }
 
+// Thin passthrough to notificationRepository.list — the human-facing
+// route this ledger never had (draft/submit/approve/reject/dispatch
+// all existed; nothing to look at them with). Same "thin wrapper,
+// concrete known consumer" reasoning attendanceService.
+// listAttendanceSessionsForClassAndDate gives for its own passthrough,
+// not speculative — routes/notifications.js is the real, immediate
+// caller.
+async function listNotifications(client, { limit, offset } = {}) {
+  return notificationRepository.list(client, { limit, offset });
+}
+
 module.exports = {
   NotificationValidationError,
   NotificationNotFoundError,
@@ -426,4 +437,5 @@ module.exports = {
   approveNotification,
   rejectNotification,
   dispatchApprovedNotification,
+  listNotifications,
 };

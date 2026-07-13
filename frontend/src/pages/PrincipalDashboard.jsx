@@ -237,6 +237,15 @@ export default function PrincipalDashboard() {
   // fetches upfront, same convention realStaffList/pendingApprovals use.
   const [attendanceRateByClass, setAttendanceRateByClass] = useState([]);
 
+  // Notification ledger (Module 8, human-facing route slice) — real
+  // API (routes/notifications.js). draft/submit only; approve/reject
+  // stay on the existing Pending Approvals panel above (workflow-requests
+  // route), same generic approval surface every other entity type uses.
+  const [notifications, setNotifications] = useState([]);
+  const [notificationForm, setNotificationForm] = useState({ channel: 'email', to_address: '', subject: '', body: '' });
+  const [draftingNotification, setDraftingNotification] = useState(false);
+  const [submittingNotificationId, setSubmittingNotificationId] = useState(null);
+
   const loadData = async () => {
     setLoading(true);
     try {
@@ -319,6 +328,14 @@ export default function PrincipalDashboard() {
       });
       if (attendanceRateRes.ok) {
         setAttendanceRateByClass((await attendanceRateRes.json()) || []);
+      }
+
+      // 9. Module 8 second slice — notification ledger (list).
+      const notificationsRes = await fetch('/api/v1/notifications', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (notificationsRes.ok) {
+        setNotifications((await notificationsRes.json()) || []);
       }
     } catch (e) {
       console.error(e);
@@ -637,6 +654,62 @@ export default function PrincipalDashboard() {
     }
   };
 
+  // Drafts a notification (POST /api/v1/notifications) — a Draft row
+  // only, no send, no approval request yet. Submitting it (below) is a
+  // separate, explicit step, same two-step shape draftNotification/
+  // submitForApproval have at the service layer.
+  const handleDraftNotification = async () => {
+    if (!notificationForm.to_address || !notificationForm.body) {
+      showToast('Recipient and body are required', 'danger');
+      return;
+    }
+    setDraftingNotification(true);
+    try {
+      const res = await fetch('/api/v1/notifications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify(notificationForm),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to draft notification');
+      }
+      showToast('Notification drafted', 'success');
+      setNotificationForm({ channel: 'email', to_address: '', subject: '', body: '' });
+      loadData();
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setDraftingNotification(false);
+    }
+  };
+
+  // Submits an existing Draft for approval (POST
+  // /api/v1/notifications/:id/submit) — resolves the single-step
+  // Principal-only approver chain server-side; the resulting request
+  // then shows up in the same Pending Approvals panel above, same
+  // approve/reject route every other entity type already uses.
+  const handleSubmitNotification = async (notificationId) => {
+    setSubmittingNotificationId(notificationId);
+    try {
+      const res = await fetch(`/api/v1/notifications/${notificationId}/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to submit notification for approval');
+      }
+      showToast('Notification submitted for approval', 'success');
+      loadData();
+    } catch (err) {
+      showToast(err.message, 'danger');
+    } finally {
+      setSubmittingNotificationId(null);
+    }
+  };
+
   // POST /api/v1/reports/student-export always creates a
   // generated_reports row (201) even when generation itself failed —
   // reportService.js resolves with a 'failed' row rather than
@@ -777,7 +850,8 @@ export default function PrincipalDashboard() {
     { id: 'marksheet_approvals', label: 'Marksheet Approvals', icon: FileText },
     { id: 'admin', label: 'Workload & Staff', icon: Settings },
     { id: 'finance', label: 'Fee Structures', icon: DollarSign },
-    { id: 'reports', label: 'Reports', icon: Download }
+    { id: 'reports', label: 'Reports', icon: Download },
+    { id: 'notifications', label: 'Notifications', icon: Bell }
   ];
 
   return (
@@ -1878,6 +1952,128 @@ export default function PrincipalDashboard() {
                           <td className="text-center">{row.sessionsCount}</td>
                           <td className="text-center">
                             <span className={badgeClass}>{rate === null ? 'No data' : `${rate}%`}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Module 8 second slice — human-facing notification ledger
+            (draft/submit/list; approve/reject stay on the Pending
+            Approvals panel above, same generic workflow-requests route
+            every other entity type uses). */}
+        {viewSection === 'notifications' && (
+          <div className="space-y-8 animate-slide-up">
+            <div className="card p-6 space-y-4">
+              <div className="flex justify-between items-center border-b pb-3 border-slate-50">
+                <div>
+                  <h3 className="font-extrabold text-slate-805 text-sm flex items-center gap-1.5">
+                    <Bell className="w-4 h-4 text-indigo-500" />
+                    Draft a Notification
+                  </h3>
+                  <p className="text-slate-450 text-[10px] font-semibold mt-0.5">
+                    Creates a Draft only — nothing is sent until it's submitted and approved.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <select
+                  value={notificationForm.channel}
+                  onChange={(e) => setNotificationForm({ ...notificationForm, channel: e.target.value })}
+                  className="bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 focus:outline-none focus:border-indigo-400"
+                >
+                  <option value="email">Email</option>
+                  <option value="sms">SMS</option>
+                  <option value="whatsapp">WhatsApp</option>
+                </select>
+                <input
+                  type="text"
+                  placeholder="Recipient (email or phone)"
+                  value={notificationForm.to_address}
+                  onChange={(e) => setNotificationForm({ ...notificationForm, to_address: e.target.value })}
+                  className="bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 focus:outline-none focus:border-indigo-400"
+                />
+                <input
+                  type="text"
+                  placeholder="Subject (optional)"
+                  value={notificationForm.subject}
+                  onChange={(e) => setNotificationForm({ ...notificationForm, subject: e.target.value })}
+                  className="bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 focus:outline-none focus:border-indigo-400 sm:col-span-2"
+                />
+                <textarea
+                  placeholder="Message body"
+                  value={notificationForm.body}
+                  onChange={(e) => setNotificationForm({ ...notificationForm, body: e.target.value })}
+                  className="bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 focus:outline-none focus:border-indigo-400 sm:col-span-2 h-20"
+                />
+              </div>
+              <button
+                onClick={handleDraftNotification}
+                disabled={draftingNotification}
+                className="btn-primary text-[10px] py-1.5 px-3 flex items-center gap-1 disabled:opacity-50"
+              >
+                <Bell className="w-3.5 h-3.5" />
+                {draftingNotification ? 'Drafting…' : 'Save Draft'}
+              </button>
+            </div>
+
+            <div className="card p-6 space-y-4">
+              <div className="flex justify-between items-center border-b pb-3 border-slate-50">
+                <div>
+                  <h3 className="font-extrabold text-slate-805 text-sm flex items-center gap-1.5">
+                    <Bell className="w-4 h-4 text-indigo-500" />
+                    Notification Ledger
+                  </h3>
+                  <p className="text-slate-450 text-[10px] font-semibold mt-0.5">
+                    Every drafted notification and its current status.
+                  </p>
+                </div>
+              </div>
+
+              {notifications.length === 0 ? (
+                <p className="text-center text-slate-500 font-semibold py-8 text-sm">
+                  No notifications drafted yet.
+                </p>
+              ) : (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Channel</th>
+                      <th>To</th>
+                      <th>Subject</th>
+                      <th className="text-center">Status</th>
+                      <th className="text-center">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {notifications.map((n) => {
+                      const statusBadge = n.status === 'Draft' ? 'badge'
+                        : n.status === 'Dispatched' ? 'badge badge-emerald'
+                          : n.status === 'Rejected' ? 'badge badge-rose' : 'badge badge-amber';
+                      return (
+                        <tr key={n.id}>
+                          <td className="font-bold text-slate-700">{n.channel}</td>
+                          <td>{n.to_address}</td>
+                          <td>{n.subject || '—'}</td>
+                          <td className="text-center"><span className={statusBadge}>{n.status}</span></td>
+                          <td className="text-center">
+                            {n.status === 'Draft' ? (
+                              <button
+                                onClick={() => handleSubmitNotification(n.id)}
+                                disabled={submittingNotificationId === n.id}
+                                className="btn-ghost text-[10px] py-1 px-2 disabled:opacity-50"
+                              >
+                                {submittingNotificationId === n.id ? 'Submitting…' : 'Submit for Approval'}
+                              </button>
+                            ) : (
+                              <span className="text-slate-400 text-xs">—</span>
+                            )}
                           </td>
                         </tr>
                       );

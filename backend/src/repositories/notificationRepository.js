@@ -89,10 +89,25 @@ async function findDeliveryAttempts(client, notificationId) {
   return result.rows;
 }
 
+// The one query mechanic this ledger was missing: every other
+// repository in this codebase has a plain list() (classRepository,
+// attendanceRepository, ...); this one didn't yet because nothing
+// called it — the ledger had a service layer but no human-facing route
+// until now. Same shape as the others: RLS-scoped implicitly, no
+// explicit college_id filter, newest first.
+async function list(client, { limit = 50, offset = 0 } = {}) {
+  const result = await client.query(
+    'SELECT * FROM notifications ORDER BY created_at DESC LIMIT $1 OFFSET $2',
+    [limit, offset],
+  );
+  return result.rows;
+}
+
 module.exports = {
   create,
   findById,
   update,
   recordDeliveryAttempt,
   findDeliveryAttempts,
+  list,
 };
