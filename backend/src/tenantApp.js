@@ -9,6 +9,7 @@ const { tenantMiddleware } = require('./middleware/tenant');
 const errorHandler = require('./middleware/errorHandler');
 const createAuthRouter = require('./routes/auth');
 const createConfigurationsRouter = require('./routes/configurations');
+const createAiConfigRouter = require('./routes/aiConfig');
 const createInvitationsRouter = require('./routes/invitations');
 const createStudentsRouter = require('./routes/students');
 const createStaffRouter = require('./routes/staff');
@@ -106,6 +107,7 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   // like whoami above — not to be confused with AuthMiddleware.
   app.use(createAuthRouter());
   app.use(createConfigurationsRouter());
+  app.use(createAiConfigRouter());
   app.use(createStudentsRouter());
   app.use(createStaffRouter());
   app.use(createClassesRouter());

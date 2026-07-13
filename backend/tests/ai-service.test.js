@@ -21,7 +21,7 @@ const aiToolRegistry = require('../src/services/aiToolRegistry');
 const aiContextBuilder = require('../src/services/aiContextBuilder');
 const aiPromptSafetyLayer = require('../src/services/aiPromptSafetyLayer');
 const aiService = require('../src/services/aiService');
-const llmProvider = require('../src/services/llmProvider');
+const nimAdapter = require('../src/services/aiProviders/nim');
 const config = require('../src/config');
 const notificationRepository = require('../src/repositories/notificationRepository');
 const workflowService = require('../src/services/workflowService');
@@ -432,23 +432,23 @@ function withMockFetch(mockFetch, fn) {
   return fn().finally(() => { global.fetch = original; });
 }
 
-test('llmProvider.isConfigured/complete: unconfigured (no NIM_API_KEY, this test environment\'s default) throws LlmNotConfiguredError, no fetch attempted', async () => {
+test('nim adapter.isConfigured/complete: unconfigured (no apiKey) throws LlmNotConfiguredError, no fetch attempted', async () => {
   await withNimConfig(null, async () => {
-    assert.equal(llmProvider.isConfigured(), false);
+    assert.equal(nimAdapter.isConfigured(config.nim), false);
     let fetchCalled = false;
     await withMockFetch(async () => { fetchCalled = true; }, async () => {
       await assert.rejects(
-        () => llmProvider.complete({ systemPrompt: 's', userPrompt: 'u' }),
-        llmProvider.LlmNotConfiguredError,
+        () => nimAdapter.complete(config.nim, { systemPrompt: 's', userPrompt: 'u' }),
+        nimAdapter.LlmNotConfiguredError,
       );
     });
     assert.equal(fetchCalled, false);
   });
 });
 
-test('llmProvider.complete: when configured, sends the right OpenAI-compatible request shape and parses choices[0].message.content', async () => {
+test('nim adapter.complete: when configured, sends the right OpenAI-compatible request shape and parses choices[0].message.content', async () => {
   await withNimConfig('test-nim-key', async () => {
-    assert.equal(llmProvider.isConfigured(), true);
+    assert.equal(nimAdapter.isConfigured(config.nim), true);
     let capturedUrl;
     let capturedOptions;
     await withMockFetch(async (url, options) => {
@@ -459,7 +459,7 @@ test('llmProvider.complete: when configured, sends the right OpenAI-compatible r
         json: async () => ({ choices: [{ message: { content: 'mocked answer' } }] }),
       };
     }, async () => {
-      const answer = await llmProvider.complete({ systemPrompt: 'system text', userPrompt: 'user text' });
+      const answer = await nimAdapter.complete(config.nim, { systemPrompt: 'system text', userPrompt: 'user text' });
       assert.equal(answer, 'mocked answer');
     });
 
@@ -473,7 +473,7 @@ test('llmProvider.complete: when configured, sends the right OpenAI-compatible r
   });
 });
 
-test('llmProvider.complete: a non-ok response throws LlmRequestError, not a silent failure', async () => {
+test('nim adapter.complete: a non-ok response throws LlmRequestError, not a silent failure', async () => {
   await withNimConfig('test-nim-key', async () => {
     await withMockFetch(async () => ({
       ok: false,
@@ -481,8 +481,8 @@ test('llmProvider.complete: a non-ok response throws LlmRequestError, not a sile
       text: async () => 'upstream broke',
     }), async () => {
       await assert.rejects(
-        () => llmProvider.complete({ systemPrompt: 's', userPrompt: 'u' }),
-        llmProvider.LlmRequestError,
+        () => nimAdapter.complete(config.nim, { systemPrompt: 's', userPrompt: 'u' }),
+        nimAdapter.LlmRequestError,
       );
     });
   });
@@ -527,7 +527,7 @@ test('aiService.askAboutTool: an unconfigured LLM provider throws LlmNotConfigur
   await withNimConfig(null, async () => {
     await assert.rejects(
       () => aiService.askAboutTool(client, 'get_college_profile', {}, 'What college is this?', { actor }),
-      llmProvider.LlmNotConfiguredError,
+      nimAdapter.LlmNotConfiguredError,
     );
   });
 
@@ -575,10 +575,14 @@ test('aiService.askAgent: unconfigured LLM provider throws LlmNotConfiguredError
   await withNimConfig(null, async () => {
     await assert.rejects(
       () => aiService.askAgent(client, 'What college is this?', { actor }),
-      llmProvider.LlmNotConfiguredError,
+      nimAdapter.LlmNotConfiguredError,
     );
   });
-  assert.deepEqual(client.queries, []);
+  // The only query is getAiConfig's own college_ai_config lookup
+  // (resolving which provider/config to use) — no tool ever ran, so
+  // no Business Service call and no audit row either.
+  assert.equal(client.queries.length, 1);
+  assert.match(client.queries[0].text, /FROM college_ai_config/);
 });
 
 test('aiService.askAgent: the LLM picks the registered tool -> the same Policy Gate re-validates it -> the tool actually runs', async () => {
@@ -634,8 +638,11 @@ test('aiService.askAgent: the LLM picks an unknown/hallucinated tool name -> a c
 
   // No tool ran, so no ai_tool_invoked/ai_tool_denied row either — the
   // hallucinated name never named a real tool for the Policy Gate to
-  // have an opinion about at all.
-  assert.deepEqual(client.queries, []);
+  // have an opinion about at all. The one query that did run is
+  // getAiConfig's own college_ai_config lookup, made before the LLM
+  // call (and thus before the hallucinated name is even known).
+  assert.equal(client.queries.length, 1);
+  assert.match(client.queries[0].text, /FROM college_ai_config/);
 });
 
 test('aiService.askAgent: the LLM picks no tool -> returns its direct answer, still wrapped in the Prompt Safety Layer\'s envelope', async () => {
@@ -653,8 +660,10 @@ test('aiService.askAgent: the LLM picks no tool -> returns its direct answer, st
     });
   });
 
-  // No tool ran — no Business Service call, no audit row.
-  assert.deepEqual(client.queries, []);
+  // No tool ran — no Business Service call, no audit row. The one
+  // query that did run is getAiConfig's own college_ai_config lookup.
+  assert.equal(client.queries.length, 1);
+  assert.match(client.queries[0].text, /FROM college_ai_config/);
 });
 
 // --- draft_notification (L2) / request_notification_send (L3) ---

@@ -44,6 +44,10 @@ const PERMISSION_ROLES = {
   // routes/configurations.js — PUT /configurations/:category
   'configurations.update': ['principal'],
 
+  // routes/aiConfig.js — GET/PUT /ai-config
+  'ai_config.read': ['principal'],
+  'ai_config.update': ['principal'],
+
   // routes/departments.js — GET/POST/PUT/DELETE /departments
   'departments.read': ['college_admin'],
   'departments.create': ['college_admin'],

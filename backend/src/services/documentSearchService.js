@@ -43,17 +43,19 @@
 // still gets applied exactly once, at the one place rule 9 already
 // requires it, never twice and never skipped.
 //
-// No OCR pipeline exists yet (see the Module 6 documents migration's
-// own file comment: "OCR/AI extraction... is Module 9 territory, not
-// added here" — deferred again, not built by this slice either).
-// ingestDocument therefore only supports documents whose mime_type is
-// text-decodable (text/*) — a real, flagged gap, not a silently-faked
-// OCR step: a PDF/image upload is refused, not mis-chunked from raw
-// binary bytes decoded as if they were UTF-8 text.
+// A real OCR pipeline now exists (ocr/tesseractOcr.js, Tesseract via
+// tesseract.js) for raster images (png/jpeg/bmp/tiff) — ingestDocument
+// runs OCR-extracted text through the exact same chunk/embed/classify
+// path a text/* document already used, no separate treatment. PDF is
+// still refused: tesseract.js has no built-in PDF rasterizer and this
+// project has no PDF-to-image dependency installed, so a PDF upload
+// gets a real, flagged DocumentSearchUnsupportedContentError, not
+// mis-chunked from raw binary bytes or silently faked as OCR'd.
 
 const documentService = require('./documentService');
 const aiClassificationAccess = require('./aiClassificationAccess');
-const llmProvider = require('./llmProvider');
+const configurationService = require('./configurationService');
+const tesseractOcr = require('../ocr/tesseractOcr');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const aiDocumentChunkRepository = require('../repositories/aiDocumentChunkRepository');
 
@@ -71,10 +73,18 @@ class DocumentSearchNotFoundError extends Error {}
 // later at query time.
 class DocumentSearchAadhaarBlockedError extends Error {}
 
-// No OCR pipeline exists yet (see file-level comment) — a document
-// whose mime_type isn't text-decodable is refused, not mis-chunked
-// from raw binary bytes.
+// A document whose mime_type is neither text-decodable nor a
+// Tesseract-supported raster image is refused, not mis-chunked from
+// raw binary bytes. PDF is the one common upload type still in this
+// bucket — tesseract.js has no built-in PDF page rasterizer and this
+// project has no PDF-to-image dependency installed (see
+// ocr/tesseractOcr.js's own file comment) — a real, flagged gap, not
+// silently faked.
 class DocumentSearchUnsupportedContentError extends Error {}
+
+// tesseract.js recognizes these directly, no rasterization step
+// needed. PDF deliberately not included — see the class comment above.
+const OCR_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/bmp', 'image/tiff']);
 
 // Mirrors doc_type's own "known values documented here, not enforced
 // by the DB" convention (see the Module 6 documents migration) — this
@@ -151,18 +161,30 @@ async function ingestDocument(client, documentId, { actorUserId } = {}) {
   }
   const { document, buffer } = result;
 
-  if (typeof document.mime_type !== 'string' || !document.mime_type.startsWith('text/')) {
+  // Two ways in: a text/* document is decoded directly (unchanged from
+  // before); an OCR-supported image runs through tesseractOcr first —
+  // either way, `text` below is untrusted, human/image-derived content
+  // (CLAUDE.md rule 9), fed into the exact same chunk/embed pipeline
+  // with no special trust granted to OCR output over typed text.
+  let text;
+  if (typeof document.mime_type === 'string' && document.mime_type.startsWith('text/')) {
+    text = buffer.toString('utf8');
+  } else if (typeof document.mime_type === 'string' && OCR_IMAGE_MIME_TYPES.has(document.mime_type)) {
+    text = await tesseractOcr.extractTextFromImage(buffer);
+  } else {
     throw new DocumentSearchUnsupportedContentError(
       `document ${JSON.stringify(documentId)} has mime_type ${JSON.stringify(document.mime_type)}, which this `
-      + 'slice cannot extract text from (no OCR pipeline exists yet — only text/* content is supported)',
+      + 'slice cannot extract text from (only text/* content and OCR-supported images '
+      + `[${[...OCR_IMAGE_MIME_TYPES].join(', ')}] are supported — PDF has no rasterizer wired in yet)`,
     );
   }
 
   const classification = classifyDocType(document.doc_type);
-  const chunks = chunkText(buffer.toString('utf8'));
+  const chunks = chunkText(text);
+  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, document.college_id);
 
   for (let i = 0; i < chunks.length; i += 1) {
-    const [embedding] = await llmProvider.embed([chunks[i]], { inputType: 'passage' });
+    const [embedding] = await adapter.embed(aiConfig, [chunks[i]], { inputType: 'passage' });
     await aiDocumentChunkRepository.create(client, {
       collegeId: document.college_id,
       documentId: document.id,
@@ -200,7 +222,8 @@ async function searchDocuments(client, { query, limit } = {}, actor) {
   }
 
   const classifications = aiClassificationAccess.permittedClassifications(actor.role);
-  const [queryEmbedding] = await llmProvider.embed([query], { inputType: 'query' });
+  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, actor.collegeId);
+  const [queryEmbedding] = await adapter.embed(aiConfig, [query], { inputType: 'query' });
   const rows = await aiDocumentChunkRepository.search(client, {
     collegeId: actor.collegeId,
     classifications,

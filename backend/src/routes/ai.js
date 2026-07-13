@@ -5,7 +5,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth } = require('../middleware/rbac');
 const aiToolRegistry = require('../services/aiToolRegistry');
 const aiService = require('../services/aiService');
-const llmProvider = require('../services/llmProvider');
+const aiProviders = require('../services/aiProviders');
 const notificationService = require('../services/notificationService');
 
 function requireResolvedTenant(req, res) {
@@ -50,15 +50,22 @@ function mapAiToolError(err, res) {
   // a crash" reasoning notificationService.js already established,
   // just surfaced here as an honest error instead of a silent stub
   // because an "ask" genuinely has no answer to give without one.
-  if (err instanceof llmProvider.LlmNotConfiguredError) {
+  if (err instanceof aiProviders.LlmNotConfiguredError) {
     res.status(503).json({ detail: err.message });
     return true;
   }
   // 502: the provider itself is configured and reachable in principle,
   // but this particular call failed upstream — a Bad Gateway, not this
   // server's own fault.
-  if (err instanceof llmProvider.LlmRequestError) {
+  if (err instanceof aiProviders.LlmRequestError) {
     res.status(502).json({ detail: err.message });
+    return true;
+  }
+  // A college's configured provider genuinely can't do what was asked
+  // (e.g. claude has no embeddings endpoint) — a real vendor
+  // limitation, not this server's bug and not the caller's mistake.
+  if (err instanceof aiProviders.AiProviderCapabilityError) {
+    res.status(503).json({ detail: err.message });
     return true;
   }
   // draft_notification/request_notification_send wrap notificationService
