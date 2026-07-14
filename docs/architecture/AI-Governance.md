@@ -26,6 +26,17 @@ Notes:
 - This policy governs actions the **AI** initiates. A staff member
   marking attendance directly through the normal dashboard is not
   gated by this policy — only "AI, please mark Sunil absent" is.
+- Send Alert (`POST /api/v1/classes/:id/send-alert`, a Class Tutor
+  messaging their own class over WhatsApp) is the same kind of action:
+  a human dashboard action, not an AI one, so it is structurally
+  outside this policy — same as attendance-marking above, not a carve-
+  out from L3's "always required" line. It has no AI entry point at
+  all (no tool in the registry calls it); the moment any AI-drafted
+  content or AI-initiated trigger is involved, that request must go
+  through `notificationService.draftNotification`/`submitForApproval`
+  like every other L3 send, with no exception. See
+  BusinessRules.md's Notifications section for the exact conditions
+  the human-only exception depends on.
 
 ## 2. Tool architecture
 

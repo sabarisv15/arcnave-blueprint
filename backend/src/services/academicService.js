@@ -47,10 +47,12 @@
 const classRepository = require('../repositories/classRepository');
 const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
 const timetablePeriodRepository = require('../repositories/timetablePeriodRepository');
+const studentRepository = require('../repositories/studentRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const documentService = require('./documentService');
 const workflowService = require('./workflowService');
 const staffService = require('./staffService');
+const notificationService = require('./notificationService');
 
 // Missing className — classes.class_name is NOT NULL at the DB level.
 // Raised before any repository call, same as staffService's pre-query
@@ -170,6 +172,19 @@ class TimetablePeriodSlotTakenError extends Error {}
 // raw pg one, same discipline as every other constraint in this file.
 class TimetablePeriodInUseError extends Error {}
 class TimetableImportError extends Error {}
+
+// sendClassAlert given a classId with no matching row, or an empty
+// body — same "guard before any work" reasoning every other
+// pre-repository-call check in this file uses.
+class ClassSendAlertValidationError extends Error {}
+
+// sendClassAlert called by a user who is not this class's own
+// tutor_user_id. A distinct error (not ClassValidationError) because
+// it's a 403, not a 400 — "you are not allowed" is a different kind of
+// failure than "the request itself is malformed," same split
+// classes.js's route layer already makes between mapAcademicServiceError's
+// 400s and requirePermission's own 403s.
+class ClassSendAlertNotTutorError extends Error {}
 
 // Known real timetable_status values, per the migration's own comment
 // and .ai/TASK.md's grounding against TutorClass.jsx/
@@ -780,6 +795,85 @@ async function removeFacultyAllocation(client, id, { actorUserId } = {}) {
   return allocation;
 }
 
+// Send Alert (item 5 of this session's task): a tutor sending a plain-
+// text WhatsApp message to every student in their OWN class, plus
+// whichever of that student's/their parent's numbers are WhatsApp-
+// verified (phone_verified/parent_phone_verified — see
+// phoneVerificationService.js). Deliberately NOT routed through
+// WorkflowService — this is the one explicitly documented exception to
+// "every outbound notification requires approval" (BusinessRules.md's
+// Notifications section, AI-Governance.md's L3 "Act" table): a human
+// tutor directly messaging students already enrolled in their own
+// class, with plain free-text content and no AI involvement, is
+// structurally the same kind of action AI-Governance.md already
+// carves out for a staff member marking attendance directly through
+// the dashboard — not an AI action, so L3's "always required, no
+// exceptions" language never applies to it in the first place. Scoped
+// tightly on purpose (own class only, human-sent only, plain text
+// only): any future variant (AI-drafted content, cross-class blasts,
+// rich content) is a different feature that DOES need
+// draftNotification/submitForApproval, not an extension of this one.
+//
+// Per-recipient, best-effort, no retry/fallback (this session's own
+// task: "no auto-retry or channel fallback") — matches
+// notificationService.sendViaChannel's own best-effort philosophy for
+// every other channel in this codebase. A student with neither number
+// verified is simply absent from the result list, not a failure.
+async function sendClassAlert(client, classId, body, { actorUserId } = {}) {
+  if (!body) {
+    throw new ClassSendAlertValidationError('body is required');
+  }
+
+  const cls = await classRepository.findById(client, classId);
+  if (cls === null) {
+    throw new ClassSendAlertValidationError(`class ${JSON.stringify(classId)} does not exist`);
+  }
+  if (cls.tutor_user_id !== actorUserId) {
+    throw new ClassSendAlertNotTutorError(`user ${JSON.stringify(actorUserId)} is not the tutor of class ${JSON.stringify(classId)}`);
+  }
+
+  const students = await studentRepository.findByClassId(client, classId);
+
+  const results = [];
+  for (const student of students) {
+    const recipients = [
+      { target: 'phone', verified: student.phone_verified, phone: student.phone },
+      { target: 'parent_phone', verified: student.parent_phone_verified, phone: student.parent_phone },
+    ].filter((r) => r.verified && r.phone);
+
+    for (const recipient of recipients) {
+      // eslint-disable-next-line no-await-in-loop
+      const sendResult = await notificationService.sendViaChannel(client, {
+        collegeId: cls.college_id,
+        channel: 'whatsapp',
+        to: recipient.phone,
+        body,
+      });
+      results.push({
+        studentId: student.id,
+        target: recipient.target,
+        phone: recipient.phone,
+        status: sendResult.status,
+        error: sendResult.error || null,
+      });
+    }
+  }
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: cls.college_id,
+    userId: actorUserId,
+    action: 'class_alert_sent',
+    entity: 'classes',
+    entityId: classId,
+    metadata: {
+      recipientCount: results.length,
+      sentCount: results.filter((r) => r.status === 'sent').length,
+    },
+  });
+
+  return results;
+}
+
 module.exports = {
   ClassValidationError,
   ClassTimetableStatusError,
@@ -799,6 +893,9 @@ module.exports = {
   TimetablePeriodSlotTakenError,
   TimetablePeriodInUseError,
   TimetableImportError,
+  ClassSendAlertValidationError,
+  ClassSendAlertNotTutorError,
+  sendClassAlert,
   createClass,
   getClass,
   updateClass,

@@ -43,6 +43,7 @@ const COLUMNS = [
   ['licenseNumber', 'license_number'],
   ['bikeNumber', 'bike_number'],
   ['annualIncome', 'annual_income'],
+  ['classId', 'class_id'],
 ];
 
 async function create(client, fields) {
@@ -96,6 +97,14 @@ async function update(client, id, fields) {
   return result.rows[0] || null;
 }
 
+// The "students in a class" lookup Send Alert (classService's
+// sendClassAlert, item 5 of this session's task) needs — the only
+// place students.class_id is read back by more than one row at a time.
+async function findByClassId(client, classId) {
+  const result = await client.query('SELECT * FROM students WHERE class_id = $1', [classId]);
+  return result.rows;
+}
+
 async function remove(client, id) {
   await client.query('DELETE FROM students WHERE id = $1', [id]);
 }
@@ -108,4 +117,6 @@ async function list(client, { limit = 50, offset = 0 } = {}) {
   return result.rows;
 }
 
-module.exports = { create, findById, findByRollNo, update, remove, list };
+module.exports = {
+  create, findById, findByRollNo, findByClassId, update, remove, list,
+};

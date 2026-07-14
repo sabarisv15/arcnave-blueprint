@@ -101,6 +101,14 @@ function mapAcademicServiceError(err, res) {
     res.status(400).json({ detail: err.message });
     return true;
   }
+  if (err instanceof academicService.ClassSendAlertValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof academicService.ClassSendAlertNotTutorError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -195,6 +203,30 @@ function createClassesRouter() {
         { requestedByUserId: req.jwtClaims.sub },
       );
       res.status(201).json(workflowRequest);
+    } catch (err) {
+      if (mapAcademicServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // Send Alert (item 5 of this session's task) — requireAuth, not a
+  // permission: the real gate is academicService.sendClassAlert's own
+  // "actorUserId must equal this class's tutor_user_id" check, same
+  // requireAuth-not-requireRole reasoning submit-for-approval above
+  // already documents for an actor-scoped action. Body is a single
+  // plain-text field, no AI, never routed through WorkflowService — see
+  // sendClassAlert's own comment for why that's an explicitly
+  // documented exception, not an oversight.
+  router.post('/classes/:id/send-alert', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const results = await academicService.sendClassAlert(
+        req.dbClient,
+        req.params.id,
+        (req.body || {}).body,
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(200).json({ results });
     } catch (err) {
       if (mapAcademicServiceError(err, res)) return;
       throw err;

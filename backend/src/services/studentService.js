@@ -70,6 +70,15 @@ const ALLOWED_FIELDS = [
   'licenseNumber',
   'bikeNumber',
   'annualIncome',
+  // Which class this student is enrolled in (students.class_id — see
+  // that migration's own comment). Added for item 5 of this session's
+  // task (Send Alert needs a real "students in a class" lookup);
+  // students_class_id_fkey violations aren't mapped to a domain error
+  // here the way tutorUserId/departmentId are in academicService.js —
+  // no caller of createStudent/updateStudent sets this yet outside
+  // ad-hoc admin data entry, so a raw FK violation surfacing is an
+  // acceptable gap, not a silent one.
+  'classId',
 ];
 
 function pickStudentFields(source) {

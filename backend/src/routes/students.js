@@ -48,6 +48,7 @@ const STUDENT_BODY_FIELDS = [
   ['license_number', 'licenseNumber'],
   ['bike_number', 'bikeNumber'],
   ['annual_income', 'annualIncome'],
+  ['class_id', 'classId'],
 ];
 
 function bodyToServiceFields(body) {

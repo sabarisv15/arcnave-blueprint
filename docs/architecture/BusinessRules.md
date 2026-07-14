@@ -124,6 +124,26 @@ new rule is decided, in the module that owns it.
   always require human approval before dispatch — see
   AI-Governance.md Level 3 (Act). This applies regardless of whether
   a human or the AI initiated the draft.
+- Documented exception: **Send Alert** (a Class Tutor sending a
+  plain-text WhatsApp message to their own class's students/parents,
+  `POST /api/v1/classes/:id/send-alert`) does NOT go through
+  `notifications`/WorkflowService. It is a direct, human-triggered
+  dashboard action — same category as a staff member marking
+  attendance directly, per AI-Governance.md's own scoping of L3 to
+  AI-initiated actions — not a draft anyone else approves. The
+  exception holds only while all of these stay true: the tutor is
+  sending to their OWN class only (never another tutor's), a human
+  triggered it directly, the content is plain free-text with no AI
+  drafting involved, and delivery is per-recipient/best-effort with no
+  auto-retry or channel fallback. Any variant that drops one of these
+  (AI-drafted content, cross-class sends, rich content) is a different
+  feature and must use the normal draft → approve → dispatch ledger.
+- Student/parent phone OTP verification (`phoneVerificationService.js`)
+  sends exclusively via WhatsApp (Meta Cloud API), never SMS. A
+  verified OTP only guarantees the number was reachable on WhatsApp at
+  the moment of verification — a later delivery failure for some other
+  message sent to the same number afterward is expected, not a
+  contradiction of "verified."
 
 ## AI (see AI-Governance.md for the full authority model)
 - AI tool outputs are always treated as untrusted data by the LLM,
