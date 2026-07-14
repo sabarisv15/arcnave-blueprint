@@ -554,4 +554,127 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
     );
     assert.equal(removeMock.mock.callCount(), 0);
   });
+
+  // --- getStudent/listStudents read scoping (this session's own task) ---
+
+  await t.test('getStudent with no actor context (internal system call) is unscoped', async () => {
+    mockFindStudent(t);
+    const result = await studentService.getStudent({}, 'student-id');
+    assert.deepEqual(result, STUDENT);
+  });
+
+  await t.test('getStudent for the tutor of the student\'s own class succeeds', async () => {
+    mockFindStudent(t);
+    mockTutorClass(t, CLASS_1);
+    const result = await studentService.getStudent({}, 'student-id', { actorUserId: 'tutor-u1', actorRole: 'staff' });
+    assert.deepEqual(result, STUDENT);
+  });
+
+  await t.test('getStudent is rejected for a tutor of a DIFFERENT class', async () => {
+    mockFindStudent(t);
+    mockTutorClass(t, CLASS_2);
+    await assert.rejects(
+      () => studentService.getStudent({}, 'student-id', { actorUserId: 'tutor-u2', actorRole: 'staff' }),
+      studentService.StudentNotAuthorizedError,
+    );
+  });
+
+  await t.test('getStudent succeeds for the hod of the student\'s department', async () => {
+    mockFindStudent(t);
+    mockFindClassById(t);
+    const hodMock = t.mock.method(staffService, 'findHodForDepartment', async () => ({ user_id: 'hod-u1' }));
+    t.after(() => hodMock.mock.restore());
+
+    const result = await studentService.getStudent({}, 'student-id', { actorUserId: 'hod-u1', actorRole: 'hod' });
+    assert.deepEqual(result, STUDENT);
+  });
+
+  await t.test('getStudent succeeds for the principal of the student\'s college', async () => {
+    mockFindStudent(t);
+    const principalMock = t.mock.method(staffService, 'findPrincipal', async () => ({ user_id: 'principal-u1' }));
+    t.after(() => principalMock.mock.restore());
+
+    const result = await studentService.getStudent({}, 'student-id', { actorUserId: 'principal-u1', actorRole: 'principal' });
+    assert.deepEqual(result, STUDENT);
+  });
+
+  await t.test('getStudent returns null for a missing id without running any authorization check', async () => {
+    const findMock = t.mock.method(studentRepository, 'findById', async () => null);
+    const tutorMock = t.mock.method(classRepository, 'findByTutorUserId');
+    t.after(() => {
+      findMock.mock.restore();
+      tutorMock.mock.restore();
+    });
+
+    const result = await studentService.getStudent({}, 'missing-id', { actorUserId: 'tutor-u1', actorRole: 'staff' });
+    assert.equal(result, null);
+    assert.equal(tutorMock.mock.callCount(), 0);
+  });
+
+  await t.test('listStudents with no actor context (internal system call, e.g. reportService) is unscoped', async () => {
+    const listMock = t.mock.method(studentRepository, 'list', async () => [STUDENT]);
+    t.after(() => listMock.mock.restore());
+
+    const result = await studentService.listStudents({}, { limit: 100 });
+    assert.deepEqual(result, [STUDENT]);
+  });
+
+  await t.test('listStudents (principal) is unscoped within the college', async () => {
+    const listMock = t.mock.method(studentRepository, 'list', async () => [STUDENT]);
+    t.after(() => listMock.mock.restore());
+
+    const result = await studentService.listStudents({}, {}, { actorUserId: 'principal-u1', actorRole: 'principal' });
+    assert.deepEqual(result, [STUDENT]);
+  });
+
+  await t.test('listStudents (staff/tutor) returns only their own class\'s roster', async () => {
+    mockTutorClass(t, CLASS_1);
+    const findByClassMock = t.mock.method(studentRepository, 'findByClassId', async () => [STUDENT]);
+    t.after(() => findByClassMock.mock.restore());
+
+    const result = await studentService.listStudents({}, {}, { actorUserId: 'tutor-u1', actorRole: 'staff' });
+    assert.deepEqual(result, [STUDENT]);
+    assert.equal(findByClassMock.mock.calls[0].arguments[1], 'class-1');
+  });
+
+  await t.test('listStudents (staff with no class assigned) returns an empty list, not an error', async () => {
+    mockTutorClass(t, null);
+    const findByClassMock = t.mock.method(studentRepository, 'findByClassId');
+    t.after(() => findByClassMock.mock.restore());
+
+    const result = await studentService.listStudents({}, {}, { actorUserId: 'tutor-u1', actorRole: 'staff' });
+    assert.deepEqual(result, []);
+    assert.equal(findByClassMock.mock.callCount(), 0);
+  });
+
+  await t.test('listStudents (hod) returns only their own department\'s roster', async () => {
+    const deptMock = t.mock.method(staffService, 'findHodDepartmentId', async () => 'dept-1');
+    const findByDeptMock = t.mock.method(studentRepository, 'findByDepartmentId', async () => [STUDENT]);
+    t.after(() => {
+      deptMock.mock.restore();
+      findByDeptMock.mock.restore();
+    });
+
+    const result = await studentService.listStudents({}, {}, { actorUserId: 'hod-u1', actorRole: 'hod', collegeId: 'c1' });
+    assert.deepEqual(result, [STUDENT]);
+    assert.equal(findByDeptMock.mock.calls[0].arguments[1], 'dept-1');
+  });
+
+  await t.test('listStudents (hod not verified as hod of any department) returns an empty list', async () => {
+    const deptMock = t.mock.method(staffService, 'findHodDepartmentId', async () => null);
+    const findByDeptMock = t.mock.method(studentRepository, 'findByDepartmentId');
+    t.after(() => {
+      deptMock.mock.restore();
+      findByDeptMock.mock.restore();
+    });
+
+    const result = await studentService.listStudents({}, {}, { actorUserId: 'u1', actorRole: 'hod', collegeId: 'c1' });
+    assert.deepEqual(result, []);
+    assert.equal(findByDeptMock.mock.callCount(), 0);
+  });
+
+  await t.test('listStudents (unrecognized role) returns an empty list', async () => {
+    const result = await studentService.listStudents({}, {}, { actorUserId: 'u1', actorRole: 'college_admin' });
+    assert.deepEqual(result, []);
+  });
 });

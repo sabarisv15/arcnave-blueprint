@@ -387,6 +387,26 @@ async function findPrincipal(client, collegeId) {
   return principal;
 }
 
+// The reverse direction of findHodForDepartment: given a user, which
+// department (if any) are they the REAL, verifiable hod of. Used by
+// studentService.listStudents to scope an hod's own reads without
+// already knowing a target studentId/department to check against (the
+// forward check — findHodForDepartment/assertIsHodOfDepartment — needs
+// the department up front; a list endpoint doesn't have one yet).
+// Returns null (not a throw) for "not a verifiable hod of anything" —
+// a read-scoping caller treats that as "empty scope," not an error.
+async function findHodDepartmentId(client, collegeId, userId) {
+  const staff = await staffRepository.findByUserId(client, userId);
+  if (staff === null || !staff.department_id) {
+    return null;
+  }
+  const hod = await staffRepository.findByCollegeDepartmentAndRole(client, collegeId, staff.department_id, 'hod');
+  if (hod === null || hod.user_id !== userId) {
+    return null;
+  }
+  return staff.department_id;
+}
+
 // BusinessRules.md's Staff registration chain: Faculty submits ->
 // HOD (of the department named on the request) approves -> Principal
 // gives final approval. Modeled as a 2-step approver_chain, resolved
@@ -594,6 +614,7 @@ module.exports = {
   listStaff,
   findHodForDepartment,
   findPrincipal,
+  findHodDepartmentId,
   submitStaffRegistration,
   approveStaffRegistration,
   rejectStaffRegistration,

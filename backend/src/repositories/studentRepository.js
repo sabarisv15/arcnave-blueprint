@@ -105,6 +105,27 @@ async function findByClassId(client, classId) {
   return result.rows;
 }
 
+// The "students in a department" lookup studentService.listStudents
+// needs to scope an hod's own reads — joins to classes since
+// department_id lives there, not on students directly (same
+// college_notification_channels-style join reasoning staffRepository's
+// findByCollegeDepartmentAndRole already uses for its own users JOIN).
+// No pagination baked in here — same "return everything, let the
+// caller slice" choice findByClassId already makes, for the same
+// reason (Send Alert-style full-roster callers exist for classes;
+// keeping this symmetric avoids two different pagination conventions
+// for what's structurally the same kind of scoped lookup).
+async function findByDepartmentId(client, departmentId) {
+  const result = await client.query(
+    `SELECT students.* FROM students
+     JOIN classes ON classes.id = students.class_id
+     WHERE classes.department_id = $1
+     ORDER BY students.created_at`,
+    [departmentId],
+  );
+  return result.rows;
+}
+
 async function remove(client, id) {
   await client.query('DELETE FROM students WHERE id = $1', [id]);
 }
@@ -118,5 +139,5 @@ async function list(client, { limit = 50, offset = 0 } = {}) {
 }
 
 module.exports = {
-  create, findById, findByRollNo, findByClassId, update, remove, list,
+  create, findById, findByRollNo, findByClassId, findByDepartmentId, update, remove, list,
 };

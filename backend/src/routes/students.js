@@ -155,14 +155,26 @@ function createStudentsRouter() {
     }
   }));
 
+  // GET /students/:id and GET /students are now tutor(own class)/
+  // hod(own department)/principal(own college)-scoped (this session's
+  // own task) — requireAuth still gates "must be logged in"; the real
+  // scope is studentService's job (getStudent/listStudents), same
+  // split students.update/delete already established.
   router.get('/students/:id', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
-    const student = await studentService.getStudent(req.dbClient, req.params.id);
-    if (student === null) {
-      res.status(404).json({ detail: `No student found with id ${JSON.stringify(req.params.id)}` });
-      return;
+    try {
+      const student = await studentService.getStudent(req.dbClient, req.params.id, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role,
+      });
+      if (student === null) {
+        res.status(404).json({ detail: `No student found with id ${JSON.stringify(req.params.id)}` });
+        return;
+      }
+      res.json(student);
+    } catch (err) {
+      if (mapStudentServiceError(err, res)) return;
+      throw err;
     }
-    res.json(student);
   }));
 
   // limit/offset are passed through as-is — studentService/
@@ -174,7 +186,7 @@ function createStudentsRouter() {
     const students = await studentService.listStudents(req.dbClient, {
       limit: rawLimit === undefined ? undefined : Number(rawLimit),
       offset: rawOffset === undefined ? undefined : Number(rawOffset),
-    });
+    }, { actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role, collegeId: req.collegeId });
     res.json(students);
   }));
 

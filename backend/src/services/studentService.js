@@ -190,8 +190,24 @@ async function createStudent(client, {
 
 // null means no student exists with this id — not an error. The
 // route turns that into 404, same as configurationService.getConfiguration.
-async function getStudent(client, id) {
-  return studentRepository.findById(client, id);
+// `actorUserId`/`actorRole` are optional: routes/students.js's GET
+// route always supplies them (reads are now tutor/hod/principal-scoped,
+// same as update/delete — see assertCanModifyStudent), but internal
+// system callers that already know exactly which student they need
+// (financeService.checkScholarshipEligibility, resolved via its own
+// upstream authorization, not a raw students-API read) omit them on
+// purpose and get the unscoped lookup they always have — actorRole
+// undefined skips assertCanModifyStudent entirely rather than being
+// treated as "no role, therefore no access."
+async function getStudent(client, id, { actorUserId, actorRole } = {}) {
+  const student = await studentRepository.findById(client, id);
+  if (student === null) {
+    return null;
+  }
+  if (actorRole !== undefined) {
+    await assertCanModifyStudent(client, student, undefined, { actorUserId, actorRole });
+  }
+  return student;
 }
 
 // hod-of-department check shared by both the source-class and (if
@@ -216,8 +232,14 @@ async function assertIsHodOfDepartment(client, collegeId, departmentId, actorUse
   }
 }
 
-// The real gate behind students.update/students.delete's now-shared
-// ['staff', 'hod', 'principal'] permission entry: each role's actual
+// The real gate behind students.update/students.delete's ['staff',
+// 'hod', 'principal'] permission entry, AND (this session's own task)
+// GET /students/:id's read scope via getStudent above — the same
+// tutor-own-class/hod-own-department/principal-own-college boundary
+// applies whether the actor is reading or writing, so one function
+// covers both; a caller that only needs the read-only check simply
+// passes `undefined` for targetClassId, same as removeStudent already
+// does. Each role's actual
 // authority is scoped to their own boundary, resolved from real
 // assignments (classes.tutor_user_id, staff rows with role='hod'/
 // 'principal') rather than trusted from the JWT role claim alone —
@@ -374,8 +396,39 @@ async function removeStudent(client, id, { userId, actorRole }) {
   return student;
 }
 
-async function listStudents(client, { limit, offset } = {}) {
-  return studentRepository.list(client, { limit, offset });
+// Same optional-actor convention as getStudent: routes/students.js's
+// GET /students always supplies { actorUserId, actorRole, collegeId }
+// (list is now tutor/hod/principal-scoped); reportService's full-college
+// export (already principal-only-gated at its own route) omits them and
+// gets the unscoped list, unchanged from before this session's task.
+// staff/hod scope resolution has no repository-level LIMIT/OFFSET of
+// its own (findByClassId/findByDepartmentId return the whole scoped
+// set, same as findByClassId already did for Send Alert) — sliced here
+// instead, since a tutor's roster or a department's roster is never
+// large enough for that to matter, and it avoids two different
+// pagination conventions for what's structurally the same lookup
+// list()'s own LIMIT/OFFSET already covers for principal/unscoped.
+async function listStudents(client, { limit = 50, offset = 0 } = {}, { actorUserId, actorRole, collegeId } = {}) {
+  if (actorRole === undefined || actorRole === 'principal') {
+    return studentRepository.list(client, { limit, offset });
+  }
+  if (actorRole === 'staff') {
+    const tutorClass = await classRepository.findByTutorUserId(client, actorUserId);
+    if (tutorClass === null) {
+      return [];
+    }
+    const all = await studentRepository.findByClassId(client, tutorClass.id);
+    return all.slice(offset, offset + limit);
+  }
+  if (actorRole === 'hod') {
+    const departmentId = await staffService.findHodDepartmentId(client, collegeId, actorUserId);
+    if (departmentId === null) {
+      return [];
+    }
+    const all = await studentRepository.findByDepartmentId(client, departmentId);
+    return all.slice(offset, offset + limit);
+  }
+  return [];
 }
 
 module.exports = {
@@ -390,4 +443,9 @@ module.exports = {
   updateStudent,
   removeStudent,
   listStudents,
+  // Exported for phoneVerificationService's own tutor/hod/principal
+  // scope check on OTP request/verify (this session's own task) — the
+  // exact same boundary as read/update/delete, reused rather than
+  // reimplemented.
+  assertCanModifyStudent,
 };
