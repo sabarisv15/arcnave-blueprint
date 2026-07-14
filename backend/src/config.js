@@ -77,6 +77,19 @@ module.exports = {
   // specifies this either.
   passwordResetTokenExpireHours: Number(process.env.PASSWORD_RESET_TOKEN_EXPIRE_HOURS) || 2,
 
+  // How long a student/parent phone-verification OTP (services/
+  // phoneVerificationService.js) stays acceptable, and how many
+  // mismatched attempts a single OTP tolerates before it's locked out
+  // (still expires normally either way — a locked-out row is never
+  // deleted, just unusable; requesting a new OTP always works). Short
+  // expiry + a low attempt cap are the only real defense a 6-digit code
+  // has against brute-forcing; no rate limit on requestOtp itself
+  // exists yet (a future gap, not solved here).
+  otp: {
+    expireMinutes: Number(process.env.OTP_EXPIRE_MINUTES) || 10,
+    maxAttempts: Number(process.env.OTP_MAX_ATTEMPTS) || 5,
+  },
+
   // Local-disk root DocumentService writes uploaded files under (see
   // ADR-017). Not a secret — a plain path, defaulted like appName/
   // logLevel rather than required() like the connection strings above.

@@ -4,6 +4,7 @@ const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requirePermission } = require('../middleware/rbac');
 const studentService = require('../services/studentService');
+const phoneVerificationService = require('../services/phoneVerificationService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -73,6 +74,34 @@ function mapStudentServiceError(err, res) {
   }
   if (err instanceof studentService.StudentRollNoConflictError) {
     res.status(409).json({ detail: err.message });
+    return true;
+  }
+  return false;
+}
+
+function mapPhoneVerificationServiceError(err, res) {
+  if (err instanceof phoneVerificationService.PhoneVerificationValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof phoneVerificationService.PhoneVerificationStudentNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof phoneVerificationService.PhoneVerificationNoPhoneOnFileError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof phoneVerificationService.PhoneVerificationNotRequestedError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof phoneVerificationService.PhoneVerificationMaxAttemptsExceededError) {
+    res.status(429).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof phoneVerificationService.PhoneVerificationCodeMismatchError) {
+    res.status(400).json({ detail: err.message });
     return true;
   }
   return false;
@@ -162,6 +191,46 @@ function createStudentsRouter() {
       return;
     }
     res.status(204).end();
+  }));
+
+  // Phone OTP verification (item 1 of this session's task) —
+  // requireAuth, not a narrower permission: any authenticated tenant
+  // user working with a student's profile (front-office staff entering
+  // a parent's number, the student themself via a future self-service
+  // portal) can trigger/verify an OTP for that student's own record;
+  // there's no BusinessRules.md-named narrower actor for this yet,
+  // same reasoning students.js's own plain GET routes already use.
+  router.post('/students/:id/phone-verification/otp', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const result = await phoneVerificationService.requestOtp(
+        req.dbClient,
+        req.params.id,
+        (req.body || {}).target,
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(result);
+    } catch (err) {
+      if (mapPhoneVerificationServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/students/:id/phone-verification/verify', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const student = await phoneVerificationService.verifyOtp(
+        req.dbClient,
+        req.params.id,
+        (req.body || {}).target,
+        (req.body || {}).code,
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.json(student);
+    } catch (err) {
+      if (mapPhoneVerificationServiceError(err, res)) return;
+      throw err;
+    }
   }));
 
   return router;
