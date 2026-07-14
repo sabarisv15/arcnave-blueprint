@@ -453,8 +453,23 @@ async function getFeePayment(client, id) {
 }
 
 // The natural "every fee mark for this student" lookup a student
-// profile screen needs.
-async function listFeePaymentsForStudent(client, studentId) {
+// profile screen needs. actorUserId/actorRole are optional for the
+// same reason studentService.getStudent's are: a future internal
+// caller that already resolved its own authorization can omit them and
+// get the unscoped list — but routes/finance.js's own route always
+// supplies them now (this session's own task: this endpoint used to
+// let any authenticated user pull any student's payment history, which
+// is the real gap being fixed here). Scoping goes through
+// studentService.getStudent/assertCanViewStudent — the same
+// tutor(+faculty-allocation)/hod/principal boundary as every other
+// place student data is reachable, not reimplemented here.
+async function listFeePaymentsForStudent(client, studentId, { actorUserId, actorRole } = {}) {
+  if (actorRole !== undefined) {
+    const student = await studentService.getStudent(client, studentId, { actorUserId, actorRole });
+    if (student === null) {
+      throw new FeePaymentStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
+    }
+  }
   return feePaymentRepository.findByStudentId(client, studentId);
 }
 
@@ -495,8 +510,8 @@ async function removeFeePayment(client, id, { userId } = {}) {
 // rather than throwing: "we don't know this student's income" is a
 // normal, expected state (income collection is optional), not an
 // error the caller needs to handle specially.
-async function checkScholarshipEligibility(client, collegeId, studentId) {
-  const student = await studentService.getStudent(client, studentId);
+async function checkScholarshipEligibility(client, collegeId, studentId, { actorUserId, actorRole } = {}) {
+  const student = await studentService.getStudent(client, studentId, { actorUserId, actorRole });
   if (student === null) {
     throw new ScholarshipStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
   }

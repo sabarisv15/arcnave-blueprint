@@ -21,13 +21,13 @@ function hashOf(code) {
   return crypto.createHash('sha256').update(code).digest('hex');
 }
 
-// requestOtp/verifyOtp now both call studentService.assertCanModifyStudent
+// requestOtp/verifyOtp now both call studentService.assertCanViewStudent
 // (this session's own task: same tutor/hod/principal scope as reads/
 // update/delete) — that resolution logic is already exhaustively tested
 // in student-service.test.js, so every test here that isn't specifically
 // exercising the scope check itself just mocks it as "authorized".
 function mockAuthorized(t) {
-  const m = t.mock.method(studentService, 'assertCanModifyStudent', async () => {});
+  const m = t.mock.method(studentService, 'assertCanViewStudent', async () => {});
   t.after(() => m.mock.restore());
   return m;
 }
@@ -67,7 +67,7 @@ test('phoneVerificationService.requestOtp', async (t) => {
 
   await t.test('rejects a caller outside the student\'s tutor/hod/principal scope, before creating any OTP row', async () => {
     const findMock = t.mock.method(studentRepository, 'findById', async () => ({ id: 'student-1', college_id: 'c1', phone: '+15551234567' }));
-    const authMock = t.mock.method(studentService, 'assertCanModifyStudent', async () => {
+    const authMock = t.mock.method(studentService, 'assertCanViewStudent', async () => {
       throw new studentService.StudentNotAuthorizedError('not allowed');
     });
     const createMock = t.mock.method(studentPhoneOtpRepository, 'create', async () => { throw new Error('must not be called'); });
@@ -150,7 +150,7 @@ test('phoneVerificationService.verifyOtp', async (t) => {
 
   await t.test('rejects a caller outside the student\'s tutor/hod/principal scope, before checking any OTP row', async () => {
     const findStudentMock = t.mock.method(studentRepository, 'findById', async () => ({ id: 'student-1', college_id: 'c1' }));
-    const authMock = t.mock.method(studentService, 'assertCanModifyStudent', async () => {
+    const authMock = t.mock.method(studentService, 'assertCanViewStudent', async () => {
       throw new studentService.StudentNotAuthorizedError('not allowed');
     });
     const findOtpMock = t.mock.method(studentPhoneOtpRepository, 'findLatestActive', async () => { throw new Error('must not be called'); });

@@ -17,11 +17,12 @@
 // rule 1: every AI/business action calls a Business Service, never a
 // repository or a provider adapter directly).
 //
-// requestOtp/verifyOtp are scoped exactly like reads/update/delete
-// (this session's own task): only the tutor of the student's own
-// class, the hod of their department, or the principal of their
-// college may trigger an OTP for that student — enforced via
-// studentService.assertCanModifyStudent, not reimplemented here.
+// requestOtp/verifyOtp use the same shared read-access rule as
+// GET /students(/:id) and Finance's per-student endpoints (this
+// session's own task): the tutor OR any faculty-allocated teacher of
+// the student's class, the hod of their department, or the principal
+// of their college — enforced via studentService.assertCanViewStudent,
+// not reimplemented here.
 
 const crypto = require('crypto');
 const config = require('../config');
@@ -91,13 +92,12 @@ async function requestOtp(client, studentId, target, { actorUserId, actorRole } 
   if (student === null) {
     throw new PhoneVerificationStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
   }
-  // Same tutor(own class)/hod(own department)/principal(own college)
-  // boundary as reads/update/delete (this session's own task) — reused
-  // directly from studentService rather than reimplemented; a
-  // StudentNotAuthorizedError from this call is exactly what
-  // routes/students.js's error mapping already handles for the other
-  // student routes.
-  await studentService.assertCanModifyStudent(client, student, undefined, { actorUserId, actorRole });
+  // Same shared read-access boundary as reads/Finance (this session's
+  // own task) — reused directly from studentService rather than
+  // reimplemented; a StudentNotAuthorizedError from this call is
+  // exactly what routes/students.js's error mapping already handles
+  // for the other student routes.
+  await studentService.assertCanViewStudent(client, student, { actorUserId, actorRole });
 
   const phone = student[target];
   if (!phone) {
@@ -150,7 +150,7 @@ async function verifyOtp(client, studentId, target, code, { actorUserId, actorRo
   if (student === null) {
     throw new PhoneVerificationStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
   }
-  await studentService.assertCanModifyStudent(client, student, undefined, { actorUserId, actorRole });
+  await studentService.assertCanViewStudent(client, student, { actorUserId, actorRole });
 
   const otpRow = await studentPhoneOtpRepository.findLatestActive(client, studentId, target);
   if (otpRow === null) {

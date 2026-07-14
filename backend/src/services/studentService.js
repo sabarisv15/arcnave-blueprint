@@ -17,6 +17,7 @@
 
 const studentRepository = require('../repositories/studentRepository');
 const classRepository = require('../repositories/classRepository');
+const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const staffService = require('./staffService');
 
@@ -191,21 +192,23 @@ async function createStudent(client, {
 // null means no student exists with this id — not an error. The
 // route turns that into 404, same as configurationService.getConfiguration.
 // `actorUserId`/`actorRole` are optional: routes/students.js's GET
-// route always supplies them (reads are now tutor/hod/principal-scoped,
-// same as update/delete — see assertCanModifyStudent), but internal
-// system callers that already know exactly which student they need
-// (financeService.checkScholarshipEligibility, resolved via its own
-// upstream authorization, not a raw students-API read) omit them on
-// purpose and get the unscoped lookup they always have — actorRole
-// undefined skips assertCanModifyStudent entirely rather than being
-// treated as "no role, therefore no access."
+// route and financeService (checkScholarshipEligibility,
+// listFeePaymentsForStudent) all now supply them — every place student
+// data is reachable shares this same scope check (this session's own
+// task). Left optional rather than required so a future internal
+// caller that already resolved its own authorization upstream can
+// still get the unscoped lookup by omitting them — actorRole undefined
+// skips assertCanViewStudent entirely rather than being treated as "no
+// role, therefore no access." reportService's full-college export
+// (listStudents, already principal-only-gated at its own route) is the
+// one remaining caller that does this today.
 async function getStudent(client, id, { actorUserId, actorRole } = {}) {
   const student = await studentRepository.findById(client, id);
   if (student === null) {
     return null;
   }
   if (actorRole !== undefined) {
-    await assertCanModifyStudent(client, student, undefined, { actorUserId, actorRole });
+    await assertCanViewStudent(client, student, { actorUserId, actorRole });
   }
   return student;
 }
@@ -326,6 +329,62 @@ async function assertCanModifyStudent(client, student, targetClassId, { actorUse
   throw new StudentNotAuthorizedError(`role ${JSON.stringify(actorRole)} may not modify students`);
 }
 
+// The one shared read-access rule for every place student data is
+// reachable (GET /students, GET /students/:id, OTP request/verify,
+// Finance's per-student endpoints) — broader than
+// assertCanModifyStudent's write-side rule in exactly one way: a staff
+// member may also view (never edit) a student whose class they teach
+// per faculty_allocation, not only the class they tutor. hod/principal
+// branches are identical to the write-side rule (own department/own
+// college) — reads never need to be MORE restrictive than writes, so
+// there's nothing to loosen there. This function must never be used to
+// gate a mutation — assertCanModifyStudent stays the only gate for
+// create/update/delete, per this session's own constraint.
+async function assertCanViewStudent(client, student, { actorUserId, actorRole }) {
+  const sourceClassId = student.class_id;
+
+  if (actorRole === 'staff') {
+    const tutorClass = await classRepository.findByTutorUserId(client, actorUserId);
+    if (tutorClass !== null && sourceClassId === tutorClass.id) {
+      return;
+    }
+    if (sourceClassId !== null) {
+      const allocations = await facultyAllocationRepository.findByStaffUserId(client, actorUserId);
+      if (allocations.some((allocation) => allocation.class_id === sourceClassId)) {
+        return;
+      }
+    }
+    throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} does not tutor or teach student ${JSON.stringify(student.id)}'s class`);
+  }
+
+  if (actorRole === 'hod') {
+    const sourceClass = sourceClassId ? await classRepository.findById(client, sourceClassId) : null;
+    if (sourceClass === null || !sourceClass.department_id) {
+      throw new StudentNotAuthorizedError(`student ${JSON.stringify(student.id)} has no department-linked class to authorize against`);
+    }
+    await assertIsHodOfDepartment(client, student.college_id, sourceClass.department_id, actorUserId, student.id);
+    return;
+  }
+
+  if (actorRole === 'principal') {
+    let principal;
+    try {
+      principal = await staffService.findPrincipal(client, student.college_id);
+    } catch (err) {
+      if (err instanceof staffService.StaffPrincipalNotFoundError) {
+        throw new StudentNotAuthorizedError(`no principal found for college ${JSON.stringify(student.college_id)}`);
+      }
+      throw err;
+    }
+    if (principal.user_id !== actorUserId) {
+      throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} is not the principal of college ${JSON.stringify(student.college_id)}`);
+    }
+    return;
+  }
+
+  throw new StudentNotAuthorizedError(`role ${JSON.stringify(actorRole)} may not view students`);
+}
+
 async function updateStudent(client, id, fields, { userId, actorRole }) {
   const patch = pickStudentFields(fields);
   const hasChanges = Object.keys(patch).length > 0;
@@ -417,11 +476,27 @@ async function listStudents(client, { limit = 50, offset = 0 } = {}, { actorUser
     return studentRepository.list(client, { limit, offset });
   }
   if (actorRole === 'staff') {
+    // Same broader read rule as assertCanViewStudent: a tutor's own
+    // class PLUS every class this staff member teaches per
+    // faculty_allocation. A student belongs to exactly one class, so
+    // merging distinct classIds' rosters can never produce a duplicate
+    // student row.
+    const classIds = new Set();
     const tutorClass = await classRepository.findByTutorUserId(client, actorUserId);
-    if (tutorClass === null) {
+    if (tutorClass !== null) {
+      classIds.add(tutorClass.id);
+    }
+    const allocations = await facultyAllocationRepository.findByStaffUserId(client, actorUserId);
+    for (const allocation of allocations) {
+      classIds.add(allocation.class_id);
+    }
+    if (classIds.size === 0) {
       return [];
     }
-    const all = await studentRepository.findByClassId(client, tutorClass.id);
+    const rosters = await Promise.all(
+      [...classIds].map((classId) => studentRepository.findByClassId(client, classId)),
+    );
+    const all = rosters.flat().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     return all.slice(offset, offset + limit);
   }
   if (actorRole === 'hod') {
@@ -447,9 +522,12 @@ module.exports = {
   updateStudent,
   removeStudent,
   listStudents,
-  // Exported for phoneVerificationService's own tutor/hod/principal
-  // scope check on OTP request/verify (this session's own task) — the
-  // exact same boundary as read/update/delete, reused rather than
-  // reimplemented.
+  // Write-side gate only (create/update/delete) — never used for reads.
   assertCanModifyStudent,
+  // The one shared read-access rule, exported for reuse by
+  // phoneVerificationService (OTP request/verify) and financeService
+  // (scholarship eligibility, fee payments by student) — every place
+  // student data is reachable applies this same boundary rather than
+  // reimplementing it per-caller.
+  assertCanViewStudent,
 };

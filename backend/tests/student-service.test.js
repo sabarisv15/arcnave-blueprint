@@ -19,6 +19,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const studentRepository = require('../src/repositories/studentRepository');
 const classRepository = require('../src/repositories/classRepository');
+const facultyAllocationRepository = require('../src/repositories/facultyAllocationRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const staffService = require('../src/services/staffService');
 const studentService = require('../src/services/studentService');
@@ -222,6 +223,17 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
 
   function mockFindClassById(t, byId = { 'class-1': CLASS_1, 'class-2': CLASS_2 }) {
     const m = t.mock.method(classRepository, 'findById', async (client, id) => byId[id] || null);
+    t.after(() => m.mock.restore());
+    return m;
+  }
+
+  // assertCanViewStudent's staff branch (read-only rule, this session's
+  // own task) falls through to faculty_allocation only when the tutor
+  // check didn't already match — every test exercising that fallthrough
+  // must mock this too, or the real repository hits a nonexistent
+  // client.query on the {} stub client used throughout this file.
+  function mockFacultyAllocations(t, allocations = []) {
+    const m = t.mock.method(facultyAllocationRepository, 'findByStaffUserId', async () => allocations);
     t.after(() => m.mock.restore());
     return m;
   }
@@ -570,11 +582,30 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
     assert.deepEqual(result, STUDENT);
   });
 
-  await t.test('getStudent is rejected for a tutor of a DIFFERENT class', async () => {
+  await t.test('getStudent is rejected for a tutor of a DIFFERENT class with no faculty allocation either', async () => {
     mockFindStudent(t);
     mockTutorClass(t, CLASS_2);
+    mockFacultyAllocations(t, []);
     await assert.rejects(
       () => studentService.getStudent({}, 'student-id', { actorUserId: 'tutor-u2', actorRole: 'staff' }),
+      studentService.StudentNotAuthorizedError,
+    );
+  });
+
+  await t.test('getStudent succeeds for a staff member faculty-allocated to teach the student\'s class, even without tutoring it', async () => {
+    mockFindStudent(t);
+    mockTutorClass(t, null);
+    mockFacultyAllocations(t, [{ class_id: 'class-1', staff_user_id: 'teacher-u1' }]);
+    const result = await studentService.getStudent({}, 'student-id', { actorUserId: 'teacher-u1', actorRole: 'staff' });
+    assert.deepEqual(result, STUDENT);
+  });
+
+  await t.test('getStudent is rejected for a staff member neither tutoring nor faculty-allocated to the student\'s class', async () => {
+    mockFindStudent(t);
+    mockTutorClass(t, null);
+    mockFacultyAllocations(t, [{ class_id: 'class-2', staff_user_id: 'teacher-u1' }]);
+    await assert.rejects(
+      () => studentService.getStudent({}, 'student-id', { actorUserId: 'teacher-u1', actorRole: 'staff' }),
       studentService.StudentNotAuthorizedError,
     );
   });
@@ -629,6 +660,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
 
   await t.test('listStudents (staff/tutor) returns only their own class\'s roster', async () => {
     mockTutorClass(t, CLASS_1);
+    mockFacultyAllocations(t, []);
     const findByClassMock = t.mock.method(studentRepository, 'findByClassId', async () => [STUDENT]);
     t.after(() => findByClassMock.mock.restore());
 
@@ -637,14 +669,40 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
     assert.equal(findByClassMock.mock.calls[0].arguments[1], 'class-1');
   });
 
-  await t.test('listStudents (staff with no class assigned) returns an empty list, not an error', async () => {
+  await t.test('listStudents (staff with no class assigned and no faculty allocations) returns an empty list, not an error', async () => {
     mockTutorClass(t, null);
+    mockFacultyAllocations(t, []);
     const findByClassMock = t.mock.method(studentRepository, 'findByClassId');
     t.after(() => findByClassMock.mock.restore());
 
     const result = await studentService.listStudents({}, {}, { actorUserId: 'tutor-u1', actorRole: 'staff' });
     assert.deepEqual(result, []);
     assert.equal(findByClassMock.mock.callCount(), 0);
+  });
+
+  await t.test('listStudents (staff with no tutor class but a faculty allocation) returns that class\'s roster', async () => {
+    mockTutorClass(t, null);
+    mockFacultyAllocations(t, [{ class_id: 'class-2', staff_user_id: 'teacher-u1' }]);
+    const findByClassMock = t.mock.method(studentRepository, 'findByClassId', async () => [STUDENT]);
+    t.after(() => findByClassMock.mock.restore());
+
+    const result = await studentService.listStudents({}, {}, { actorUserId: 'teacher-u1', actorRole: 'staff' });
+    assert.deepEqual(result, [STUDENT]);
+    assert.equal(findByClassMock.mock.calls[0].arguments[1], 'class-2');
+  });
+
+  await t.test('listStudents (staff tutoring one class and faculty-allocated to another) merges both rosters', async () => {
+    mockTutorClass(t, CLASS_1);
+    mockFacultyAllocations(t, [{ class_id: 'class-2', staff_user_id: 'tutor-u1' }]);
+    const OTHER_STUDENT = { id: 'student-2', college_id: 'c1', class_id: 'class-2', created_at: '2024-02-01' };
+    const findByClassMock = t.mock.method(studentRepository, 'findByClassId', async (client, classId) => (
+      classId === 'class-1' ? [{ ...STUDENT, created_at: '2024-01-01' }] : [OTHER_STUDENT]
+    ));
+    t.after(() => findByClassMock.mock.restore());
+
+    const result = await studentService.listStudents({}, {}, { actorUserId: 'tutor-u1', actorRole: 'staff' });
+    assert.equal(result.length, 2);
+    assert.deepEqual(new Set(result.map((s) => s.id)), new Set(['student-id', 'student-2']));
   });
 
   await t.test('listStudents (hod) returns only their own department\'s roster', async () => {

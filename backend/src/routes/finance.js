@@ -5,6 +5,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requirePermission } = require('../middleware/rbac');
 const financeService = require('../services/financeService');
 const staffService = require('../services/staffService');
+const studentService = require('../services/studentService');
 const workflowService = require('../services/workflowService');
 
 function requireResolvedTenant(req, res) {
@@ -129,6 +130,14 @@ function mapFinanceServiceError(err, res) {
   }
   if (err instanceof workflowService.WorkflowRequestValidationError) {
     res.status(400).json({ detail: err.message });
+    return true;
+  }
+  // The shared student read-access scope check (studentService.
+  // assertCanViewStudent, via getStudent) surfaces this for both
+  // per-student Finance routes below — same mapping routes/students.js
+  // already uses for it.
+  if (err instanceof studentService.StudentNotAuthorizedError) {
+    res.status(403).json({ detail: err.message });
     return true;
   }
   return false;
@@ -289,7 +298,12 @@ function createFinanceRouter() {
   // payments list (no such lookup exists on financeService either,
   // same "don't wrap what nothing needs yet" restraint
   // facultyAllocation.js's own list route documents for its own
-  // table).
+  // table). requireAuth only gates "must be logged in" — the real
+  // scope (tutor/faculty-allocated teacher of the student's own class,
+  // hod of their department, principal of their college) is
+  // financeService/studentService's job (this session's own task: this
+  // route used to let any authenticated user pull any student's
+  // payment history).
   router.get('/finance/fee-payments', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { student_id: studentId } = req.query;
@@ -297,19 +311,33 @@ function createFinanceRouter() {
       res.status(400).json({ detail: 'student_id query parameter is required' });
       return;
     }
-    const payments = await financeService.listFeePaymentsForStudent(req.dbClient, studentId);
-    res.json(payments);
+    try {
+      const payments = await financeService.listFeePaymentsForStudent(req.dbClient, studentId, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role,
+      });
+      res.json(payments);
+    } catch (err) {
+      if (mapFinanceServiceError(err, res)) return;
+      throw err;
+    }
   }));
 
   // BusinessRules.md Finance / this session's own task: scholarship
   // eligibility from a student's annual_income against this tenant's
   // configured threshold. requireAuth, not the principal-mapped
   // permission gate the write routes above use — this is a read, same
-  // reasoning GET /finance/fee-structures already uses.
+  // reasoning GET /finance/fee-structures already uses; the real scope
+  // (same tutor/faculty-allocated teacher/hod/principal boundary as
+  // every other student-data read) is enforced inside
+  // checkScholarshipEligibility via studentService, not this route
+  // (this session's own task: this route used to let any authenticated
+  // user pull any student's scholarship data).
   router.get('/finance/students/:id/scholarship-eligibility', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
-      const result = await financeService.checkScholarshipEligibility(req.dbClient, req.collegeId, req.params.id);
+      const result = await financeService.checkScholarshipEligibility(req.dbClient, req.collegeId, req.params.id, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role,
+      });
       res.json(result);
     } catch (err) {
       if (mapFinanceServiceError(err, res)) return;
