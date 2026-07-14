@@ -105,8 +105,15 @@ const PERMISSION_ROLES = {
   // none of whom are ever a class's tutor_user_id in practice, from
   // reaching the route at all.
   'students.create': ['staff'],
-  'students.update': ['principal'],
-  'students.delete': ['principal'],
+  // students.update/delete changed from ['principal'] to
+  // ['staff', 'hod', 'principal']: each is scoped to their own
+  // boundary (tutor -> own class, hod -> own department, principal ->
+  // own college) by studentService.assertCanModifyStudent, same
+  // "role check here only narrows who reaches the route; the real
+  // scope check lives in the service" split students.create already
+  // established.
+  'students.update': ['staff', 'hod', 'principal'],
+  'students.delete': ['staff', 'hod', 'principal'],
 
   // routes/timetablePeriods.js
   'timetable_periods.create': ['principal'],

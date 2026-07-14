@@ -18,6 +18,7 @@
 const studentRepository = require('../repositories/studentRepository');
 const classRepository = require('../repositories/classRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
+const staffService = require('./staffService');
 
 // Missing roll_no or full_name — StudentEditorModal.jsx marks both
 // required and blocks its own "Next" step without them. Raised before
@@ -57,6 +58,17 @@ class StudentClassMismatchError extends Error {}
 // already guards, and a future change to how class_id is resolved
 // should fail the same clean way this file's other FK violations do.
 class StudentClassNotFoundError extends Error {}
+
+// updateStudent/removeStudent called by an actor outside their own
+// scope: staff must be the tutor of the student's (current, and if
+// changing, target) class; hod must be the hod of that class's (both
+// classes', if changing) department; principal always qualifies for
+// any student in their own college (RLS already guarantees the
+// student is in-tenant, so no extra college check is needed beyond
+// confirming the actor really is the college's principal). Any other
+// role, or a role/scope mismatch, gets this one error — a caller only
+// needs to know "not allowed," not which of the three checks failed.
+class StudentNotAuthorizedError extends Error {}
 
 // The fields this service accepts for create/update, deliberately
 // listed here rather than trusting studentRepository's own COLUMNS
@@ -182,27 +194,145 @@ async function getStudent(client, id) {
   return studentRepository.findById(client, id);
 }
 
-async function updateStudent(client, id, fields, { userId }) {
+// hod-of-department check shared by both the source-class and (if
+// changing) target-class halves of assertCanModifyStudent's 'hod'
+// branch below. staffService.findHodForDepartment throws
+// StaffHodNotFoundError when nobody holds 'hod' for this department at
+// all — collapsed into the same StudentNotAuthorizedError as an actual
+// identity mismatch, since either way this actor isn't a verifiable
+// hod of it.
+async function assertIsHodOfDepartment(client, collegeId, departmentId, actorUserId, studentId) {
+  let hod;
+  try {
+    hod = await staffService.findHodForDepartment(client, collegeId, departmentId);
+  } catch (err) {
+    if (err instanceof staffService.StaffHodNotFoundError) {
+      throw new StudentNotAuthorizedError(`no hod found for department ${JSON.stringify(departmentId)}`);
+    }
+    throw err;
+  }
+  if (hod.user_id !== actorUserId) {
+    throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} is not the hod of department ${JSON.stringify(departmentId)}, required to modify student ${JSON.stringify(studentId)}`);
+  }
+}
+
+// The real gate behind students.update/students.delete's now-shared
+// ['staff', 'hod', 'principal'] permission entry: each role's actual
+// authority is scoped to their own boundary, resolved from real
+// assignments (classes.tutor_user_id, staff rows with role='hod'/
+// 'principal') rather than trusted from the JWT role claim alone —
+// same "resolve the real assignment, don't just check a role string"
+// discipline academicService.js/staffService.js already use for
+// tutor/hod/principal identity elsewhere. `targetClassId` is
+// `undefined` for removeStudent (no class is changing) and for
+// updateStudent calls that don't touch classId; `null` is a real,
+// valid "unassign from any class" value, distinct from undefined.
+//
+// staff (tutor): may act on a student only while that student's
+// CURRENT class is their own, and — if classId is part of the patch —
+// only if the NEW value is also their own single class (classes.tutor_user_id
+// is UNIQUE, so a tutor never has a second class to move a student
+// into; any classId change at all is therefore rejected in practice,
+// including unassigning to null).
+//
+// hod: may act on a student only while that student's CURRENT class
+// belongs to their own department; if classId is changing to a
+// DIFFERENT, non-null class, that target class's department must also
+// be theirs. Changing classId to null (leaving the department
+// entirely) is allowed without a target-side check — there is no
+// target department to be hod of.
+//
+// principal: always authorized for any student already reachable in
+// this session (RLS already guarantees same-college), once verified as
+// the college's real principal. A non-null target classId still must
+// resolve to a real class (StudentClassNotFoundError, not a silent
+// pass) — the one existence check nothing else in this branch performs.
+async function assertCanModifyStudent(client, student, targetClassId, { actorUserId, actorRole }) {
+  const sourceClassId = student.class_id;
+
+  if (actorRole === 'staff') {
+    const tutorClass = await classRepository.findByTutorUserId(client, actorUserId);
+    if (tutorClass === null || sourceClassId !== tutorClass.id
+      || (targetClassId !== undefined && targetClassId !== tutorClass.id)) {
+      throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} does not tutor student ${JSON.stringify(student.id)}'s class`);
+    }
+    return;
+  }
+
+  if (actorRole === 'hod') {
+    const sourceClass = sourceClassId ? await classRepository.findById(client, sourceClassId) : null;
+    if (sourceClass === null || !sourceClass.department_id) {
+      throw new StudentNotAuthorizedError(`student ${JSON.stringify(student.id)} has no department-linked class to authorize against`);
+    }
+    await assertIsHodOfDepartment(client, student.college_id, sourceClass.department_id, actorUserId, student.id);
+
+    if (targetClassId !== undefined && targetClassId !== null && targetClassId !== sourceClassId) {
+      const targetClass = await classRepository.findById(client, targetClassId);
+      if (targetClass === null) {
+        throw new StudentClassNotFoundError(`classId ${JSON.stringify(targetClassId)} does not exist`);
+      }
+      if (!targetClass.department_id) {
+        throw new StudentNotAuthorizedError(`class ${JSON.stringify(targetClassId)} has no department, cannot verify hod authorization`);
+      }
+      await assertIsHodOfDepartment(client, student.college_id, targetClass.department_id, actorUserId, student.id);
+    }
+    return;
+  }
+
+  if (actorRole === 'principal') {
+    let principal;
+    try {
+      principal = await staffService.findPrincipal(client, student.college_id);
+    } catch (err) {
+      if (err instanceof staffService.StaffPrincipalNotFoundError) {
+        throw new StudentNotAuthorizedError(`no principal found for college ${JSON.stringify(student.college_id)}`);
+      }
+      throw err;
+    }
+    if (principal.user_id !== actorUserId) {
+      throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} is not the principal of college ${JSON.stringify(student.college_id)}`);
+    }
+    if (targetClassId !== undefined && targetClassId !== null && targetClassId !== sourceClassId) {
+      const targetClass = await classRepository.findById(client, targetClassId);
+      if (targetClass === null) {
+        throw new StudentClassNotFoundError(`classId ${JSON.stringify(targetClassId)} does not exist`);
+      }
+    }
+    return;
+  }
+
+  throw new StudentNotAuthorizedError(`role ${JSON.stringify(actorRole)} may not modify students`);
+}
+
+async function updateStudent(client, id, fields, { userId, actorRole }) {
   const patch = pickStudentFields(fields);
   const hasChanges = Object.keys(patch).length > 0;
 
-  let student;
+  const student = await studentRepository.findById(client, id);
+  if (student === null) {
+    return null;
+  }
+
+  await assertCanModifyStudent(client, student, patch.classId, { actorUserId: userId, actorRole });
+
+  let updated;
   try {
-    student = await studentRepository.update(client, id, patch);
+    updated = await studentRepository.update(client, id, patch);
   } catch (err) {
     if (err.code === '23505') {
       throw new StudentRollNoConflictError(`roll_no ${JSON.stringify(patch.rollNo)} already exists for this college`);
+    }
+    if (err.code === '23503' && err.constraint === 'students_class_id_fkey') {
+      throw new StudentClassNotFoundError(`classId ${JSON.stringify(patch.classId)} does not exist`);
     }
     throw err;
   }
 
   // hasChanges guards the no-op case (fields had nothing recognized —
   // studentRepository.update falls back to a plain findById then).
-  // student !== null guards the id-not-found case. Either way, no row
-  // was actually changed, so no audit entry.
-  if (hasChanges && student !== null) {
+  if (hasChanges && updated !== null) {
     await auditLogRepository.createAuditLogEntry(client, {
-      collegeId: student.college_id,
+      collegeId: updated.college_id,
       userId,
       action: 'student_updated',
       entity: 'students',
@@ -211,20 +341,24 @@ async function updateStudent(client, id, fields, { userId }) {
     });
   }
 
-  return student;
+  return updated;
 }
 
 // Looks the student up first, both to get collegeId for the audit
 // entry (removeStudent's signature, per .ai/TASK.md, takes no
 // collegeId of its own) and to avoid logging a removal for an id that
-// never existed. Still a hard DELETE, not a soft-delete: the ERD has
-// no soft-delete column yet — unchanged open question from the first
-// slice, not resolved here either.
-async function removeStudent(client, id, { userId }) {
+// never existed — and now also to run assertCanModifyStudent against
+// its real class_id/college_id before the DELETE, same as updateStudent.
+// Still a hard DELETE, not a soft-delete: the ERD has no soft-delete
+// column yet — unchanged open question from the first slice, not
+// resolved here either.
+async function removeStudent(client, id, { userId, actorRole }) {
   const student = await studentRepository.findById(client, id);
   if (student === null) {
     return null;
   }
+
+  await assertCanModifyStudent(client, student, undefined, { actorUserId: userId, actorRole });
 
   await studentRepository.remove(client, id);
 
@@ -250,6 +384,7 @@ module.exports = {
   StudentNotClassTutorError,
   StudentClassMismatchError,
   StudentClassNotFoundError,
+  StudentNotAuthorizedError,
   createStudent,
   getStudent,
   updateStudent,

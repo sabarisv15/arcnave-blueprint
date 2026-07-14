@@ -89,6 +89,10 @@ function mapStudentServiceError(err, res) {
     res.status(404).json({ detail: err.message });
     return true;
   }
+  if (err instanceof studentService.StudentNotAuthorizedError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -123,18 +127,18 @@ function mapPhoneVerificationServiceError(err, res) {
 function createStudentsRouter() {
   const router = express.Router();
 
-  // POST /students: requirePermission('students.create') now maps to
-  // ['staff'] (middleware/permissions.js), and studentService.createStudent
-  // itself enforces "own class only" by resolving classes.tutor_user_id
-  // = actorUserId — see that function's own comment. PUT/DELETE remain
-  // the older conservative default (requirePermission('students.update'/
-  // 'delete') -> ['principal']) — BusinessRules.md's real rule for
-  // edits ("only the assigned Class Tutor may edit; HOD override for
-  // profile edits") still can't be enforced correctly for update/delete
-  // (no per-field HOD-override modeling yet), unlike create, which this
-  // session's task specifically resolved. Any authenticated tenant user
-  // may still read. Must be revisited once update/delete get the same
-  // treatment.
+  // POST/PUT/DELETE /students: requirePermission maps each to the
+  // roles that can EVER qualify (['staff'] for create; ['staff', 'hod',
+  // 'principal'] for update/delete — middleware/permissions.js). The
+  // real scope check — tutor -> own class, hod -> own department,
+  // principal -> own college — is studentService's job
+  // (createStudent/assertCanModifyStudent), resolved from real
+  // classes.tutor_user_id/staff role assignments, never trusted from
+  // the role claim alone. req.jwtClaims.role is passed through as
+  // actorRole for exactly that resolution — it is itself trustworthy
+  // (auth middleware already verified the JWT signature before this
+  // route ever runs), just not sufficient on its own. Any authenticated
+  // tenant user may still read.
 
   router.post('/students', requirePermission('students.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
@@ -181,7 +185,7 @@ function createStudentsRouter() {
         req.dbClient,
         req.params.id,
         bodyToServiceFields(req.body || {}),
-        { userId: req.jwtClaims.sub },
+        { userId: req.jwtClaims.sub, actorRole: req.jwtClaims.role },
       );
       if (student === null) {
         res.status(404).json({ detail: `No student found with id ${JSON.stringify(req.params.id)}` });
@@ -196,12 +200,21 @@ function createStudentsRouter() {
 
   router.delete('/students/:id', requirePermission('students.delete'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
-    const student = await studentService.removeStudent(req.dbClient, req.params.id, { userId: req.jwtClaims.sub });
-    if (student === null) {
-      res.status(404).json({ detail: `No student found with id ${JSON.stringify(req.params.id)}` });
-      return;
+    try {
+      const student = await studentService.removeStudent(
+        req.dbClient,
+        req.params.id,
+        { userId: req.jwtClaims.sub, actorRole: req.jwtClaims.role },
+      );
+      if (student === null) {
+        res.status(404).json({ detail: `No student found with id ${JSON.stringify(req.params.id)}` });
+        return;
+      }
+      res.status(204).end();
+    } catch (err) {
+      if (mapStudentServiceError(err, res)) return;
+      throw err;
     }
-    res.status(204).end();
   }));
 
   // Phone OTP verification (item 1 of this session's task) —

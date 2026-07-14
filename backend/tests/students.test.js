@@ -80,13 +80,17 @@ function hostFor(subdomain) {
   return `${subdomain}.arcnave.test`;
 }
 
-// POST /students is now tutor-only, own-class-only (this session's own
-// task): staffuser is seeded as the tutor of a real class row so every
-// test below that creates a student through the normal path has
-// someone allowed to do it. staffusernoclass is a second staff account
-// with no class assigned, for the "staff but not a tutor" 403 case —
-// distinct from principaluser/hoduser, who are rejected by role alone
-// before studentService ever resolves a class.
+// POST /students is tutor-only, own-class-only; PUT/DELETE are now
+// tutor(own class)/hod(own department)/principal(own college) scoped
+// (this session's own task). staffuser tutors classA (deptA);
+// staffusernoclass has no class; hoduser is deptA's real HOD (a real
+// `staff` row, not just users.role — staffService.findHodForDepartment/
+// findPrincipal JOIN staff to users, so a bare users row isn't enough
+// to be resolved as "the HOD"/"the Principal", same reasoning
+// studentService.assertCanModifyStudent resolves real assignments
+// rather than trusting the JWT role claim alone). hoduser2 is deptB's
+// HOD, with no relationship to classA's students — the "wrong
+// department" negative case.
 async function seedTenant(adminPool, label) {
   const suffix = crypto.randomUUID().slice(0, 8);
   const college = { collegeId: `stu${label}${suffix}`, subdomain: `stutenant${label}${suffix}` };
@@ -96,9 +100,9 @@ async function seedTenant(adminPool, label) {
   );
   const passwordHash = await security.hashPassword(PASSWORD);
   const userIds = {};
-  for (const role of ['principal', 'staff', 'staffnoclass']) {
+  for (const role of ['principal', 'hod', 'hod2', 'staff', 'staffnoclass']) {
     const username = role === 'staffnoclass' ? 'staffusernoclass' : `${role}user`;
-    const dbRole = role === 'staffnoclass' ? 'staff' : role;
+    const dbRole = role.startsWith('hod') ? 'hod' : (role === 'staffnoclass' ? 'staff' : role);
     // eslint-disable-next-line no-await-in-loop
     const result = await adminPool.query(
       `INSERT INTO users (college_id, username, email, password_hash, role, is_active)
@@ -109,11 +113,34 @@ async function seedTenant(adminPool, label) {
     userIds[role] = result.rows[0].id;
   }
 
+  const deptAResult = await adminPool.query(
+    'INSERT INTO departments (college_id, name) VALUES ($1, $2) RETURNING id',
+    [college.collegeId, `Dept A ${label}`],
+  );
+  const deptBResult = await adminPool.query(
+    'INSERT INTO departments (college_id, name) VALUES ($1, $2) RETURNING id',
+    [college.collegeId, `Dept B ${label}`],
+  );
+  college.departmentId = deptAResult.rows[0].id;
+
+  await adminPool.query(
+    'INSERT INTO staff (college_id, user_id, full_name, department_id) VALUES ($1, $2, $3, $4)',
+    [college.collegeId, userIds.hod, 'Hod User', deptAResult.rows[0].id],
+  );
+  await adminPool.query(
+    'INSERT INTO staff (college_id, user_id, full_name, department_id) VALUES ($1, $2, $3, $4)',
+    [college.collegeId, userIds.hod2, 'Hod User Two', deptBResult.rows[0].id],
+  );
+  await adminPool.query(
+    'INSERT INTO staff (college_id, user_id, full_name) VALUES ($1, $2, $3)',
+    [college.collegeId, userIds.principal, 'Principal User'],
+  );
+
   const classResult = await adminPool.query(
-    `INSERT INTO classes (college_id, class_name, tutor_user_id)
-     VALUES ($1, $2, $3)
+    `INSERT INTO classes (college_id, class_name, tutor_user_id, department_id)
+     VALUES ($1, $2, $3, $4)
      RETURNING id`,
-    [college.collegeId, `Class ${label}`, userIds.staff],
+    [college.collegeId, `Class ${label}`, userIds.staff, deptAResult.rows[0].id],
   );
   college.classId = classResult.rows[0].id;
 
@@ -123,7 +150,9 @@ async function seedTenant(adminPool, label) {
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM students WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM staff WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM classes WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM departments WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM colleges WHERE college_id = $1', [college.collegeId]);
@@ -334,6 +363,95 @@ test('students', async (t) => {
   await t.test('read requires authentication', async () => {
     const resp = await get(baseUrl, '/api/v1/students', headersFor(collegeA));
     assert.equal(resp.status, 401);
+  });
+
+  // --- Update/delete scope (tutor own class / hod own department / principal own college) ---
+
+  await t.test('update is rejected for a staff member who does not tutor the student\'s class', async () => {
+    const staffToken = await login(collegeA, 'staffuser');
+    const created = await post(baseUrl, '/api/v1/students', headersFor(collegeA, staffToken), {
+      roll_no: 'SCOPE1', full_name: 'Scope Test One',
+    });
+
+    const otherStaffToken = await login(collegeA, 'staffusernoclass');
+    const resp = await put(baseUrl, `/api/v1/students/${created.body.id}`, headersFor(collegeA, otherStaffToken), {
+      full_name: 'Hijacked',
+    });
+    assert.equal(resp.status, 403);
+  });
+
+  await t.test('update succeeds for the hod of the student\'s class\'s department', async () => {
+    const staffToken = await login(collegeA, 'staffuser');
+    const created = await post(baseUrl, '/api/v1/students', headersFor(collegeA, staffToken), {
+      roll_no: 'SCOPE2', full_name: 'Scope Test Two',
+    });
+
+    const hodToken = await login(collegeA, 'hoduser');
+    const resp = await put(baseUrl, `/api/v1/students/${created.body.id}`, headersFor(collegeA, hodToken), {
+      full_name: 'Updated By Hod',
+    });
+    assert.equal(resp.status, 200);
+    assert.equal(resp.body.full_name, 'Updated By Hod');
+  });
+
+  await t.test('update is rejected for the hod of a DIFFERENT department', async () => {
+    const staffToken = await login(collegeA, 'staffuser');
+    const created = await post(baseUrl, '/api/v1/students', headersFor(collegeA, staffToken), {
+      roll_no: 'SCOPE3', full_name: 'Scope Test Three',
+    });
+
+    const otherHodToken = await login(collegeA, 'hod2user');
+    const resp = await put(baseUrl, `/api/v1/students/${created.body.id}`, headersFor(collegeA, otherHodToken), {
+      full_name: 'Hijacked',
+    });
+    assert.equal(resp.status, 403);
+  });
+
+  await t.test('update succeeds for the principal of the student\'s own college', async () => {
+    const staffToken = await login(collegeA, 'staffuser');
+    const created = await post(baseUrl, '/api/v1/students', headersFor(collegeA, staffToken), {
+      roll_no: 'SCOPE4', full_name: 'Scope Test Four',
+    });
+
+    const principalToken = await login(collegeA, 'principaluser');
+    const resp = await put(baseUrl, `/api/v1/students/${created.body.id}`, headersFor(collegeA, principalToken), {
+      full_name: 'Updated By Principal',
+    });
+    assert.equal(resp.status, 200);
+    assert.equal(resp.body.full_name, 'Updated By Principal');
+  });
+
+  await t.test('delete is rejected for a staff member who does not tutor the student\'s class', async () => {
+    const staffToken = await login(collegeA, 'staffuser');
+    const created = await post(baseUrl, '/api/v1/students', headersFor(collegeA, staffToken), {
+      roll_no: 'SCOPE5', full_name: 'Scope Test Five',
+    });
+
+    const otherStaffToken = await login(collegeA, 'staffusernoclass');
+    const resp = await del(baseUrl, `/api/v1/students/${created.body.id}`, headersFor(collegeA, otherStaffToken));
+    assert.equal(resp.status, 403);
+  });
+
+  await t.test('delete succeeds for the hod of the student\'s class\'s department', async () => {
+    const staffToken = await login(collegeA, 'staffuser');
+    const created = await post(baseUrl, '/api/v1/students', headersFor(collegeA, staffToken), {
+      roll_no: 'SCOPE6', full_name: 'Scope Test Six',
+    });
+
+    const hodToken = await login(collegeA, 'hoduser');
+    const resp = await del(baseUrl, `/api/v1/students/${created.body.id}`, headersFor(collegeA, hodToken));
+    assert.equal(resp.status, 204);
+  });
+
+  await t.test('delete succeeds for the principal of the student\'s own college', async () => {
+    const staffToken = await login(collegeA, 'staffuser');
+    const created = await post(baseUrl, '/api/v1/students', headersFor(collegeA, staffToken), {
+      roll_no: 'SCOPE7', full_name: 'Scope Test Seven',
+    });
+
+    const principalToken = await login(collegeA, 'principaluser');
+    const resp = await del(baseUrl, `/api/v1/students/${created.body.id}`, headersFor(collegeA, principalToken));
+    assert.equal(resp.status, 204);
   });
 
   // --- Cross-tenant isolation ---
