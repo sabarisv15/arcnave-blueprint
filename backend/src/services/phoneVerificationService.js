@@ -16,6 +16,12 @@
 // query mechanics, notificationService owns the actual send (CLAUDE.md
 // rule 1: every AI/business action calls a Business Service, never a
 // repository or a provider adapter directly).
+//
+// requestOtp/verifyOtp are scoped exactly like reads/update/delete
+// (this session's own task): only the tutor of the student's own
+// class, the hod of their department, or the principal of their
+// college may trigger an OTP for that student — enforced via
+// studentService.assertCanModifyStudent, not reimplemented here.
 
 const crypto = require('crypto');
 const config = require('../config');
@@ -23,6 +29,7 @@ const studentRepository = require('../repositories/studentRepository');
 const studentPhoneOtpRepository = require('../repositories/studentPhoneOtpRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const notificationService = require('./notificationService');
+const studentService = require('./studentService');
 
 // The only two students columns an OTP can ever target — phone/
 // phone_verified is the student's own number, parent_phone/
@@ -77,13 +84,20 @@ function generateCode() {
 // OTP for the same student+target is simply superseded (never deleted
 // or explicitly invalidated) — verifyOtp always matches the most
 // recently created row, so the old one just stops being reachable.
-async function requestOtp(client, studentId, target, { actorUserId } = {}) {
+async function requestOtp(client, studentId, target, { actorUserId, actorRole } = {}) {
   assertValidTarget(target);
 
   const student = await studentRepository.findById(client, studentId);
   if (student === null) {
     throw new PhoneVerificationStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
   }
+  // Same tutor(own class)/hod(own department)/principal(own college)
+  // boundary as reads/update/delete (this session's own task) — reused
+  // directly from studentService rather than reimplemented; a
+  // StudentNotAuthorizedError from this call is exactly what
+  // routes/students.js's error mapping already handles for the other
+  // student routes.
+  await studentService.assertCanModifyStudent(client, student, undefined, { actorUserId, actorRole });
 
   const phone = student[target];
   if (!phone) {
@@ -126,7 +140,7 @@ async function requestOtp(client, studentId, target, { actorUserId } = {}) {
 // studentPhoneOtpRepository.findLatestActive, which never matches an
 // already-consumed row again), and flips the corresponding
 // students.phone_verified/parent_phone_verified column to true.
-async function verifyOtp(client, studentId, target, code, { actorUserId } = {}) {
+async function verifyOtp(client, studentId, target, code, { actorUserId, actorRole } = {}) {
   assertValidTarget(target);
   if (!code) {
     throw new PhoneVerificationValidationError('code is required');
@@ -136,6 +150,7 @@ async function verifyOtp(client, studentId, target, code, { actorUserId } = {}) 
   if (student === null) {
     throw new PhoneVerificationStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
   }
+  await studentService.assertCanModifyStudent(client, student, undefined, { actorUserId, actorRole });
 
   const otpRow = await studentPhoneOtpRepository.findLatestActive(client, studentId, target);
   if (otpRow === null) {

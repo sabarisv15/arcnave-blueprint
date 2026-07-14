@@ -121,6 +121,10 @@ function mapPhoneVerificationServiceError(err, res) {
     res.status(400).json({ detail: err.message });
     return true;
   }
+  if (err instanceof studentService.StudentNotAuthorizedError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -229,13 +233,10 @@ function createStudentsRouter() {
     }
   }));
 
-  // Phone OTP verification (item 1 of this session's task) —
-  // requireAuth, not a narrower permission: any authenticated tenant
-  // user working with a student's profile (front-office staff entering
-  // a parent's number, the student themself via a future self-service
-  // portal) can trigger/verify an OTP for that student's own record;
-  // there's no BusinessRules.md-named narrower actor for this yet,
-  // same reasoning students.js's own plain GET routes already use.
+  // Phone OTP verification — requireAuth gates "must be logged in";
+  // phoneVerificationService.requestOtp/verifyOtp enforce the real
+  // tutor(own class)/hod(own department)/principal(own college) scope
+  // (this session's own task, same boundary as reads/update/delete).
   router.post('/students/:id/phone-verification/otp', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
@@ -243,7 +244,7 @@ function createStudentsRouter() {
         req.dbClient,
         req.params.id,
         (req.body || {}).target,
-        { actorUserId: req.jwtClaims.sub },
+        { actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role },
       );
       res.status(201).json(result);
     } catch (err) {
@@ -260,7 +261,7 @@ function createStudentsRouter() {
         req.params.id,
         (req.body || {}).target,
         (req.body || {}).code,
-        { actorUserId: req.jwtClaims.sub },
+        { actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role },
       );
       res.json(student);
     } catch (err) {
