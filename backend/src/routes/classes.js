@@ -6,6 +6,7 @@ const { requireAuth, requirePermission } = require('../middleware/rbac');
 const academicService = require('../services/academicService');
 const staffService = require('../services/staffService');
 const workflowService = require('../services/workflowService');
+const visibilityService = require('../services/visibilityService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -109,6 +110,10 @@ function mapAcademicServiceError(err, res) {
     res.status(403).json({ detail: err.message });
     return true;
   }
+  if (err instanceof visibilityService.VisibilityForbiddenError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -152,20 +157,48 @@ function createClassesRouter() {
       res.status(404).json({ detail: `No class found with id ${JSON.stringify(req.params.id)}` });
       return;
     }
+    try {
+      await visibilityService.assertCanViewClass(req.dbClient, cls.id, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role, collegeId: req.collegeId,
+      });
+    } catch (err) {
+      if (mapAcademicServiceError(err, res)) return;
+      throw err;
+    }
     res.json(cls);
   }));
 
   // limit/offset are passed through as-is — academicService/
   // classRepository already default them to 50/0, not re-implemented
-  // here.
+  // here — for principal/internal callers, where visibilityService.
+  // getVisibleClassIds returns null (unrestricted). staff/hod are
+  // scoped first (this session's own task: this route used to return
+  // every class in the college to anyone authenticated) via
+  // getVisibleClassIds, then paginated in JS the same way
+  // studentService.listStudents already paginates its own
+  // staff/hod-scoped rosters — a tutor's or a department's class list
+  // is never large enough for that to matter.
   router.get('/classes', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { limit: rawLimit, offset: rawOffset } = req.query;
-    const classes = await academicService.listClasses(req.dbClient, {
-      limit: rawLimit === undefined ? undefined : Number(rawLimit),
-      offset: rawOffset === undefined ? undefined : Number(rawOffset),
-    });
-    res.json(classes);
+    const limit = rawLimit === undefined ? 50 : Number(rawLimit);
+    const offset = rawOffset === undefined ? 0 : Number(rawOffset);
+    const actor = { actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role, collegeId: req.collegeId };
+
+    const visibleIds = await visibilityService.getVisibleClassIds(req.dbClient, actor);
+    if (visibleIds === null) {
+      const classes = await academicService.listClasses(req.dbClient, { limit, offset });
+      res.json(classes);
+      return;
+    }
+    if (visibleIds.length === 0) {
+      res.json([]);
+      return;
+    }
+    const classes = (await Promise.all(visibleIds.map((id) => academicService.getClass(req.dbClient, id))))
+      .filter((cls) => cls !== null)
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    res.json(classes.slice(offset, offset + limit));
   }));
 
   router.put('/classes/:id', requirePermission('classes.update'), asyncHandler(async (req, res) => {

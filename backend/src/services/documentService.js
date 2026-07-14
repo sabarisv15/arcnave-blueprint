@@ -29,6 +29,7 @@ const documentRepository = require('../repositories/documentRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const fileStorage = require('../storage/fileStorage');
 const templateMerger = require('../generators/templateMerger');
+const visibilityService = require('./visibilityService');
 
 // Missing studentId, docType, fileName, mimeType, fileBuffer, or
 // actorUserId — documents' own NOT NULL columns, plus the actor
@@ -317,6 +318,55 @@ async function listDocuments(client, { limit, offset } = {}) {
   return documentRepository.list(client, { limit, offset });
 }
 
+// A document with no student_id is a document that isn't scoped to one
+// student — a template if doc_type says so, otherwise a generated
+// artifact (e.g. mergeDocumentTemplate's own MERGED_DOC_TYPE output),
+// per this session's own task.
+class DocumentNotAuthorizedError extends Error {}
+
+// The one shared read-access rule for every route that resolves a
+// document before returning its metadata/bytes/OCR text (GET
+// /documents/:id, .../download, .../ocr — this session's own task).
+// student_id present: delegates entirely to visibilityService (student
+// -> class/department/college scoping, same tutor(+faculty-allocation)/
+// hod/principal boundary as every other student-data read). student_id
+// null: a template (doc_type === TEMPLATE_DOC_TYPE) is open to any
+// authenticated user to read/use — BusinessRules.md's College Admin
+// scope reserves only upload/manage for college_admin, never read,
+// same restriction routes/documents.js's own
+// requirePermission('documents.templates.upload') already enforces at
+// the write side, unchanged here. Anything else with no student_id
+// (a generated report/merged output) is visible only to the college's
+// principal or whoever actually generated it (uploaded_by_user_id) —
+// never a broad, tenant-wide read. actorRole === undefined means an
+// internal system caller — unrestricted, same convention
+// studentService.js/visibilityService.js already established.
+async function assertCanViewDocument(client, document, { actorUserId, actorRole } = {}) {
+  if (actorRole === undefined) {
+    return;
+  }
+  if (document.student_id !== null) {
+    try {
+      await visibilityService.assertCanViewStudent(client, document.student_id, { actorUserId, actorRole });
+    } catch (err) {
+      if (err instanceof visibilityService.VisibilityForbiddenError) {
+        throw new DocumentNotAuthorizedError(err.message);
+      }
+      throw err;
+    }
+    return;
+  }
+  if (document.doc_type === TEMPLATE_DOC_TYPE) {
+    return;
+  }
+  if (actorRole === 'principal' || document.uploaded_by_user_id === actorUserId) {
+    return;
+  }
+  throw new DocumentNotAuthorizedError(
+    `role ${JSON.stringify(actorRole)} (user ${JSON.stringify(actorUserId)}) may not view document ${JSON.stringify(document.id)}`,
+  );
+}
+
 module.exports = {
   DocumentValidationError,
   DocumentStudentNotFoundError,
@@ -324,6 +374,7 @@ module.exports = {
   TemplateMergeError: templateMerger.TemplateMergeError,
   DocumentNotATemplateError,
   DocumentInvalidTemplateError,
+  DocumentNotAuthorizedError,
   TEMPLATE_DOC_TYPE,
   AADHAAR_DOC_TYPE,
   uploadDocument,
@@ -338,4 +389,5 @@ module.exports = {
   reviewDocument,
   removeDocument,
   listDocuments,
+  assertCanViewDocument,
 };

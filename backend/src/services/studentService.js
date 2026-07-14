@@ -17,9 +17,9 @@
 
 const studentRepository = require('../repositories/studentRepository');
 const classRepository = require('../repositories/classRepository');
-const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const staffService = require('./staffService');
+const visibilityService = require('./visibilityService');
 
 // Missing roll_no or full_name — StudentEditorModal.jsx marks both
 // required and blocks its own "Next" step without them. Raised before
@@ -215,23 +215,34 @@ async function getStudent(client, id, { actorUserId, actorRole } = {}) {
 
 // hod-of-department check shared by both the source-class and (if
 // changing) target-class halves of assertCanModifyStudent's 'hod'
-// branch below. staffService.findHodForDepartment throws
-// StaffHodNotFoundError when nobody holds 'hod' for this department at
-// all — collapsed into the same StudentNotAuthorizedError as an actual
-// identity mismatch, since either way this actor isn't a verifiable
-// hod of it.
+// branch below. Delegates the actual identity resolution to
+// visibilityService (this session's own task: one shared
+// hod/principal-identity check instead of a copy per service) and
+// re-throws its generic VisibilityForbiddenError as this file's own
+// StudentNotAuthorizedError — every existing caller/test still sees
+// exactly that error class.
 async function assertIsHodOfDepartment(client, collegeId, departmentId, actorUserId, studentId) {
-  let hod;
   try {
-    hod = await staffService.findHodForDepartment(client, collegeId, departmentId);
+    await visibilityService.assertIsHodOfDepartment(client, collegeId, departmentId, actorUserId);
   } catch (err) {
-    if (err instanceof staffService.StaffHodNotFoundError) {
-      throw new StudentNotAuthorizedError(`no hod found for department ${JSON.stringify(departmentId)}`);
+    if (err instanceof visibilityService.VisibilityForbiddenError) {
+      throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} is not the hod of department ${JSON.stringify(departmentId)}, required to modify student ${JSON.stringify(studentId)}`);
     }
     throw err;
   }
-  if (hod.user_id !== actorUserId) {
-    throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} is not the hod of department ${JSON.stringify(departmentId)}, required to modify student ${JSON.stringify(studentId)}`);
+}
+
+// Same delegation pattern as assertIsHodOfDepartment, for the
+// principal-identity half of assertCanModifyStudent's 'principal'
+// branch.
+async function assertIsPrincipalOfCollege(client, collegeId, actorUserId) {
+  try {
+    await visibilityService.assertIsPrincipalOfCollege(client, collegeId, actorUserId);
+  } catch (err) {
+    if (err instanceof visibilityService.VisibilityForbiddenError) {
+      throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} is not the principal of college ${JSON.stringify(collegeId)}`);
+    }
+    throw err;
   }
 }
 
@@ -305,18 +316,7 @@ async function assertCanModifyStudent(client, student, targetClassId, { actorUse
   }
 
   if (actorRole === 'principal') {
-    let principal;
-    try {
-      principal = await staffService.findPrincipal(client, student.college_id);
-    } catch (err) {
-      if (err instanceof staffService.StaffPrincipalNotFoundError) {
-        throw new StudentNotAuthorizedError(`no principal found for college ${JSON.stringify(student.college_id)}`);
-      }
-      throw err;
-    }
-    if (principal.user_id !== actorUserId) {
-      throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} is not the principal of college ${JSON.stringify(student.college_id)}`);
-    }
+    await assertIsPrincipalOfCollege(client, student.college_id, actorUserId);
     if (targetClassId !== undefined && targetClassId !== null && targetClassId !== sourceClassId) {
       const targetClass = await classRepository.findById(client, targetClassId);
       if (targetClass === null) {
@@ -341,48 +341,14 @@ async function assertCanModifyStudent(client, student, targetClassId, { actorUse
 // gate a mutation — assertCanModifyStudent stays the only gate for
 // create/update/delete, per this session's own constraint.
 async function assertCanViewStudent(client, student, { actorUserId, actorRole }) {
-  const sourceClassId = student.class_id;
-
-  if (actorRole === 'staff') {
-    const tutorClass = await classRepository.findByTutorUserId(client, actorUserId);
-    if (tutorClass !== null && sourceClassId === tutorClass.id) {
-      return;
+  try {
+    await visibilityService.assertCanViewStudent(client, student, { actorUserId, actorRole });
+  } catch (err) {
+    if (err instanceof visibilityService.VisibilityForbiddenError) {
+      throw new StudentNotAuthorizedError(err.message);
     }
-    if (sourceClassId !== null) {
-      const allocations = await facultyAllocationRepository.findByStaffUserId(client, actorUserId);
-      if (allocations.some((allocation) => allocation.class_id === sourceClassId)) {
-        return;
-      }
-    }
-    throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} does not tutor or teach student ${JSON.stringify(student.id)}'s class`);
+    throw err;
   }
-
-  if (actorRole === 'hod') {
-    const sourceClass = sourceClassId ? await classRepository.findById(client, sourceClassId) : null;
-    if (sourceClass === null || !sourceClass.department_id) {
-      throw new StudentNotAuthorizedError(`student ${JSON.stringify(student.id)} has no department-linked class to authorize against`);
-    }
-    await assertIsHodOfDepartment(client, student.college_id, sourceClass.department_id, actorUserId, student.id);
-    return;
-  }
-
-  if (actorRole === 'principal') {
-    let principal;
-    try {
-      principal = await staffService.findPrincipal(client, student.college_id);
-    } catch (err) {
-      if (err instanceof staffService.StaffPrincipalNotFoundError) {
-        throw new StudentNotAuthorizedError(`no principal found for college ${JSON.stringify(student.college_id)}`);
-      }
-      throw err;
-    }
-    if (principal.user_id !== actorUserId) {
-      throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} is not the principal of college ${JSON.stringify(student.college_id)}`);
-    }
-    return;
-  }
-
-  throw new StudentNotAuthorizedError(`role ${JSON.stringify(actorRole)} may not view students`);
 }
 
 async function updateStudent(client, id, fields, { userId, actorRole }) {
@@ -478,23 +444,17 @@ async function listStudents(client, { limit = 50, offset = 0 } = {}, { actorUser
   if (actorRole === 'staff') {
     // Same broader read rule as assertCanViewStudent: a tutor's own
     // class PLUS every class this staff member teaches per
-    // faculty_allocation. A student belongs to exactly one class, so
-    // merging distinct classIds' rosters can never produce a duplicate
-    // student row.
-    const classIds = new Set();
-    const tutorClass = await classRepository.findByTutorUserId(client, actorUserId);
-    if (tutorClass !== null) {
-      classIds.add(tutorClass.id);
-    }
-    const allocations = await facultyAllocationRepository.findByStaffUserId(client, actorUserId);
-    for (const allocation of allocations) {
-      classIds.add(allocation.class_id);
-    }
-    if (classIds.size === 0) {
+    // faculty_allocation — resolved via visibilityService.getVisibleClassIds
+    // (this session's own task: one shared class-resolution
+    // implementation, not a copy here). A student belongs to exactly
+    // one class, so merging distinct classIds' rosters can never
+    // produce a duplicate student row.
+    const classIds = await visibilityService.getVisibleClassIds(client, { actorUserId, actorRole });
+    if (classIds.length === 0) {
       return [];
     }
     const rosters = await Promise.all(
-      [...classIds].map((classId) => studentRepository.findByClassId(client, classId)),
+      classIds.map((classId) => studentRepository.findByClassId(client, classId)),
     );
     const all = rosters.flat().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     return all.slice(offset, offset + limit);

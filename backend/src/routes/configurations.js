@@ -13,17 +13,50 @@ function requireResolvedTenant(req, res) {
   return true;
 }
 
+// Sensitive categories (this session's own task) — finance, notifications
+// and their provider config, AI provider config, approval/workflow
+// policy, and per-provider vendor secrets are all Confidential-or-worse
+// data (AI-Governance.md §4's own table names finance/parent-contact
+// data at that level; the various provider categories hold — even if
+// encrypted at rest, per notificationChannelRepository/cryptoUtil —
+// vendor account identifiers no ordinary staff member has a reason to
+// read). Restricted to principal/college_admin, not left to "any
+// authenticated tenant user" the way a category like attendance-rule
+// display config still reasonably is. A static list, same reasoning
+// middleware/permissions.js's own PERMISSION_ROLES table gives for
+// being a static, code-level config rather than a DB table — nothing
+// names a need for per-tenant customization of which categories count
+// as sensitive.
+const SENSITIVE_CONFIGURATION_CATEGORIES = [
+  'finance',
+  'notifications',
+  'notification_channels',
+  'ai',
+  'ai_config',
+  'approval',
+  'workflow',
+  'smtp',
+  'sms',
+  'whatsapp',
+  'providers',
+];
+
 function createConfigurationsRouter() {
   const router = express.Router();
 
-  // Any authenticated tenant user may read — matches the Python
-  // version's require_role(*TENANT_ROLES). Uses requireAuth here
-  // rather than spelling out every known role, same reasoning as
-  // GET /auth/me: "any authenticated tenant user" isn't a role-gated
-  // capability, and hardcoding the role list at this call site would
-  // silently under-cover a future new role.
+  // Any authenticated tenant user may read a non-sensitive category —
+  // matches the Python version's require_role(*TENANT_ROLES). A
+  // sensitive category (SENSITIVE_CONFIGURATION_CATEGORIES above) is
+  // restricted to principal/college_admin instead (this session's own
+  // task: this route used to let any authenticated user read finance/
+  // notification-provider/AI-provider config, credentials included).
   router.get('/configurations/:category', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
+    if (SENSITIVE_CONFIGURATION_CATEGORIES.includes(req.params.category)
+      && !['principal', 'college_admin'].includes(req.jwtClaims.role)) {
+      res.status(403).json({ detail: `role ${JSON.stringify(req.jwtClaims.role)} may not read configuration category ${JSON.stringify(req.params.category)}` });
+      return;
+    }
     const row = await configurationService.getConfiguration(req.dbClient, {
       collegeId: req.collegeId,
       category: req.params.category,

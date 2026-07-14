@@ -25,6 +25,7 @@ const auditLogRepository = require('../src/repositories/auditLogRepository');
 const fileStorage = require('../src/storage/fileStorage');
 const templateMerger = require('../src/generators/templateMerger');
 const documentService = require('../src/services/documentService');
+const visibilityService = require('../src/services/visibilityService');
 
 function buildFakeDocxBuffer() {
   const zip = new PizZip();
@@ -271,5 +272,84 @@ test('DocumentService validation, actor stamping, and audit logging (no DB, no f
     const result = await documentService.mergeDocumentTemplate({}, 'missing', {}, { actorUserId: 'u1' });
     assert.equal(result, null);
     assert.equal(createMock.mock.callCount(), 0);
+  });
+});
+
+// assertCanViewDocument (this session's own task): the one shared gate
+// GET /documents/:id, .../download, .../ocr, and GET /documents?student_id=
+// all now run through. student_id present delegates to
+// visibilityService; student_id null branches on doc_type/ownership.
+test('DocumentService.assertCanViewDocument (no DB)', async (t) => {
+  await t.test('a student-linked document delegates to visibilityService.assertCanViewStudent', async () => {
+    const viewMock = t.mock.method(visibilityService, 'assertCanViewStudent', async () => {});
+    t.after(() => viewMock.mock.restore());
+
+    await documentService.assertCanViewDocument(
+      {},
+      { id: 'doc-1', student_id: 'student-1', doc_type: 'marksheet' },
+      { actorUserId: 'tutor-u1', actorRole: 'staff' },
+    );
+    assert.equal(viewMock.mock.callCount(), 1);
+    assert.equal(viewMock.mock.calls[0].arguments[1], 'student-1');
+  });
+
+  await t.test('a student-linked document rejects a caller outside the student\'s scope (staff from a different class)', async () => {
+    const viewMock = t.mock.method(visibilityService, 'assertCanViewStudent', async () => {
+      throw new visibilityService.VisibilityForbiddenError('nope');
+    });
+    t.after(() => viewMock.mock.restore());
+
+    await assert.rejects(
+      () => documentService.assertCanViewDocument(
+        {},
+        { id: 'doc-1', student_id: 'student-1', doc_type: 'marksheet' },
+        { actorUserId: 'other-staff-u2', actorRole: 'staff' },
+      ),
+      documentService.DocumentNotAuthorizedError,
+    );
+  });
+
+  await t.test('a template (student_id null) is readable by any authenticated role', async () => {
+    await documentService.assertCanViewDocument(
+      {},
+      {
+        id: 'tpl-1', student_id: null, doc_type: documentService.TEMPLATE_DOC_TYPE, uploaded_by_user_id: 'admin-1',
+      },
+      { actorUserId: 'staff-u1', actorRole: 'staff' },
+    );
+    // No assertion needed beyond "did not throw" — reaching here is the test.
+  });
+
+  await t.test('a generated report (student_id null, not a template) is readable by the principal', async () => {
+    await documentService.assertCanViewDocument(
+      {},
+      {
+        id: 'report-1', student_id: null, doc_type: 'merged_document', uploaded_by_user_id: 'staff-u1',
+      },
+      { actorUserId: 'principal-u1', actorRole: 'principal' },
+    );
+  });
+
+  await t.test('a generated report (student_id null, not a template) is readable by the user who generated it', async () => {
+    await documentService.assertCanViewDocument(
+      {},
+      {
+        id: 'report-1', student_id: null, doc_type: 'merged_document', uploaded_by_user_id: 'staff-u1',
+      },
+      { actorUserId: 'staff-u1', actorRole: 'staff' },
+    );
+  });
+
+  await t.test('a generated report (student_id null, not a template) is rejected for an unrelated staff member — not broadly readable', async () => {
+    await assert.rejects(
+      () => documentService.assertCanViewDocument(
+        {},
+        {
+          id: 'report-1', student_id: null, doc_type: 'merged_document', uploaded_by_user_id: 'staff-u1',
+        },
+        { actorUserId: 'other-staff-u2', actorRole: 'staff' },
+      ),
+      documentService.DocumentNotAuthorizedError,
+    );
   });
 });

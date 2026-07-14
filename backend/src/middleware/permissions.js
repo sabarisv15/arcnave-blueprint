@@ -29,8 +29,13 @@ const PERMISSION_ROLES = {
   // routes/analytics.js — GET /analytics/attendance-rate
   'analytics.attendance_rate.read': ['principal', 'hod'],
 
-  // routes/backgroundJobs.js — POST /background-jobs
+  // routes/backgroundJobs.js
   'background_jobs.create': ['principal'],
+  // GET routes (this session's own task): background jobs are an
+  // operational/internal concern (job status, error text) — no
+  // BusinessRules.md rule names ordinary staff/hod as needing this,
+  // same conservative-default reasoning finance.js's own writes use.
+  'background_jobs.read': ['principal', 'college_admin'],
 
   // routes/classes.js — POST/PUT/DELETE /classes
   'classes.create': ['principal'],

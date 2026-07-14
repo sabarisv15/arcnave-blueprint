@@ -5,6 +5,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requirePermission } = require('../middleware/rbac');
 const documentService = require('../services/documentService');
 const ocrService = require('../services/ocrService');
+const visibilityService = require('../services/visibilityService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -74,6 +75,10 @@ function mapDocumentServiceError(err, res) {
   }
   if (err instanceof documentService.TemplateMergeError) {
     res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof documentService.DocumentNotAuthorizedError) {
+    res.status(403).json({ detail: err.message });
     return true;
   }
   return false;
@@ -176,7 +181,17 @@ function createDocumentsRouter() {
   // caller-supplied fields (e.g. a real student record) into a stored
   // template, persist the merged bytes as a new document (via
   // mergeDocumentTemplate -> uploadDocument), and stream the same
-  // bytes back in the response.
+  // bytes back in the response. No extra visibility gate on the input
+  // template needed: mergeDocumentTemplate already refuses anything
+  // whose doc_type isn't TEMPLATE_DOC_TYPE (DocumentNotATemplateError),
+  // and templates are open to any authenticated user to read/use (this
+  // session's own task) — same rule GET /documents/:id enforces for a
+  // template row directly. The generated output's ownership is
+  // established structurally, not by an extra check here: uploadDocument
+  // stamps uploaded_by_user_id from actorUserId, which is exactly what
+  // documentService.assertCanViewDocument's "generated report" branch
+  // later gates that same output's own reads on (principal or the
+  // actor who generated it).
   router.post('/documents/:id/merge', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
@@ -206,14 +221,39 @@ function createDocumentsRouter() {
       res.status(404).json({ detail: `No document found with id ${JSON.stringify(req.params.id)}` });
       return;
     }
+    try {
+      await documentService.assertCanViewDocument(req.dbClient, document, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role,
+      });
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
     res.json(document);
   }));
 
   // Real bytes, not JSON — Architecture.md 2.5 names "download" as a
   // DocumentService responsibility, and a caller asking to download a
-  // file wants the file, not a base64-wrapped envelope.
+  // file wants the file, not a base64-wrapped envelope. Metadata is
+  // fetched first (getDocument) so the visibility check runs before any
+  // disk read — an unauthorized caller never triggers
+  // fileStorage.readFile at all, not just gets the bytes withheld after
+  // the fact.
   router.get('/documents/:id/download', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
+    const document = await documentService.getDocument(req.dbClient, req.params.id);
+    if (document === null) {
+      res.status(404).json({ detail: `No document found with id ${JSON.stringify(req.params.id)}` });
+      return;
+    }
+    try {
+      await documentService.assertCanViewDocument(req.dbClient, document, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role,
+      });
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
     const result = await documentService.downloadDocument(req.dbClient, req.params.id);
     if (result === null) {
       res.status(404).json({ detail: `No document found with id ${JSON.stringify(req.params.id)}` });
@@ -224,10 +264,6 @@ function createDocumentsRouter() {
     res.send(result.buffer);
   }));
 
-  // student_id is required — the "list-by-student" endpoint this
-  // slice needs, not a general/unscoped list, same restraint
-  // finance.js's own GET /finance/fee-payments documents for the
-  // identical shape.
   router.post('/documents/:id/ocr', requirePermission('documents.ocr.run'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
@@ -241,16 +277,48 @@ function createDocumentsRouter() {
 
   router.get('/documents/:id/ocr', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
+    const document = await documentService.getDocument(req.dbClient, req.params.id);
+    if (document === null) {
+      res.status(404).json({ detail: `No document found with id ${JSON.stringify(req.params.id)}` });
+      return;
+    }
+    try {
+      await documentService.assertCanViewDocument(req.dbClient, document, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role,
+      });
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
     const results = await ocrService.listForDocument(req.dbClient, req.params.id);
     res.json(results);
   }));
 
+  // student_id is required — the "list-by-student" endpoint this
+  // slice needs, not a general/unscoped list, same restraint
+  // finance.js's own GET /finance/fee-payments documents for the
+  // identical shape. Scoped via visibilityService directly against the
+  // studentId (this session's own task: this route used to let any
+  // authenticated user pull any student's document list) — the same
+  // tutor(+faculty-allocation)/hod/principal boundary as every other
+  // student-data read.
   router.get('/documents', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { student_id: studentId } = req.query;
     if (!studentId) {
       res.status(400).json({ detail: 'student_id query parameter is required' });
       return;
+    }
+    try {
+      await visibilityService.assertCanViewStudent(req.dbClient, studentId, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role,
+      });
+    } catch (err) {
+      if (err instanceof visibilityService.VisibilityForbiddenError) {
+        res.status(403).json({ detail: err.message });
+        return;
+      }
+      throw err;
     }
     const documents = await documentService.listDocumentsForStudent(req.dbClient, studentId);
     res.json(documents);

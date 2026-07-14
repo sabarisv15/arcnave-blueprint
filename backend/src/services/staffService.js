@@ -299,6 +299,23 @@ async function getStaff(client, id) {
   return staffRepository.findById(client, id);
 }
 
+// The "self" lookup routes/staff.js's own GET /staff (this session's
+// own task) needs to scope an ordinary staff actor's read to their own
+// profile only, without already knowing their staff.id (the JWT only
+// carries the user_id).
+async function getStaffByUserId(client, userId) {
+  return staffRepository.findByUserId(client, userId);
+}
+
+// The "every staff row in a department" lookup routes/staff.js's own
+// GET /staff needs to scope an hod's read — thin wrapper, same
+// "business logic layer, not a route calling a repository directly"
+// reasoning every other service in this codebase already follows
+// (CLAUDE.md rule 1).
+async function listStaffByDepartment(client, departmentId) {
+  return staffRepository.findByDepartmentId(client, departmentId);
+}
+
 async function updateStaff(client, id, fields, { userId }) {
   const patch = pickStaffFields(fields);
   const hasChanges = Object.keys(patch).length > 0;
@@ -609,9 +626,11 @@ module.exports = {
   createStaff,
   provisionHodAccount,
   getStaff,
+  getStaffByUserId,
   updateStaff,
   removeStaff,
   listStaff,
+  listStaffByDepartment,
   findHodForDepartment,
   findPrincipal,
   findHodDepartmentId,

@@ -4,6 +4,7 @@ const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth } = require('../middleware/rbac');
 const attendanceService = require('../services/attendanceService');
+const visibilityService = require('../services/visibilityService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -77,6 +78,10 @@ function mapAttendanceServiceError(err, res) {
     res.status(403).json({ detail: err.message });
     return true;
   }
+  if (err instanceof visibilityService.VisibilityForbiddenError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -121,12 +126,26 @@ function createAttendanceRouter() {
     }
   }));
 
+  // requireAuth gates "must be logged in"; the real scope (staff:
+  // tutor/faculty-allocated of this session's class, hod: own
+  // department, principal: own college — this session's own task) is
+  // visibilityService.assertCanViewClass's job, same
+  // resolve-the-real-assignment discipline attendanceService's own
+  // assertCanMark already uses for the write side.
   router.get('/attendance/:id', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const session = await attendanceService.getAttendanceSession(req.dbClient, req.params.id);
     if (session === null) {
       res.status(404).json({ detail: `No attendance session found with id ${JSON.stringify(req.params.id)}` });
       return;
+    }
+    try {
+      await visibilityService.assertCanViewClass(req.dbClient, session.class_id, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role, collegeId: req.collegeId,
+      });
+    } catch (err) {
+      if (mapAttendanceServiceError(err, res)) return;
+      throw err;
     }
     res.json(session);
   }));
@@ -145,6 +164,14 @@ function createAttendanceRouter() {
     if (!classId) {
       res.status(400).json({ detail: 'class_id query parameter is required' });
       return;
+    }
+    try {
+      await visibilityService.assertCanViewClass(req.dbClient, classId, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role, collegeId: req.collegeId,
+      });
+    } catch (err) {
+      if (mapAttendanceServiceError(err, res)) return;
+      throw err;
     }
     if (sessionDate) {
       const sessions = await attendanceService.listAttendanceSessionsForClassAndDate(req.dbClient, classId, sessionDate);

@@ -5,6 +5,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requirePermission } = require('../middleware/rbac');
 const staffService = require('../services/staffService');
 const workflowService = require('../services/workflowService');
+const visibilityService = require('../services/visibilityService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -116,6 +117,10 @@ function mapStaffServiceError(err, res) {
     res.status(400).json({ detail: err.message });
     return true;
   }
+  if (err instanceof visibilityService.VisibilityForbiddenError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -180,9 +185,21 @@ function createStaffRouter() {
     }
   }));
 
+  // requireAuth gates "must be logged in"; the real scope (self, hod of
+  // the target's own department, principal/college_admin college-wide —
+  // this session's own task) is visibilityService.assertCanViewStaff's
+  // job.
   router.get('/staff/:id', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
-    const staff = await staffService.getStaff(req.dbClient, req.params.id);
+    let staff;
+    try {
+      staff = await visibilityService.assertCanViewStaff(req.dbClient, { staffId: req.params.id }, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role,
+      });
+    } catch (err) {
+      if (mapStaffServiceError(err, res)) return;
+      throw err;
+    }
     if (staff === null) {
       res.status(404).json({ detail: `No staff found with id ${JSON.stringify(req.params.id)}` });
       return;
@@ -192,15 +209,36 @@ function createStaffRouter() {
 
   // limit/offset are passed through as-is — staffService/
   // staffRepository already default them to 50/0, not re-implemented
-  // here.
+  // here. Scoped by role (this session's own task: this route used to
+  // return the whole college's staff directory to anyone
+  // authenticated): principal/college_admin see the whole college,
+  // hod sees their own (real, verified) department, ordinary staff see
+  // only their own profile.
   router.get('/staff', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { limit: rawLimit, offset: rawOffset } = req.query;
-    const staff = await staffService.listStaff(req.dbClient, {
-      limit: rawLimit === undefined ? undefined : Number(rawLimit),
-      offset: rawOffset === undefined ? undefined : Number(rawOffset),
-    });
-    res.json(staff);
+    const limit = rawLimit === undefined ? 50 : Number(rawLimit);
+    const offset = rawOffset === undefined ? 0 : Number(rawOffset);
+    const actorRole = req.jwtClaims.role;
+    const actorUserId = req.jwtClaims.sub;
+
+    if (actorRole === 'principal' || actorRole === 'college_admin') {
+      const staff = await staffService.listStaff(req.dbClient, { limit, offset });
+      res.json(staff);
+      return;
+    }
+    if (actorRole === 'hod') {
+      const departmentId = await staffService.findHodDepartmentId(req.dbClient, req.collegeId, actorUserId);
+      if (departmentId === null) {
+        res.json([]);
+        return;
+      }
+      const all = await staffService.listStaffByDepartment(req.dbClient, departmentId);
+      res.json(all.slice(offset, offset + limit));
+      return;
+    }
+    const self = await staffService.getStaffByUserId(req.dbClient, actorUserId);
+    res.json(self === null ? [] : [self]);
   }));
 
   router.put('/staff/:id', requirePermission('staff.update'), asyncHandler(async (req, res) => {

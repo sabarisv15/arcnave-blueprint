@@ -4,6 +4,7 @@ const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requirePermission } = require('../middleware/rbac');
 const academicService = require('../services/academicService');
+const visibilityService = require('../services/visibilityService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -62,7 +63,36 @@ function mapAcademicServiceError(err, res) {
     res.status(404).json({ detail: err.message });
     return true;
   }
+  if (err instanceof visibilityService.VisibilityForbiddenError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
   return false;
+}
+
+// Shared read-scope gate for both GET routes below (this session's own
+// task): visible if the actor may view the allocation's class
+// (tutor/faculty-allocated staff, hod of its department, principal of
+// the college) OR may view the allocated staff member themselves (self,
+// or hod/principal — visibilityService.assertCanViewStaff's own rule).
+// Either is sufficient — "staff sees own allocations" and "tutor/
+// allocated faculty see relevant class" are two separate named rules,
+// not a conjunction.
+async function assertCanViewAllocation(client, allocation, actor) {
+  try {
+    await visibilityService.assertCanViewClass(client, allocation.class_id, actor);
+    return;
+  } catch (err) {
+    if (!(err instanceof visibilityService.VisibilityForbiddenError)) {
+      throw err;
+    }
+  }
+  const staff = await visibilityService.assertCanViewStaff(client, { userId: allocation.staff_user_id }, actor);
+  if (staff === null) {
+    throw new visibilityService.VisibilityForbiddenError(
+      `role ${JSON.stringify(actor.actorRole)} (user ${JSON.stringify(actor.actorUserId)}) may not view faculty allocation ${JSON.stringify(allocation.id)}`,
+    );
+  }
 }
 
 function createFacultyAllocationRouter() {
@@ -100,6 +130,13 @@ function createFacultyAllocationRouter() {
       res.status(404).json({ detail: `No faculty allocation found with id ${JSON.stringify(req.params.id)}` });
       return;
     }
+    const actor = { actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role, collegeId: req.collegeId };
+    try {
+      await assertCanViewAllocation(req.dbClient, allocation, actor);
+    } catch (err) {
+      if (mapAcademicServiceError(err, res)) return;
+      throw err;
+    }
     res.json(allocation);
   }));
 
@@ -108,7 +145,12 @@ function createFacultyAllocationRouter() {
   // (listFacultyAllocationsForClass/listFacultyAllocationsForStaff),
   // matching its own "not every repository export gets wrapped, only
   // what's needed" precedent. Exactly one of class_id/staff_user_id is
-  // required to pick which.
+  // required to pick which. Scoped via visibilityService (this
+  // session's own task): class_id uses assertCanViewClass directly;
+  // staff_user_id uses assertCanViewStaff — "staff sees own
+  // allocations" means a staff actor may only query their own
+  // staff_user_id, while hod/principal may query anyone's within their
+  // own department/college.
   router.get('/faculty-allocation', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { class_id: classId, staff_user_id: staffUserId } = req.query;
@@ -119,6 +161,21 @@ function createFacultyAllocationRouter() {
     if (classId && staffUserId) {
       res.status(400).json({ detail: 'provide only one of class_id or staff_user_id, not both' });
       return;
+    }
+    const actor = { actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role, collegeId: req.collegeId };
+    try {
+      if (classId) {
+        await visibilityService.assertCanViewClass(req.dbClient, classId, actor);
+      } else {
+        const staff = await visibilityService.assertCanViewStaff(req.dbClient, { userId: staffUserId }, actor);
+        if (staff === null) {
+          res.status(404).json({ detail: `No staff found with user id ${JSON.stringify(staffUserId)}` });
+          return;
+        }
+      }
+    } catch (err) {
+      if (mapAcademicServiceError(err, res)) return;
+      throw err;
     }
     const allocations = classId
       ? await academicService.listFacultyAllocationsForClass(req.dbClient, classId)

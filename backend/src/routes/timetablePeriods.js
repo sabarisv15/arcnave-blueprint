@@ -104,6 +104,9 @@ function createTimetablePeriodsRouter() {
     }
   }));
 
+  // Same "no student/staff/class identity on this row" reasoning as
+  // GET /timetable-periods below — tenant-wide/requireAuth is correct
+  // here too, not a gap.
   router.get('/timetable-periods/:id', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const period = await academicService.getTimetablePeriod(req.dbClient, req.params.id);
@@ -117,6 +120,17 @@ function createTimetablePeriodsRouter() {
   // limit/offset are passed through as-is — academicService/
   // timetablePeriodRepository already default them to 50/0, not
   // re-implemented here, same as classes.js's own list route.
+  //
+  // Deliberately left tenant-wide/requireAuth, not routed through
+  // VisibilityService (this session's own audit, item 9): a
+  // timetable_period row is just the college's shared bell schedule —
+  // day_of_week/hour_index/start_time/end_time, the same slots every
+  // class picks from — with no student, staff, or class identity on
+  // it at all (that link lives on faculty_allocation, which IS scoped —
+  // see routes/facultyAllocation.js). There is nothing here for a
+  // tutor-of-class-A to learn about class B that isn't already
+  // published, non-sensitive information every tenant user needs to
+  // even read a timetable UI.
   router.get('/timetable-periods', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { limit: rawLimit, offset: rawOffset } = req.query;

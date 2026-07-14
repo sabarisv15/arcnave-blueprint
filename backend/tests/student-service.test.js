@@ -578,6 +578,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
   await t.test('getStudent for the tutor of the student\'s own class succeeds', async () => {
     mockFindStudent(t);
     mockTutorClass(t, CLASS_1);
+    mockFacultyAllocations(t, []);
     const result = await studentService.getStudent({}, 'student-id', { actorUserId: 'tutor-u1', actorRole: 'staff' });
     assert.deepEqual(result, STUDENT);
   });
