@@ -12,9 +12,14 @@
 // documents the real key and matches house convention for
 // non-globally-unique lookups.
 //
-// `remove` is a hard DELETE, not a soft-delete: the ERD in .ai/TASK.md
-// has no soft-delete column (no deleted_at/is_active) for students
-// yet. Flagged as an open question there, not a decision made here.
+// Soft-delete (this session's own task): students.deleted_at, set by
+// softDelete below instead of a hard DELETE. Every read/list query
+// here filters `deleted_at IS NULL` by default — a soft-deleted row is
+// meant to behave as if it doesn't exist for every normal query path,
+// the same way RLS already makes a different tenant's row invisible.
+// There is no hard-delete function left in this file at all (the old
+// `remove` is gone, not just unused) — CLAUDE.md rule 8/this session's
+// own constraint: no route may reach a hard-delete path.
 
 const COLUMNS = [
   ['collegeId', 'college_id'],
@@ -52,6 +57,8 @@ async function create(client, fields) {
   // phone_verified/parent_phone_verified default to false), not
   // receive an explicit NULL, which would violate their NOT NULL
   // constraint. Same entries-filtering approach as update() below.
+  // deleted_at is never in COLUMNS (never caller-settable) — a newly
+  // created row always has it NULL, via the column's own default.
   const entries = COLUMNS.filter(([key]) => fields[key] !== undefined);
   const columnNames = entries.map(([, column]) => column);
   const values = entries.map(([key]) => fields[key]);
@@ -67,13 +74,13 @@ async function create(client, fields) {
 }
 
 async function findById(client, id) {
-  const result = await client.query('SELECT * FROM students WHERE id = $1', [id]);
+  const result = await client.query('SELECT * FROM students WHERE id = $1 AND deleted_at IS NULL', [id]);
   return result.rows[0] || null;
 }
 
 async function findByRollNo(client, collegeId, rollNo) {
   const result = await client.query(
-    'SELECT * FROM students WHERE college_id = $1 AND roll_no = $2',
+    'SELECT * FROM students WHERE college_id = $1 AND roll_no = $2 AND deleted_at IS NULL',
     [collegeId, rollNo],
   );
   return result.rows[0] || null;
@@ -90,7 +97,7 @@ async function update(client, id, fields) {
 
   const result = await client.query(
     `UPDATE students SET ${setClauses.join(', ')}, updated_at = now()
-     WHERE id = $1
+     WHERE id = $1 AND deleted_at IS NULL
      RETURNING *`,
     [id, ...values],
   );
@@ -101,7 +108,7 @@ async function update(client, id, fields) {
 // sendClassAlert, item 5 of this session's task) needs — the only
 // place students.class_id is read back by more than one row at a time.
 async function findByClassId(client, classId) {
-  const result = await client.query('SELECT * FROM students WHERE class_id = $1', [classId]);
+  const result = await client.query('SELECT * FROM students WHERE class_id = $1 AND deleted_at IS NULL', [classId]);
   return result.rows;
 }
 
@@ -119,25 +126,36 @@ async function findByDepartmentId(client, departmentId) {
   const result = await client.query(
     `SELECT students.* FROM students
      JOIN classes ON classes.id = students.class_id
-     WHERE classes.department_id = $1
+     WHERE classes.department_id = $1 AND students.deleted_at IS NULL
      ORDER BY students.created_at`,
     [departmentId],
   );
   return result.rows;
 }
 
-async function remove(client, id) {
-  await client.query('DELETE FROM students WHERE id = $1', [id]);
+// Soft-delete (this session's own task) — replaces the old hard
+// DELETE. `deleted_at IS NULL` in the WHERE clause makes this a no-op
+// (returns null) against an already-deleted row, same idempotent-404
+// shape studentService.removeStudent already expects from a
+// nonexistent id.
+async function softDelete(client, id) {
+  const result = await client.query(
+    `UPDATE students SET deleted_at = now(), updated_at = now()
+     WHERE id = $1 AND deleted_at IS NULL
+     RETURNING *`,
+    [id],
+  );
+  return result.rows[0] || null;
 }
 
 async function list(client, { limit = 50, offset = 0 } = {}) {
   const result = await client.query(
-    'SELECT * FROM students ORDER BY created_at LIMIT $1 OFFSET $2',
+    'SELECT * FROM students WHERE deleted_at IS NULL ORDER BY created_at LIMIT $1 OFFSET $2',
     [limit, offset],
   );
   return result.rows;
 }
 
 module.exports = {
-  create, findById, findByRollNo, findByClassId, findByDepartmentId, update, remove, list,
+  create, findById, findByRollNo, findByClassId, findByDepartmentId, update, softDelete, list,
 };

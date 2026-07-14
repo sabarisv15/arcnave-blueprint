@@ -307,7 +307,7 @@ test('students', async (t) => {
     assert.equal(resp.status, 409);
   });
 
-  await t.test('delete removes the row and returns 204; a second delete 404s', async () => {
+  await t.test('delete soft-deletes (sets deleted_at): returns 204, the row is excluded from get/list, a second delete 404s, and no hard DELETE ever ran', async () => {
     const staffToken = await login(collegeA, 'staffuser');
     const created = await post(baseUrl, '/api/v1/students', headersFor(collegeA, staffToken), {
       roll_no: 'R060', full_name: 'Deletable Student',
@@ -320,8 +320,38 @@ test('students', async (t) => {
     const getAfter = await get(baseUrl, `/api/v1/students/${created.body.id}`, headersFor(collegeA, principalToken));
     assert.equal(getAfter.status, 404);
 
+    const listAfter = await get(baseUrl, '/api/v1/students?limit=200', headersFor(collegeA, principalToken));
+    assert.equal(listAfter.body.some((s) => s.id === created.body.id), false);
+
     const secondDelete = await del(baseUrl, `/api/v1/students/${created.body.id}`, headersFor(collegeA, principalToken));
     assert.equal(secondDelete.status, 404);
+
+    // Soft delete, not a hard DELETE: the row still physically exists
+    // with deleted_at set — verified directly against the admin
+    // connection (the app's own arcnave_app role never sees it, per
+    // every repository query's own deleted_at IS NULL filter).
+    const row = await adminPool.query('SELECT deleted_at FROM students WHERE id = $1', [created.body.id]);
+    assert.equal(row.rows.length, 1);
+    assert.notEqual(row.rows[0].deleted_at, null);
+  });
+
+  // Known limitation, not fixed by this session's task: UNIQUE
+  // (college_id, roll_no) has no partial index excluding deleted_at IS
+  // NOT NULL, so a soft-deleted student's roll_no is NOT freed up for
+  // reuse (still a real 409) — a hard delete used to free it. Flagged,
+  // not silently asserted as working.
+  await t.test('a soft-deleted student\'s roll_no is still taken (known limitation — no partial unique index)', async () => {
+    const staffToken = await login(collegeA, 'staffuser');
+    const created = await post(baseUrl, '/api/v1/students', headersFor(collegeA, staffToken), {
+      roll_no: 'R061', full_name: 'Soft Deleted Student',
+    });
+    const principalToken = await login(collegeA, 'principaluser');
+    await del(baseUrl, `/api/v1/students/${created.body.id}`, headersFor(collegeA, principalToken));
+
+    const second = await post(baseUrl, '/api/v1/students', headersFor(collegeA, staffToken), {
+      roll_no: 'R061', full_name: 'Reuses The Same Roll No',
+    });
+    assert.equal(second.status, 409);
   });
 
   // --- RBAC ---

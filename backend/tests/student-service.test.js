@@ -458,7 +458,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
 
   await t.test('removeStudent on a nonexistent id is a no-op, no audit entry', async () => {
     const findMock = t.mock.method(studentRepository, 'findById', async () => null);
-    const removeMock = t.mock.method(studentRepository, 'remove', async () => {});
+    const removeMock = t.mock.method(studentRepository, 'softDelete', async () => {});
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
       findMock.mock.restore();
@@ -476,7 +476,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
   await t.test('removeStudent (tutor of the student\'s own class) deletes and writes an audit entry', async () => {
     mockFindStudent(t);
     mockTutorClass(t, CLASS_1);
-    const removeMock = t.mock.method(studentRepository, 'remove', async () => {});
+    const removeMock = t.mock.method(studentRepository, 'softDelete', async () => {});
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
       removeMock.mock.restore();
@@ -494,7 +494,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
   await t.test('removeStudent (tutor of a DIFFERENT class) is rejected, never deletes', async () => {
     mockFindStudent(t);
     mockTutorClass(t, CLASS_2);
-    const removeMock = t.mock.method(studentRepository, 'remove', async () => {});
+    const removeMock = t.mock.method(studentRepository, 'softDelete', async () => {});
     t.after(() => removeMock.mock.restore());
 
     await assert.rejects(
@@ -508,7 +508,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
     mockFindStudent(t);
     mockFindClassById(t);
     const hodMock = t.mock.method(staffService, 'findHodForDepartment', async () => ({ user_id: 'hod-u1' }));
-    const removeMock = t.mock.method(studentRepository, 'remove', async () => {});
+    const removeMock = t.mock.method(studentRepository, 'softDelete', async () => {});
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
       hodMock.mock.restore();
@@ -525,7 +525,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
   await t.test('removeStudent (principal of the student\'s college) deletes', async () => {
     mockFindStudent(t);
     const principalMock = t.mock.method(staffService, 'findPrincipal', async () => ({ user_id: 'principal-u1' }));
-    const removeMock = t.mock.method(studentRepository, 'remove', async () => {});
+    const removeMock = t.mock.method(studentRepository, 'softDelete', async () => {});
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
       principalMock.mock.restore();
@@ -542,7 +542,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
   await t.test('removeStudent (principal of a DIFFERENT college) is rejected', async () => {
     mockFindStudent(t);
     const principalMock = t.mock.method(staffService, 'findPrincipal', async () => ({ user_id: 'principal-u1' }));
-    const removeMock = t.mock.method(studentRepository, 'remove', async () => {});
+    const removeMock = t.mock.method(studentRepository, 'softDelete', async () => {});
     t.after(() => {
       principalMock.mock.restore();
       removeMock.mock.restore();

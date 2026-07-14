@@ -370,10 +370,14 @@ async function updateStudent(client, id, fields, { userId, actorRole }) {
 // entry (removeStudent's signature, per .ai/TASK.md, takes no
 // collegeId of its own) and to avoid logging a removal for an id that
 // never existed — and now also to run assertCanModifyStudent against
-// its real class_id/college_id before the DELETE, same as updateStudent.
-// Still a hard DELETE, not a soft-delete: the ERD has no soft-delete
-// column yet — unchanged open question from the first slice, not
-// resolved here either.
+// its real class_id/college_id before the delete, same as updateStudent.
+// Soft delete (this session's own task): studentRepository.softDelete
+// sets deleted_at instead of a hard DELETE — findById (used both here
+// and by every other read) already excludes deleted_at IS NOT NULL
+// rows, so a soft-deleted student behaves as gone everywhere without
+// the row itself, or its history for audit_log's own FK, ever being
+// destroyed. There is no hard-delete path left anywhere in this file
+// or studentRepository for a route to reach.
 async function removeStudent(client, id, { userId, actorRole }) {
   const student = await studentRepository.findById(client, id);
   if (student === null) {
@@ -382,7 +386,7 @@ async function removeStudent(client, id, { userId, actorRole }) {
 
   await assertCanModifyStudent(client, student, undefined, { actorUserId: userId, actorRole });
 
-  await studentRepository.remove(client, id);
+  await studentRepository.softDelete(client, id);
 
   await auditLogRepository.createAuditLogEntry(client, {
     collegeId: student.college_id,
