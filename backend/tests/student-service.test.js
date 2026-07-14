@@ -18,8 +18,21 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const studentRepository = require('../src/repositories/studentRepository');
+const classRepository = require('../src/repositories/classRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const studentService = require('../src/services/studentService');
+
+// createStudent now always resolves the actor's own class via
+// classRepository.findByTutorUserId before touching studentRepository
+// at all (student creation is tutor-only, own-class-only — this
+// session's own task) — every createStudent test below mocks that
+// lookup, defaulting to "actor tutors class-1" unless a test is
+// specifically exercising the not-a-tutor/mismatch paths.
+function mockTutorClass(t, classRow = { id: 'class-1', college_id: 'c1', tutor_user_id: 'u1' }) {
+  const findClassMock = t.mock.method(classRepository, 'findByTutorUserId', async () => classRow);
+  t.after(() => findClassMock.mock.restore());
+  return findClassMock;
+}
 
 test('StudentService validation and audit logging (no DB)', async (t) => {
   await t.test('createStudent rejects a missing rollNo without touching the DB', async () => {
@@ -44,7 +57,57 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
     assert.equal(createMock.mock.callCount(), 0);
   });
 
+  await t.test('createStudent throws StudentNotClassTutorError when the actor is not any class\'s tutor, without touching studentRepository', async () => {
+    mockTutorClass(t, null);
+    const createMock = t.mock.method(studentRepository, 'create');
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => studentService.createStudent({}, {
+        collegeId: 'c1', rollNo: 'R1', fullName: 'Alice', userId: 'u1',
+      }),
+      studentService.StudentNotClassTutorError,
+    );
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('createStudent throws StudentClassMismatchError when the caller asserts a classId that is not the actor\'s own', async () => {
+    mockTutorClass(t, { id: 'class-1', college_id: 'c1', tutor_user_id: 'u1' });
+    const createMock = t.mock.method(studentRepository, 'create');
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => studentService.createStudent({}, {
+        collegeId: 'c1', rollNo: 'R1', fullName: 'Alice', userId: 'u1', classId: 'someone-elses-class',
+      }),
+      studentService.StudentClassMismatchError,
+    );
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('createStudent auto-sets class_id from the actor\'s resolved class, ignoring/validating any asserted classId', async () => {
+    mockTutorClass(t, { id: 'class-1', college_id: 'c1', tutor_user_id: 'u1' });
+    const createMock = t.mock.method(studentRepository, 'create', async (client, fields) => ({
+      id: 'new-id',
+      college_id: fields.collegeId,
+      class_id: fields.classId,
+    }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      createMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const student = await studentService.createStudent({}, {
+      collegeId: 'c1', rollNo: 'R1', fullName: 'Alice', userId: 'u1', classId: 'class-1',
+    });
+
+    assert.equal(createMock.mock.calls[0].arguments[1].classId, 'class-1');
+    assert.equal(student.class_id, 'class-1');
+  });
+
   await t.test('createStudent drops an aadhaar-shaped field instead of passing it through', async () => {
+    mockTutorClass(t);
     const createMock = t.mock.method(studentRepository, 'create', async (client, fields) => ({
       id: 'new-id',
       college_id: fields.collegeId,
@@ -70,6 +133,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
   // This session's own task: optional annual income, used for
   // scholarship eligibility (financeService.checkScholarshipEligibility).
   await t.test('createStudent passes annualIncome through to the repository', async () => {
+    mockTutorClass(t);
     const createMock = t.mock.method(studentRepository, 'create', async (client, fields) => ({
       id: 'new-id',
       college_id: fields.collegeId,
@@ -89,6 +153,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
   });
 
   await t.test('createStudent maps a 23505 unique violation to StudentRollNoConflictError', async () => {
+    mockTutorClass(t);
     const createMock = t.mock.method(studentRepository, 'create', async () => {
       const err = new Error('duplicate key value violates unique constraint "students_college_id_roll_no_key"');
       err.code = '23505';
@@ -102,7 +167,24 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
     );
   });
 
-  await t.test('createStudent lets a non-23505 repository error pass through unchanged', async () => {
+  await t.test('createStudent maps a students_class_id_fkey violation to StudentClassNotFoundError', async () => {
+    mockTutorClass(t);
+    const createMock = t.mock.method(studentRepository, 'create', async () => {
+      const err = new Error('insert or update on table "students" violates foreign key constraint "students_class_id_fkey"');
+      err.code = '23503';
+      err.constraint = 'students_class_id_fkey';
+      throw err;
+    });
+    t.after(() => createMock.mock.restore());
+
+    await assert.rejects(
+      () => studentService.createStudent({}, { collegeId: 'c1', rollNo: 'R1', fullName: 'Alice', userId: 'u1' }),
+      studentService.StudentClassNotFoundError,
+    );
+  });
+
+  await t.test('createStudent lets a non-23505/23503 repository error pass through unchanged', async () => {
+    mockTutorClass(t);
     const boom = new Error('connection lost');
     const createMock = t.mock.method(studentRepository, 'create', async () => {
       throw boom;

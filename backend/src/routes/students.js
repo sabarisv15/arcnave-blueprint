@@ -77,6 +77,18 @@ function mapStudentServiceError(err, res) {
     res.status(409).json({ detail: err.message });
     return true;
   }
+  if (err instanceof studentService.StudentNotClassTutorError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentClassMismatchError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentClassNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -111,20 +123,18 @@ function mapPhoneVerificationServiceError(err, res) {
 function createStudentsRouter() {
   const router = express.Router();
 
-  // RBAC here is a deliberately conservative default, not a final
-  // decision — same situation configurations.js was already in and
-  // handled the same way. BusinessRules.md's real rule (only the
-  // assigned Class Tutor may edit; only faculty assigned via the
-  // timetable may view) can't be enforced correctly today: "Class
-  // Tutor" isn't a resolved role yet (BusinessRules.md flags this as
-  // open, to be settled in Module 2), and there's no timetable/
-  // assignment data to check against yet either (Module 3, not
-  // built). Until then: any authenticated tenant user may read,
-  // requirePermission('students.create'/'update'/'delete') (mapped to
-  // ['principal'] in middleware/permissions.js) gates writes — a real,
-  // working role already used elsewhere in this codebase, not a guess
-  // at the eventual Class Tutor model. Must be revisited once Module 2
-  // resolves that question.
+  // POST /students: requirePermission('students.create') now maps to
+  // ['staff'] (middleware/permissions.js), and studentService.createStudent
+  // itself enforces "own class only" by resolving classes.tutor_user_id
+  // = actorUserId — see that function's own comment. PUT/DELETE remain
+  // the older conservative default (requirePermission('students.update'/
+  // 'delete') -> ['principal']) — BusinessRules.md's real rule for
+  // edits ("only the assigned Class Tutor may edit; HOD override for
+  // profile edits") still can't be enforced correctly for update/delete
+  // (no per-field HOD-override modeling yet), unlike create, which this
+  // session's task specifically resolved. Any authenticated tenant user
+  // may still read. Must be revisited once update/delete get the same
+  // treatment.
 
   router.post('/students', requirePermission('students.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;

@@ -93,8 +93,18 @@ const PERMISSION_ROLES = {
   'staff.update': ['principal'],
   'staff.delete': ['principal'],
 
-  // routes/students.js
-  'students.create': ['principal'],
+  // routes/students.js — students.create changed from ['principal'] to
+  // ['staff']: BusinessRules.md's real rule is "the assigned Class
+  // Tutor creates students for their own class," and Class Tutor is a
+  // staff member (classes.tutor_user_id -> users.id, no separate
+  // "tutor" role — see staffService.js's own comment that every role
+  // other than hod/principal "passes through untouched" as 'staff').
+  // This role check alone doesn't enforce "own class only" (that's
+  // studentService.createStudent's job, resolving classes.tutor_user_id
+  // = actorUserId itself) — it only excludes principal/hod/college_admin,
+  // none of whom are ever a class's tutor_user_id in practice, from
+  // reaching the route at all.
+  'students.create': ['staff'],
   'students.update': ['principal'],
   'students.delete': ['principal'],
 
