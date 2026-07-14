@@ -34,29 +34,60 @@
 //    workflowService.approveRequest/rejectRequest actually resolving,
 //    never a direct caller-supplied status write.
 //
-// One real channel: email, via nodemailer/SMTP (config.smtp.*, all
-// optional — see config.js). No SMTP_HOST configured is the expected
-// default in dev/test: sendEmail logs the message instead of
-// attempting to send. A configured-but-failing send is also never
-// fatal — delivery is recorded as failed (now a real
-// notification_delivery row for the ledger path, still just a log
-// line for the legacy sendStaffCredentialsEmail path), not thrown, so
-// a transient email problem never blocks the caller. dispatchApprovedNotification
-// applies that same "best-effort, never undo the approval" philosophy
-// to the ledger: it always advances a notification to 'Dispatched'
-// after attempting delivery, recording whatever sendEmail actually
-// returned ('sent'/'stubbed'/'failed') in notification_delivery rather
-// than blocking the status transition on send success — a failed send
-// is a fact to record/retry later, not a reason to leave the
-// already-approved notification stuck.
+// Three real channels: email/sms/whatsapp, each via a per-vendor
+// adapter under notificationProviders/ (PROVIDER_REGISTRY below) — no
+// nodemailer/Twilio/HTTP calls of this file's own anymore (item 2/4 of
+// this session's task). The legacy sendEmail path (staff credentials,
+// password reset, principal invitation) still uses the global
+// config.smtp fallback via smtpProvider; the ledger path
+// (dispatchApprovedNotification) and Send Alert (item 5) resolve a
+// per-college provider from college_notification_channels via
+// genericSend/resolveChannelProvider. No SMTP_HOST/channel row
+// configured is the expected default in dev/test: sending logs the
+// message instead of attempting to send. A configured-but-failing send
+// is also never fatal — delivery is recorded as failed (a real
+// notification_delivery row for the ledger path, still just a log line
+// for the legacy sendStaffCredentialsEmail path), not thrown, so a
+// transient delivery problem never blocks the caller.
+// dispatchApprovedNotification applies that same "best-effort, never
+// undo the approval" philosophy to the ledger: it always advances a
+// notification to 'Dispatched' after attempting delivery, recording
+// whatever genericSend actually returned ('sent'/'stubbed'/'failed') in
+// notification_delivery rather than blocking the status transition on
+// send success — a failed send is a fact to record/retry later, not a
+// reason to leave the already-approved notification stuck.
 
-const nodemailer = require('nodemailer');
-const twilioClient = require('../notificationProviders/twilioClient');
 const config = require('../config');
+const cryptoUtil = require('../cryptoUtil');
 const { logInfo, logWarn } = require('../logging/logger');
 const notificationRepository = require('../repositories/notificationRepository');
+const notificationChannelRepository = require('../repositories/notificationChannelRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const workflowService = require('./workflowService');
+const smtpProvider = require('./notificationProviders/email/smtp');
+
+// channel -> { providerName -> adapter module }. This is the ONLY
+// place a vendor name is ever written in this file (item 2/4 of this
+// session's task: "no hardcoded vendor references remain in
+// NotificationService"). fcm/telegram are deliberately absent — valid
+// college_notification_channels.channel values with no adapter file
+// yet (see that migration's own comment); resolveChannelProvider below
+// throws NotificationChannelNotImplementedError, not a silent stub, if
+// a college enables one, per this session's task.
+const PROVIDER_REGISTRY = {
+  email: { smtp: smtpProvider },
+  sms: { msg91: require('./notificationProviders/sms/msg91') },
+  whatsapp: { meta: require('./notificationProviders/whatsapp/meta') },
+};
+
+// The only channel values college_notification_channels.channel is
+// ever expected to hold (no DB CHECK constraint — see that migration's
+// own comment). Checked BEFORE any repository call, so a garbage
+// channel value fails the same visible way an unrecognized value
+// always has here, rather than silently falling through to the
+// "unconfigured, stub" path a real-but-not-yet-adapted channel
+// (fcm/telegram) is allowed to take.
+const KNOWN_CHANNELS = ['email', 'sms', 'whatsapp', 'fcm', 'telegram'];
 // NOT required at the top level like every other dependency in this
 // file: staffService.js itself requires notificationService.js (for
 // sendStaffCredentialsEmail), so a top-level require here would be a
@@ -106,9 +137,9 @@ class NotificationNoPendingRequestError extends Error {}
 class NotificationNotApprovedError extends Error {}
 
 // dispatchApprovedNotification called for a notification whose channel
-// isn't in CHANNEL_SENDERS at all (not email/sms/whatsapp — every
-// channel Architecture.md 2.8 names now has a real sender; this is
-// only reachable for some other value, since notifications.channel
+// isn't in KNOWN_CHANNELS at all, or is a known channel with no
+// adapter file for the college's configured provider (fcm/telegram —
+// see PROVIDER_REGISTRY's own comment), since notifications.channel
 // has no CHECK constraint enforcing a known set at the DB level — see
 // the migration's own comment). Thrown BEFORE any send attempt or
 // repository write, never swallowed into a fake 'sent'/'stubbed'
@@ -119,25 +150,6 @@ class NotificationNotApprovedError extends Error {}
 // failed real send already gets.
 class NotificationChannelNotImplementedError extends Error {}
 
-// Built fresh per call, not cached: nodemailer.createTransport is a
-// cheap, synchronous object construction (the real network connection
-// only happens lazily inside sendMail itself), so there's no real cost
-// to skipping a cache — and skipping it means config.smtp.host can
-// change between calls (as it does across this file's own test suite,
-// which exercises both the stubbed and configured paths) without a
-// stale transporter object from a previous call silently surviving.
-function getTransporter() {
-  if (!config.smtp.host) {
-    return null;
-  }
-  return nodemailer.createTransport({
-    host: config.smtp.host,
-    port: config.smtp.port,
-    secure: config.smtp.secure,
-    auth: config.smtp.user ? { user: config.smtp.user, pass: config.smtp.password } : undefined,
-  });
-}
-
 // The one primitive this file offers: send a plain-text email, or log
 // it as a stub if no SMTP provider is configured. Returns a status
 // object rather than throwing on delivery failure — see the file-level
@@ -147,108 +159,112 @@ function getTransporter() {
 // call it with: a future slice adding the real notifications ledger
 // (Architecture.md 2.8) needs it there without changing every call
 // site that already threads it through.
+//
+// Always uses the global config.smtp fallback, via smtpProvider — this
+// legacy path (staff credentials, password reset, principal invitation)
+// has no per-college channel row to resolve against (no collegeId is
+// even reliably available at every call site — see
+// sendPrincipalInvitationEmail's own comment), so it deliberately does
+// NOT go through resolveChannelProvider/college_notification_channels.
+// The nodemailer call itself lives in notificationProviders/email/smtp.js,
+// not here — this file has no vendor-specific code left at all (item 4
+// of this session's task).
 // eslint-disable-next-line no-unused-vars
 async function sendEmail(client, { to, subject, body }) {
   if (!to || !subject || !body) {
     throw new NotificationValidationError('to, subject, and body are required');
   }
 
-  const transporter = getTransporter();
-  if (transporter === null) {
+  const result = await smtpProvider.send(to, body, { subject });
+  if (result.status === 'stubbed') {
     logWarn('notification_email_stubbed', { to, subject });
-    return { channel: 'email', status: 'stubbed', to, subject };
-  }
-
-  try {
-    await transporter.sendMail({ from: config.smtp.fromAddress, to, subject, text: body });
+  } else if (result.status === 'sent') {
     logInfo('notification_email_sent', { to, subject });
-    return { channel: 'email', status: 'sent', to, subject };
-  } catch (err) {
-    logWarn('notification_email_failed', { to, subject, error: err.message });
-    return { channel: 'email', status: 'failed', to, subject, error: err.message };
+  } else {
+    logWarn('notification_email_failed', { to, subject, error: result.error });
   }
+  return { channel: 'email', status: result.status, to, subject, error: result.error };
 }
 
-// Twilio SMS API (via notificationProviders/twilioClient.js — never
-// the SDK directly here, so this stays mockable at the module-property
-// boundary this codebase's tests already rely on). No
-// TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM_NUMBER configured is the expected
-// default in dev/test: sendSms logs the message instead of attempting
-// to send (the exact same "would send: {...}" stub shape sendEmail
-// already uses for an unconfigured SMTP_HOST — never a fake 'sent'
-// status). Requires ALL three, not just credentials — a
-// partially-configured account (e.g. accountSid/authToken set but
-// fromNumber forgotten) is still "not configured," same as SMTP
-// needing more than just a host. Once real config IS present, this
-// always attempts a real send; a delivery failure is recorded as
-// 'failed' (never thrown), same best-effort philosophy every other
-// channel here already follows — dispatchApprovedNotification's own
-// "always advance to Dispatched regardless of outcome" behavior is
-// unchanged by adding a real provider.
-async function sendSms(client, { to, body }) {
+// college_notification_channels row -> decrypted plain credentials
+// object. `config` is always stored as { encrypted: <base64> } (see
+// the migration's own comment) — never plaintext at rest, reusing
+// cryptoUtil's AES-256-GCM helper per this session's own task
+// (encrypt any provider credentials in config jsonb at rest). No
+// config row / null config means no credentials — an empty object, not
+// an error, so a caller can still reach the adapter's own "not
+// configured, stub" branch.
+function decryptChannelConfig(row) {
+  if (!row || !row.config || !row.config.encrypted) {
+    return {};
+  }
+  return JSON.parse(cryptoUtil.decryptSecret(row.config.encrypted));
+}
+
+// Resolves { collegeId, channel } to a live channel_notification row +
+// its adapter module, throwing NotificationChannelNotImplementedError
+// if the channel/provider pair has no adapter file (this session's own
+// requirement for fcm/telegram: "resolver must fail clearly, not
+// silently"). Returns null (not a throw) when the college simply
+// hasn't configured/enabled this channel yet — genericSend treats that
+// as the existing "unconfigured, stub" case, unchanged behavior from
+// before per-college config existed.
+async function resolveChannelProvider(client, collegeId, channel) {
+  const row = await notificationChannelRepository.findByCollegeAndChannel(client, collegeId, channel);
+  if (!row || !row.enabled) {
+    return null;
+  }
+
+  const adapter = PROVIDER_REGISTRY[channel] && PROVIDER_REGISTRY[channel][row.provider];
+  if (!adapter) {
+    throw new NotificationChannelNotImplementedError(
+      `channel ${JSON.stringify(channel)} provider ${JSON.stringify(row.provider)} has no adapter implementation`,
+    );
+  }
+
+  return { adapter, credentials: decryptChannelConfig(row) };
+}
+
+// The generic, vendor-neutral send this file now uses for every
+// channel driven by college_notification_channels (dispatchApprovedNotification
+// below, and classService's Send Alert path — item 5 of this session's
+// task). Resolves the college's configured provider, delegates the
+// actual send to that adapter's own send(to, body, opts), and always
+// returns a status object rather than throwing on delivery failure —
+// same best-effort philosophy every channel here already followed
+// under the old hardcoded Twilio calls. `channel` must be one of
+// KNOWN_CHANNELS — checked before any repository call, same "guard
+// before any work" reasoning every other validation in this file uses.
+async function genericSend(client, {
+  collegeId, channel, to, body, subject,
+}) {
   if (!to || !body) {
     throw new NotificationValidationError('to and body are required');
   }
+  if (!KNOWN_CHANNELS.includes(channel)) {
+    throw new NotificationChannelNotImplementedError(`channel ${JSON.stringify(channel)} is not a known value`);
+  }
 
-  if (!config.twilio.accountSid || !config.twilio.authToken || !config.twilio.fromNumber) {
-    logWarn('notification_sms_stubbed', { to });
-    return { channel: 'sms', status: 'stubbed', to, body };
+  const resolved = await resolveChannelProvider(client, collegeId, channel);
+  if (resolved === null) {
+    logWarn(`notification_${channel}_stubbed`, { to });
+    return { channel, status: 'stubbed', to, body };
   }
 
   try {
-    const message = await twilioClient.sendMessage({
-      accountSid: config.twilio.accountSid,
-      authToken: config.twilio.authToken,
-      to,
-      from: config.twilio.fromNumber,
-      body,
-    });
-    logInfo('notification_sms_sent', { to, sid: message.sid });
+    const result = await resolved.adapter.send(to, body, { subject, credentials: resolved.credentials });
+    if (result.status === 'sent') {
+      logInfo(`notification_${channel}_sent`, { to, providerId: result.providerId });
+    } else {
+      logWarn(`notification_${channel}_failed`, { to, error: result.error });
+    }
     return {
-      channel: 'sms', status: 'sent', to, body, providerId: message.sid,
+      channel, status: result.status, to, body, providerId: result.providerId, error: result.error,
     };
   } catch (err) {
-    logWarn('notification_sms_failed', { to, error: err.message });
+    logWarn(`notification_${channel}_failed`, { to, error: err.message });
     return {
-      channel: 'sms', status: 'failed', to, body, error: err.message,
-    };
-  }
-}
-
-// Twilio WhatsApp API — the same underlying twilioClient.sendMessage
-// call as sendSms, but both `from` and `to` need the `whatsapp:` scheme
-// prefix Twilio's WhatsApp channel requires (a plain E.164 number
-// there routes as SMS instead), and the sender identity is its own
-// configured value (TWILIO_WHATSAPP_FROM), not TWILIO_FROM_NUMBER — a
-// WhatsApp-enabled sender is provisioned separately from a plain SMS
-// number, same reasoning this file already kept sendSms/sendWhatsapp
-// as two functions rather than one shared "non-email" stub.
-async function sendWhatsapp(client, { to, body }) {
-  if (!to || !body) {
-    throw new NotificationValidationError('to and body are required');
-  }
-
-  if (!config.twilio.accountSid || !config.twilio.authToken || !config.twilio.whatsappFrom) {
-    logWarn('notification_whatsapp_stubbed', { to });
-    return { channel: 'whatsapp', status: 'stubbed', to, body };
-  }
-
-  try {
-    const message = await twilioClient.sendMessage({
-      accountSid: config.twilio.accountSid,
-      authToken: config.twilio.authToken,
-      to: `whatsapp:${to}`,
-      from: `whatsapp:${config.twilio.whatsappFrom}`,
-      body,
-    });
-    logInfo('notification_whatsapp_sent', { to, sid: message.sid });
-    return {
-      channel: 'whatsapp', status: 'sent', to, body, providerId: message.sid,
-    };
-  } catch (err) {
-    logWarn('notification_whatsapp_failed', { to, error: err.message });
-    return {
-      channel: 'whatsapp', status: 'failed', to, body, error: err.message,
+      channel, status: 'failed', to, body, error: err.message,
     };
   }
 }
@@ -473,33 +489,22 @@ async function rejectNotification(client, notificationId, { actorUserId, remarks
   return notification;
 }
 
-// channel -> sender function, keyed exactly on the values
-// draftNotification actually accepts (no CHECK constraint on the
-// column — see the migration's own comment — so this map, not the
-// database, is what "a known channel" means). Deliberately NOT a
-// fallback-to-email default for an unrecognized value: silently
-// routing an sms/whatsapp notification through email would send it to
-// whatever's in to_address as if it were an email address, which for
-// a phone number is simply wrong, not a reasonable degradation.
-const CHANNEL_SENDERS = {
-  email: sendEmail,
-  sms: sendSms,
-  whatsapp: sendWhatsapp,
-};
-
-// Only callable once a notification is actually 'Approved'. Branches
-// on the notification's own `channel` (CHANNEL_SENDERS above) — email/
-// sms/whatsapp all now share the exact same best-effort philosophy:
-// always attempt, always record whatever the sender returned
-// ('sent'/'stubbed'/'failed'), always advance to 'Dispatched'
-// regardless of outcome (same reasoning sendStaffCredentialsEmail's
-// own caller already relies on for email). Only a genuinely
-// unrecognized channel (not in CHANNEL_SENDERS at all) still throws
+// Only callable once a notification is actually 'Approved'. Routes
+// through genericSend, which resolves the notification's OWN college's
+// configured provider for its channel (college_notification_channels —
+// item 4 of this session's task: no more hardcoded Twilio/nodemailer
+// calls here) — email/sms/whatsapp/fcm/telegram all now share the
+// exact same best-effort philosophy: always attempt, always record
+// whatever the send returned ('sent'/'stubbed'/'failed'), always
+// advance to 'Dispatched' regardless of outcome (same reasoning
+// sendStaffCredentialsEmail's own caller already relies on for email).
+// Only a genuinely unrecognized channel, or a known channel enabled
+// for this college with no adapter file (fcm/telegram), still throws
 // NotificationChannelNotImplementedError BEFORE any
-// notification_delivery row is written or status changes — see that
-// error class's own comment for why that case is a thrown, visible
-// failure rather than a recorded attempt: there is no real sender to
-// have attempted anything with.
+// notification_delivery row is written or status changes — genericSend
+// raises it synchronously, before its own try/catch, so it always
+// propagates rather than being recorded as a 'failed' delivery: there
+// is no real sender to have attempted anything with.
 async function dispatchApprovedNotification(client, notificationId) {
   const notification = await notificationRepository.findById(client, notificationId);
   if (notification === null) {
@@ -511,14 +516,9 @@ async function dispatchApprovedNotification(client, notificationId) {
     );
   }
 
-  const sender = CHANNEL_SENDERS[notification.channel];
-  if (!sender) {
-    throw new NotificationChannelNotImplementedError(
-      `channel ${JSON.stringify(notification.channel)} has no dispatch implementation`,
-    );
-  }
-
-  const sendResult = await sender(client, {
+  const sendResult = await genericSend(client, {
+    collegeId: notification.college_id,
+    channel: notification.channel,
     to: notification.to_address,
     subject: notification.subject,
     body: notification.body,
@@ -564,8 +564,6 @@ module.exports = {
   NotificationNotApprovedError,
   NotificationChannelNotImplementedError,
   sendEmail,
-  sendSms,
-  sendWhatsapp,
   sendStaffCredentialsEmail,
   sendPasswordResetEmail,
   sendPrincipalInvitationEmail,
@@ -575,4 +573,12 @@ module.exports = {
   rejectNotification,
   dispatchApprovedNotification,
   listNotifications,
+  // Exported for callers with their own vendor-neutral, per-college
+  // send need outside the approval ledger — currently classService's
+  // Send Alert path (item 5 of this session's task), which is
+  // documented as NOT routed through WorkflowService (own-class-only,
+  // human-sent, plain text, no AI — see BusinessRules.md/AI-Governance.md).
+  // Same resolver, same best-effort semantics as dispatchApprovedNotification
+  // uses internally, just without a notifications ledger row.
+  sendViaChannel: genericSend,
 };

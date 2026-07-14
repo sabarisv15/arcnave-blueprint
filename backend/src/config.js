@@ -105,23 +105,14 @@ module.exports = {
     fromAddress: process.env.SMTP_FROM_ADDRESS || 'no-reply@arcnave.local',
   },
 
-  // NotificationService's real sms/whatsapp channels (Twilio). Same
-  // "unconfigured means a log-only stub, not a crash" treatment smtp
-  // above already gets: accountSid/authToken/fromNumber/whatsappFrom
-  // all default to null, and notificationService.sendSms/sendWhatsapp
-  // check for that exact null before ever constructing a Twilio client
-  // — never a hardcoded fallback that could silently start making real
-  // (and billed) API calls.
-  twilio: {
-    accountSid: process.env.TWILIO_ACCOUNT_SID || null,
-    authToken: process.env.TWILIO_AUTH_TOKEN || null,
-    fromNumber: process.env.TWILIO_FROM_NUMBER || null,
-    // Twilio's WhatsApp API requires its own sender identity, distinct
-    // from the plain SMS fromNumber above (a WhatsApp-enabled number is
-    // provisioned separately) — same reasoning sendSms/sendWhatsapp are
-    // two separate functions, not one shared "non-email" stub.
-    whatsappFrom: process.env.TWILIO_WHATSAPP_FROM || null,
-  },
+  // NotificationService's real sms/whatsapp/email channels are now
+  // resolved per-college from college_notification_channels (see
+  // notificationChannelRepository.js/notificationService.js's
+  // PROVIDER_REGISTRY) — there is no more app-wide sms/whatsapp
+  // credential block here. Twilio was the only global provider this
+  // config ever held for those two channels; it's been replaced by the
+  // per-vendor adapters under services/notificationProviders/ (msg91,
+  // meta) and removed, not left as an unused fallback.
 
   // NVIDIA NIM (OpenAI-compatible /chat/completions) — the GLOBAL
   // default provider ConfigurationService.getAiConfig falls back to
