@@ -16,6 +16,7 @@ const assert = require('node:assert/strict');
 const documentService = require('../src/services/documentService');
 const configurationService = require('../src/services/configurationService');
 const tesseractOcr = require('../src/ocr/tesseractOcr');
+const pdfRasterizer = require('../src/ocr/pdfRasterizer');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const aiDocumentChunkRepository = require('../src/repositories/aiDocumentChunkRepository');
 const documentSearchService = require('../src/services/documentSearchService');
@@ -126,16 +127,70 @@ test('documentSearchService.ingestDocument', async (t) => {
     assert.equal(embedMock.mock.callCount(), 0);
   });
 
-  await t.test('a PDF (no rasterizer wired in yet) is refused before any embedding call', async () => {
+  await t.test('a multi-page PDF is rasterized page-by-page, each page OCR\'d, and the concatenated text chunked/embedded', async () => {
+    const { embedMock, createMock, auditMock } = mockIngestHappyPath(t, {
+      document: {
+        id: 'doc-1', college_id: 'college-a', doc_type: 'birth_cert', mime_type: 'application/pdf',
+      },
+    });
+    const rasterizeMock = t.mock.method(pdfRasterizer, 'rasterizePdfToImages', async () => [
+      Buffer.from('page-1-png-bytes'), Buffer.from('page-2-png-bytes'), Buffer.from('page-3-png-bytes'),
+    ]);
+    const ocrMock = t.mock.method(tesseractOcr, 'extractTextFromImage', async (pageBuffer) => `[text from ${pageBuffer.toString()}]`);
+    t.after(() => {
+      rasterizeMock.mock.restore();
+      ocrMock.mock.restore();
+    });
+
+    const result = await documentSearchService.ingestDocument({}, 'doc-1', { actorUserId: 'u1' });
+
+    assert.equal(rasterizeMock.mock.callCount(), 1);
+    assert.equal(ocrMock.mock.callCount(), 3);
+    // Page order preserved: OCR called in the same order pages were returned.
+    assert.equal(ocrMock.mock.calls[0].arguments[0].toString(), 'page-1-png-bytes');
+    assert.equal(ocrMock.mock.calls[1].arguments[0].toString(), 'page-2-png-bytes');
+    assert.equal(ocrMock.mock.calls[2].arguments[0].toString(), 'page-3-png-bytes');
+
+    assert.equal(embedMock.mock.callCount(), 1);
+    const [, texts] = embedMock.mock.calls[0].arguments;
+    assert.deepEqual(texts, ['[text from page-1-png-bytes]\n\n[text from page-2-png-bytes]\n\n[text from page-3-png-bytes]']);
+    assert.equal(createMock.mock.callCount(), 1);
+    assert.equal(auditMock.mock.calls[0].arguments[1].action, 'ai_document_ingested');
+    assert.equal(result.chunkCount, 1);
+  });
+
+  await t.test('an Aadhaar-doc_type PDF is still refused (CLAUDE.md rule 8 applies after OCR too, no PDF shortcut)', async () => {
+    const { embedMock } = mockIngestHappyPath(t, {
+      document: {
+        id: 'doc-1', college_id: 'college-a', doc_type: documentService.AADHAAR_DOC_TYPE, mime_type: 'application/pdf',
+      },
+    });
+    const rasterizeMock = t.mock.method(pdfRasterizer, 'rasterizePdfToImages', async () => [Buffer.from('page-1')]);
+    const ocrMock = t.mock.method(tesseractOcr, 'extractTextFromImage', async () => 'some aadhaar text');
+    t.after(() => {
+      rasterizeMock.mock.restore();
+      ocrMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => documentSearchService.ingestDocument({}, 'doc-1', { actorUserId: 'u1' }),
+      documentSearchService.DocumentSearchAadhaarBlockedError,
+    );
+    assert.equal(embedMock.mock.callCount(), 0);
+  });
+
+  await t.test('a PDF rasterization failure propagates, no embedding call', async () => {
     const { embedMock } = mockIngestHappyPath(t, {
       document: {
         id: 'doc-1', college_id: 'college-a', doc_type: 'birth_cert', mime_type: 'application/pdf',
       },
     });
+    const rasterizeMock = t.mock.method(pdfRasterizer, 'rasterizePdfToImages', async () => { throw new pdfRasterizer.PdfRasterizationError('pdftoppm failed'); });
+    t.after(() => rasterizeMock.mock.restore());
 
     await assert.rejects(
       () => documentSearchService.ingestDocument({}, 'doc-1', { actorUserId: 'u1' }),
-      documentSearchService.DocumentSearchUnsupportedContentError,
+      pdfRasterizer.PdfRasterizationError,
     );
     assert.equal(embedMock.mock.callCount(), 0);
   });

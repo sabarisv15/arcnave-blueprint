@@ -6,11 +6,10 @@
 // its own in the tool entry). This file owns two real jobs:
 //
 //   1. ingestDocument — chunk + embed an already-uploaded document's
-//      text content. Deliberately NOT auto-wired into
-//      documentService.uploadDocument: every real upload in this
-//      codebase is binary (PDF/image), there is no OCR pipeline yet
-//      (see below), and — concretely — making it automatic would mean
-//      every document upload attempts a real network call to whatever
+//      text content (OCR'd first for images/PDFs — see below).
+//      Deliberately NOT auto-wired into documentService.uploadDocument:
+//      making it automatic would mean every document upload attempts a
+//      real OCR pass plus a real network call to whatever
 //      LLM provider happens to be configured in a given environment,
 //      including inside the committed test suite (documents.test.js/
 //      reports.test.js upload real files against live Postgres) —
@@ -46,16 +45,23 @@
 // A real OCR pipeline now exists (ocr/tesseractOcr.js, Tesseract via
 // tesseract.js) for raster images (png/jpeg/bmp/tiff) — ingestDocument
 // runs OCR-extracted text through the exact same chunk/embed/classify
-// path a text/* document already used, no separate treatment. PDF is
-// still refused: tesseract.js has no built-in PDF rasterizer and this
-// project has no PDF-to-image dependency installed, so a PDF upload
-// gets a real, flagged DocumentSearchUnsupportedContentError, not
-// mis-chunked from raw binary bytes or silently faked as OCR'd.
+// path a text/* document already used, no separate treatment. PDF now
+// goes through ocr/pdfRasterizer.js first (poppler-utils' pdftoppm,
+// see backend/Dockerfile) — each page becomes a PNG, OCR'd individually
+// via the same tesseractOcr.extractTextFromImage, then concatenated in
+// page order before entering the exact same pipeline. The rasterized
+// page images are pure in-memory Buffers by the time they reach this
+// file — pdfRasterizer.js's own temp dir (pdftoppm has no streaming
+// API, only a file-based CLI contract) is created and removed entirely
+// inside that one call; nothing here, or there, ever writes a
+// rasterized page to DocumentService's permanent storage (CLAUDE.md
+// rule 2 — DocumentService remains the sole owner of persisted files).
 
 const documentService = require('./documentService');
 const aiClassificationAccess = require('./aiClassificationAccess');
 const configurationService = require('./configurationService');
 const tesseractOcr = require('../ocr/tesseractOcr');
+const pdfRasterizer = require('../ocr/pdfRasterizer');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const aiDocumentChunkRepository = require('../repositories/aiDocumentChunkRepository');
 
@@ -73,18 +79,16 @@ class DocumentSearchNotFoundError extends Error {}
 // later at query time.
 class DocumentSearchAadhaarBlockedError extends Error {}
 
-// A document whose mime_type is neither text-decodable nor a
-// Tesseract-supported raster image is refused, not mis-chunked from
-// raw binary bytes. PDF is the one common upload type still in this
-// bucket — tesseract.js has no built-in PDF page rasterizer and this
-// project has no PDF-to-image dependency installed (see
-// ocr/tesseractOcr.js's own file comment) — a real, flagged gap, not
-// silently faked.
+// A document whose mime_type is neither text-decodable, a
+// Tesseract-supported raster image, nor application/pdf is refused,
+// not mis-chunked from raw binary bytes.
 class DocumentSearchUnsupportedContentError extends Error {}
 
 // tesseract.js recognizes these directly, no rasterization step
-// needed. PDF deliberately not included — see the class comment above.
+// needed. application/pdf is handled separately (see ingestDocument)
+// via ocr/pdfRasterizer.js first.
 const OCR_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/bmp', 'image/tiff']);
+const PDF_MIME_TYPE = 'application/pdf';
 
 // Mirrors doc_type's own "known values documented here, not enforced
 // by the DB" convention (see the Module 6 documents migration) — this
@@ -161,21 +165,35 @@ async function ingestDocument(client, documentId, { actorUserId } = {}) {
   }
   const { document, buffer } = result;
 
-  // Two ways in: a text/* document is decoded directly (unchanged from
-  // before); an OCR-supported image runs through tesseractOcr first —
-  // either way, `text` below is untrusted, human/image-derived content
+  // Three ways in: a text/* document is decoded directly (unchanged
+  // from before); an OCR-supported image runs through tesseractOcr
+  // directly; a PDF is rasterized to one PNG per page first
+  // (pdfRasterizer.rasterizePdfToImages), each page OCR'd individually
+  // in page order, then joined with a blank line between pages. Either
+  // way, `text` below is untrusted, human/image-derived content
   // (CLAUDE.md rule 9), fed into the exact same chunk/embed pipeline
-  // with no special trust granted to OCR output over typed text.
+  // with no special trust granted to OCR output over typed text, and
+  // no shortcut around classifyDocType's own Aadhaar-block/
+  // classification rules below — a PDF is classified exactly like any
+  // other doc_type, never treated as a special case.
   let text;
   if (typeof document.mime_type === 'string' && document.mime_type.startsWith('text/')) {
     text = buffer.toString('utf8');
   } else if (typeof document.mime_type === 'string' && OCR_IMAGE_MIME_TYPES.has(document.mime_type)) {
     text = await tesseractOcr.extractTextFromImage(buffer);
+  } else if (document.mime_type === PDF_MIME_TYPE) {
+    const pageImages = await pdfRasterizer.rasterizePdfToImages(buffer);
+    const pageTexts = [];
+    for (const pageImage of pageImages) {
+      // eslint-disable-next-line no-await-in-loop
+      pageTexts.push(await tesseractOcr.extractTextFromImage(pageImage));
+    }
+    text = pageTexts.join('\n\n');
   } else {
     throw new DocumentSearchUnsupportedContentError(
       `document ${JSON.stringify(documentId)} has mime_type ${JSON.stringify(document.mime_type)}, which this `
-      + 'slice cannot extract text from (only text/* content and OCR-supported images '
-      + `[${[...OCR_IMAGE_MIME_TYPES].join(', ')}] are supported — PDF has no rasterizer wired in yet)`,
+      + 'slice cannot extract text from (only text/* content, OCR-supported images '
+      + `[${[...OCR_IMAGE_MIME_TYPES].join(', ')}], and application/pdf are supported)`,
     );
   }
 
