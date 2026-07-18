@@ -98,7 +98,11 @@ module.exports = {
   // Consequences).
   documentStorageRoot: process.env.DOCUMENT_STORAGE_ROOT || path.join(__dirname, '../storage'),
   documentBackupRoot: process.env.DOCUMENT_BACKUP_ROOT || path.join(__dirname, '../storage-backups'),
-  documentStorageEncryptionKey: process.env.DOCUMENT_STORAGE_ENCRYPTION_KEY || 'local-dev-document-key-change-me',
+  // A real secret (encrypts every stored document at rest) — required(),
+  // same as the JWT keys above. Previously defaulted to a public,
+  // known literal, which would have silently encrypted production
+  // documents with a key visible in this file's own git history.
+  documentStorageEncryptionKey: required('DOCUMENT_STORAGE_ENCRYPTION_KEY'),
 
   // NotificationService's real email channel (Module 8). Deliberately
   // NOT required() like the connection strings/JWT secrets above:

@@ -20,6 +20,7 @@ env:
   ARCNAVE_PLATFORM_PASSWORD: ci_platform_password
   JWT_SECRET_KEY: ci_jwt_secret_key_not_for_prod_1234567890
   PLATFORM_JWT_SECRET_KEY: ci_platform_jwt_secret_key_not_for_prod_1234567890
+  DOCUMENT_STORAGE_ENCRYPTION_KEY: ci_document_storage_encryption_key_not_for_prod_1234567890
   DATABASE_URL: postgresql://arcnave_app:ci_app_password@localhost:5432/arcnave
   # Renamed from ALEMBIC_DATABASE_URL — Alembic is gone (ADR-016),
   # config.js/docker-compose.yml both read MIGRATION_DATABASE_URL now.

@@ -84,7 +84,7 @@ services:
       # happens to match config.js's fallback by coincidence.
       DOCUMENT_STORAGE_ROOT: /app/storage
       DOCUMENT_BACKUP_ROOT: /app/storage-backups
-      DOCUMENT_STORAGE_ENCRYPTION_KEY: ${DOCUMENT_STORAGE_ENCRYPTION_KEY:-local-dev-document-key-change-me}
+      DOCUMENT_STORAGE_ENCRYPTION_KEY: ${DOCUMENT_STORAGE_ENCRYPTION_KEY:?set DOCUMENT_STORAGE_ENCRYPTION_KEY in .env}
     ports:
       - "8000:8000"
     volumes:
