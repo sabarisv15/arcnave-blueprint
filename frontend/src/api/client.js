@@ -136,3 +136,34 @@ export async function downloadFile(path, fallbackFileName) {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+// Same blob/filename handling as downloadFile, but for the one route
+// (POST /documents/:id/merge) that streams file bytes back from a
+// POST-with-body call instead of a plain GET.
+export async function postForFile(path, body, fallbackFileName) {
+  const token = getAccessToken();
+  const collegeCode = getCollegeCode();
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(collegeCode ? { 'X-College-Code': collegeCode } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new ApiError(res.status, data && data.detail, data);
+  }
+  const disposition = res.headers.get('content-disposition') || '';
+  const match = /filename="?([^"]+)"?/.exec(disposition);
+  const fileName = (match && match[1]) || fallbackFileName || 'download';
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
