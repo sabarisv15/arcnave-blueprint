@@ -32,7 +32,14 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # pgvector/pgvector:pg16, not plain postgres:16 — same drop-in
+        # swap docker-compose.yml already made for the Module 9 RAG
+        # slice's ai_document_chunks migration (CREATE EXTENSION
+        # vector). Plain postgres:16 has no vector.control file at all,
+        # so `CREATE EXTENSION IF NOT EXISTS vector` fails outright
+        # (not a permissions issue `IF NOT EXISTS` could paper over —
+        # the extension binary itself is missing).
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: ${{ env.POSTGRES_USER }}
           POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
