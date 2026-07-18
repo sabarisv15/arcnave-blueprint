@@ -24,6 +24,7 @@ import { facultyAllocationApi } from '@/api/facultyAllocation';
 import { ApiError } from '@/api/client';
 import { facultyAllocationFormSchema, substituteAssignmentFormSchema } from '@/features/academic/schemas';
 import { ExaminationTab } from '@/features/academic/components/ExaminationTab';
+import { AssessmentTab } from '@/features/academic/components/AssessmentTab';
 
 function ProfileTab({ cls, id, navigate }) {
   const queryClient = useQueryClient();
@@ -310,12 +311,14 @@ export function ClassDetailPage() {
           <TabsTrigger value="substitutes">Substitutes</TabsTrigger>
           <TabsTrigger value="timetable">Timetable</TabsTrigger>
           <TabsTrigger value="examination">Examination</TabsTrigger>
+          <TabsTrigger value="assessment">Assessment</TabsTrigger>
         </TabsList>
         <TabsContent value="profile"><ProfileTab cls={cls} id={id} navigate={navigate} /></TabsContent>
         <TabsContent value="allocation"><FacultyAllocationTab id={id} /></TabsContent>
         <TabsContent value="substitutes"><SubstituteAssignmentsTab id={id} /></TabsContent>
         <TabsContent value="timetable"><TimetableTab id={id} /></TabsContent>
         <TabsContent value="examination"><ExaminationTab id={id} /></TabsContent>
+        <TabsContent value="assessment"><AssessmentTab id={id} /></TabsContent>
       </Tabs>
     </div>
   );

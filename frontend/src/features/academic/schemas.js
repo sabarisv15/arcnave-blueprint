@@ -60,3 +60,16 @@ export const substituteAssignmentFormSchema = z.object({
 export const examDocumentUploadSchema = z.object({
   docType: z.string().min(1, 'Document type is required'),
 });
+
+export const assessmentTypeFormSchema = z.object({
+  name: z.string().min(1, 'Name is required'),
+  maxMarks: z.coerce.number().positive('Max marks is required'),
+});
+
+export const assessmentMarkFormSchema = z.object({
+  academicYear: z.string().min(1, 'Academic year is required'),
+  subject: z.string().min(1, 'Subject is required'),
+  assessmentTypeId: z.string().min(1, 'Assessment type is required'),
+  studentId: z.string().min(1, 'Student is required'),
+  marksObtained: z.coerce.number().min(0, 'Marks obtained is required'),
+});
