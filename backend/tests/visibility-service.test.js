@@ -79,11 +79,11 @@ test('visibilityService.getVisibleClassIds / assertCanViewClass', async (t) => {
     await visibilityService.assertCanViewClass({}, 'class-b', { collegeId: 'c1', actorUserId: 'principal-1', actorRole: 'principal' });
   });
 
-  await t.test('college_admin has no class visibility by default', async () => {
-    const ids = await visibilityService.getVisibleClassIds({}, { collegeId: 'c1', actorUserId: 'admin-1', actorRole: 'college_admin' });
+  await t.test('an unrecognized role has no class visibility by default', async () => {
+    const ids = await visibilityService.getVisibleClassIds({}, { collegeId: 'c1', actorUserId: 'someone-1', actorRole: 'unmapped_role' });
     assert.deepEqual(ids, []);
     await assert.rejects(
-      () => visibilityService.assertCanViewClass({}, 'class-a', { collegeId: 'c1', actorUserId: 'admin-1', actorRole: 'college_admin' }),
+      () => visibilityService.assertCanViewClass({}, 'class-a', { collegeId: 'c1', actorUserId: 'someone-1', actorRole: 'unmapped_role' }),
       visibilityService.VisibilityForbiddenError,
     );
   });
@@ -163,11 +163,9 @@ test('visibilityService.assertCanViewStaff', async (t) => {
     );
   });
 
-  await t.test('principal and college_admin may view any staff member college-wide', async () => {
+  await t.test('principal may view any staff member college-wide', async () => {
     mockFindById(t, STAFF_ROW);
     await visibilityService.assertCanViewStaff({}, { staffId: 'staff-row-1' }, { actorUserId: 'principal-1', actorRole: 'principal' });
-    mockFindById(t, STAFF_ROW);
-    await visibilityService.assertCanViewStaff({}, { staffId: 'staff-row-1' }, { actorUserId: 'admin-1', actorRole: 'college_admin' });
   });
 
   await t.test('resolves by userId as well as staffId', async () => {
@@ -181,5 +179,115 @@ test('visibilityService.assertCanViewStaff', async (t) => {
     mockFindById(t, null);
     const result = await visibilityService.assertCanViewStaff({}, { staffId: 'missing' }, { actorUserId: 'user-1', actorRole: 'principal' });
     assert.equal(result, null);
+  });
+});
+
+// Every public function above accepts either the legacy
+// {actorUserId, actorRole} shape or an already-built ActorContext
+// directly. These tests hold the actor+resource fixed and check both
+// input shapes reach the exact same allow/deny outcome.
+test('visibilityService dual-input support (legacy shape vs. pre-built ActorContext)', async (t) => {
+  await t.test('getVisibleClassIds: staff legacy shape and ActorContext shape agree', async () => {
+    mockTutorClass(t, CLASS_A);
+    mockAllocations(t, [{ class_id: 'class-b' }]);
+    const viaLegacy = await visibilityService.getVisibleClassIds(
+      {},
+      { collegeId: 'c1', actorUserId: 'staff-a', actorRole: 'staff' },
+    );
+
+    const actorContext = {
+      actorId: 'staff-a',
+      tenantId: 'c1',
+      role: 'staff',
+      scopeLevel: 'self_assigned',
+      departmentIds: [],
+      assignedClassIds: ['class-a', 'class-b'],
+      campusIds: ['c1'],
+    };
+    const viaActorContext = await visibilityService.getVisibleClassIds({}, actorContext);
+
+    assert.deepEqual([...viaLegacy].sort(), [...viaActorContext].sort());
+  });
+
+  await t.test('getVisibleClassIds: hod legacy shape and ActorContext shape agree', async () => {
+    const deptMock = t.mock.method(staffService, 'findHodDepartmentId', async () => 'dept-1');
+    t.after(() => deptMock.mock.restore());
+    mockFindClassById(t);
+    const findByDeptMock = t.mock.method(classRepository, 'findByDepartmentId', async () => [CLASS_A]);
+    t.after(() => findByDeptMock.mock.restore());
+
+    const viaLegacy = await visibilityService.getVisibleClassIds(
+      {},
+      { collegeId: 'c1', actorUserId: 'hod-1', actorRole: 'hod' },
+    );
+
+    const actorContext = {
+      actorId: 'hod-1',
+      tenantId: 'c1',
+      role: 'hod',
+      scopeLevel: 'department',
+      departmentIds: ['dept-1'],
+      assignedClassIds: [],
+      campusIds: ['c1'],
+    };
+    const viaActorContext = await visibilityService.getVisibleClassIds({}, actorContext);
+
+    assert.deepEqual(viaLegacy, viaActorContext);
+  });
+
+  await t.test('assertCanViewClass: an ActorContext-shaped input is rejected exactly like the equivalent legacy shape', async () => {
+    mockTutorClass(t, CLASS_A);
+    mockAllocations(t, []);
+    const legacyInput = { collegeId: 'c1', actorUserId: 'staff-a', actorRole: 'staff' };
+    await assert.rejects(
+      () => visibilityService.assertCanViewClass({}, 'class-b', legacyInput),
+      visibilityService.VisibilityForbiddenError,
+    );
+
+    mockTutorClass(t, CLASS_A);
+    mockAllocations(t, []);
+    const actorContext = {
+      actorId: 'staff-a',
+      tenantId: 'c1',
+      role: 'staff',
+      scopeLevel: 'self_assigned',
+      departmentIds: [],
+      assignedClassIds: ['class-a'],
+      campusIds: ['c1'],
+    };
+    await assert.rejects(
+      () => visibilityService.assertCanViewClass({}, 'class-b', actorContext),
+      visibilityService.VisibilityForbiddenError,
+    );
+  });
+
+  await t.test('assertCanViewStaff: hod legacy shape and ActorContext shape both grant access to their own department\'s staff', async () => {
+    const STAFF_ROW = {
+      id: 'staff-row-1', user_id: 'user-1', college_id: 'c1', department_id: 'dept-1',
+    };
+    const findByIdMock = t.mock.method(staffRepository, 'findById', async () => STAFF_ROW);
+    t.after(() => findByIdMock.mock.restore());
+    const deptMock = t.mock.method(staffService, 'findHodDepartmentId', async () => 'dept-1');
+    t.after(() => deptMock.mock.restore());
+
+    const viaLegacy = await visibilityService.assertCanViewStaff(
+      {},
+      { staffId: 'staff-row-1' },
+      { actorUserId: 'hod-1', actorRole: 'hod' },
+    );
+
+    const actorContext = {
+      actorId: 'hod-1',
+      tenantId: 'c1',
+      role: 'hod',
+      scopeLevel: 'department',
+      departmentIds: ['dept-1'],
+      assignedClassIds: [],
+      campusIds: ['c1'],
+    };
+    const viaActorContext = await visibilityService.assertCanViewStaff({}, { staffId: 'staff-row-1' }, actorContext);
+
+    assert.equal(viaLegacy.id, STAFF_ROW.id);
+    assert.equal(viaActorContext.id, STAFF_ROW.id);
   });
 });

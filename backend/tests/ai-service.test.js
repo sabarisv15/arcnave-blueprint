@@ -705,7 +705,7 @@ test('draft_notification: staff (not in allowedRoles) is rejected by the Policy 
 
 test('draft_notification: a role permitted to invoke the tool but not permitted to see Confidential data is rejected on classification, distinctly from role — proven with a dummy allowedRoles override', async () => {
   // Every role currently in draft_notification's own allowedRoles
-  // (principal/college_admin/hod) already has Confidential access in
+  // (principal/hod) already has Confidential access in
   // ROLE_CLASSIFICATION_ACCESS, so the real tool can't exercise a
   // role-permitted-but-classification-denied case on its own — proven
   // instead with a dummy tool sharing draft_notification's exact

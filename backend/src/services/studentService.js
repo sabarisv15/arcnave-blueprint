@@ -17,9 +17,13 @@
 
 const studentRepository = require('../repositories/studentRepository');
 const classRepository = require('../repositories/classRepository');
+const studentTransferRequestRepository = require('../repositories/studentTransferRequestRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const staffService = require('./staffService');
 const visibilityService = require('./visibilityService');
+const workflowService = require('./workflowService');
+const configurationService = require('./configurationService');
+const studentLifecycleEventRepository = require('../repositories/studentLifecycleEventRepository');
 
 // Missing roll_no or full_name — StudentEditorModal.jsx marks both
 // required and blocks its own "Next" step without them. Raised before
@@ -70,6 +74,76 @@ class StudentClassNotFoundError extends Error {}
 // role, or a role/scope mismatch, gets this one error — a caller only
 // needs to know "not allowed," not which of the three checks failed.
 class StudentNotAuthorizedError extends Error {}
+
+// Missing studentId/destinationClassId (internal) or
+// destinationCollegeId (inter_college), or missing requestedByUserId —
+// requestInternalTransfer/requestInterCollegeTransfer's own required
+// inputs.
+class StudentTransferValidationError extends Error {}
+
+// A transfer request against a studentId with no matching row.
+class StudentTransferStudentNotFoundError extends Error {}
+
+// requestInternalTransfer given a destinationClassId that doesn't
+// exist — classes_pkey violated (Postgres 23503) surfaced as a domain
+// error, same precedent as academicService's own
+// ClassDepartmentNotFoundError.
+class StudentTransferClassNotFoundError extends Error {}
+
+// approve/rejectStudentTransfer given a transferRequestId with no
+// matching row, or one that doesn't belong to the given studentId.
+class StudentTransferNotFoundError extends Error {}
+
+// approve/rejectStudentTransfer called for a transfer request with no
+// live Pending workflow_requests row (never submitted, or already
+// resolved) — same "required lookup, not an optional fetch" shape as
+// academicService.ClassTimetableApprovalNotPendingError.
+class StudentTransferNoPendingRequestError extends Error {}
+
+// BusinessRules.md Student lifecycle: "Applied, Admitted, Active,
+// Suspended, Discontinued, Debarred, Dismissed, Graduated, Alumni, and
+// Archived are recognized lifecycle states." Known values enforced at
+// the service layer, same house convention as every other status-like
+// column in this schema — no DB CHECK constraint exists for it.
+const LIFECYCLE_STATES = [
+  'Applied', 'Admitted', 'Active', 'Suspended', 'Discontinued', 'Debarred', 'Dismissed', 'Graduated', 'Alumni', 'Archived',
+];
+
+// "Discontinued, Debarred, and Dismissed states block automatic
+// progression unless changed through approved workflow" (Student
+// lifecycle) + "discontinuation is initiated by the Class Tutor and
+// requires institutional workflow approval" (the earlier resolved
+// Students entry this rule updates) — all three severe transitions
+// require approval, not just a direct tutor-set change. Graduated is
+// included too: "graduation is assigned... with Principal approval
+// where required" (Semester progression and graduation) — the same
+// approval mechanism handles both severe-exit and graduation
+// transitions, not two separate code paths.
+const APPROVAL_REQUIRED_STATES = ['Discontinued', 'Debarred', 'Dismissed', 'Graduated'];
+
+// Discontinued/Debarred/Dismissed block automatic semester promotion
+// (Student lifecycle / Semester progression and graduation's own
+// promotion-eligibility table) — Suspended is handled separately
+// (institution-configurable), not a blanket block.
+const PROMOTION_BLOCKING_STATES = ['Discontinued', 'Debarred', 'Dismissed'];
+
+// Missing newStatus/reason, or newStatus not one of LIFECYCLE_STATES —
+// "every status change is permanently audited... reason" makes reason
+// mandatory, not optional, for every lifecycle change, unlike an
+// ordinary profile-field edit.
+class StudentLifecycleValidationError extends Error {}
+
+class StudentLifecycleStudentNotFoundError extends Error {}
+
+// updateStudentLifecycleStatus called with a newStatus that's actually
+// one of APPROVAL_REQUIRED_STATES — that transition must go through
+// requestLifecycleStatusChange/approveLifecycleStatusChange instead;
+// this is not a looser, unapproved way to reach the same status.
+class StudentLifecycleApprovalRequiredError extends Error {}
+
+// approve/rejectLifecycleStatusChange called for a student with no
+// live Pending 'student_lifecycle_change' workflow_requests row.
+class StudentLifecycleNoPendingRequestError extends Error {}
 
 // The fields this service accepts for create/update, deliberately
 // listed here rather than trusting studentRepository's own COLUMNS
@@ -470,6 +544,414 @@ async function listStudents(client, { limit = 50, offset = 0 } = {}, { actorUser
   return [];
 }
 
+// A thin passthrough — the natural "this class's full roster" lookup
+// other services need once they've already resolved their own
+// authorization for that specific class (e.g. attendanceService's own
+// AI attendance assistant, which only reaches this after
+// assertCanMark's real eligibility check already passed). Reads
+// through StudentService rather than studentRepository directly, same
+// "read foreign-domain data via its service, not its repository"
+// boundary financeService.checkScholarshipEligibility already draws
+// via studentService.getStudent.
+async function listStudentsForClass(client, classId) {
+  return studentRepository.findByClassId(client, classId);
+}
+
+// BusinessRules.md Student transfer: "internal department/course
+// transfers update the student's academic context while preserving
+// enrollment continuity... transfers follow the institution's
+// configured academic approval workflow and are permanently audited."
+// Single-step chain (Principal) — nothing in BusinessRules.md scopes
+// this to a department the way Staff's HOD->Principal chain needs a
+// real HOD to resolve, same reasoning
+// financeService.submitFeeStructureApproval gives for fee_structures.
+async function requestInternalTransfer(client, studentId, { destinationClassId, reason }, { requestedByUserId, origin = 'human' } = {}) {
+  if (!destinationClassId) {
+    throw new StudentTransferValidationError('destinationClassId is required');
+  }
+  if (!requestedByUserId) {
+    throw new StudentTransferValidationError('requestedByUserId is required');
+  }
+
+  const student = await studentRepository.findById(client, studentId);
+  if (student === null) {
+    throw new StudentTransferStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
+  }
+
+  const principal = await staffService.findPrincipal(client, student.college_id);
+
+  const workflowRequest = await workflowService.submitRequest(client, {
+    collegeId: student.college_id,
+    entityType: 'student_transfer',
+    entityId: student.id,
+    requestedByUserId,
+    origin,
+    approverChain: [{ step: 1, role: 'principal', user_id: principal.user_id }],
+  });
+
+  let transferRequest;
+  try {
+    transferRequest = await studentTransferRequestRepository.create(client, {
+      collegeId: student.college_id,
+      studentId,
+      permanentStudentId: student.permanent_student_id,
+      transferType: 'internal',
+      destinationClassId,
+      reason,
+      requestedByUserId,
+      workflowRequestId: workflowRequest.id,
+    });
+  } catch (err) {
+    if (err.code === '23503' && err.constraint === 'student_transfer_requests_destination_class_id_fkey') {
+      throw new StudentTransferClassNotFoundError(`class ${JSON.stringify(destinationClassId)} does not exist`);
+    }
+    throw err;
+  }
+
+  return { workflowRequest, transferRequest };
+}
+
+// BusinessRules.md Student transfer: "inter-college transfers create a
+// new enrollment linked to the same Permanent Student ID." This
+// function only records and approves the SOURCE college's side of
+// that (the documented, audited fact that this college approved the
+// student's departure to destinationCollegeId) — it never creates or
+// touches any row in another tenant's `students` table. See the
+// migration's own file-level comment for why: this codebase's tenant
+// isolation has no cross-tenant write mechanism at the service layer,
+// and building one here would be a real, unreviewed expansion of that
+// boundary, not a business-logic decision. The destination college's
+// own new enrollment row (sharing this same permanent_student_id) is a
+// separate, later action on that college's own side — most likely
+// through its own admission/onboarding flow, not automated by this
+// function.
+async function requestInterCollegeTransfer(client, studentId, { destinationCollegeId, reason }, { requestedByUserId, origin = 'human' } = {}) {
+  if (!destinationCollegeId) {
+    throw new StudentTransferValidationError('destinationCollegeId is required');
+  }
+  if (!requestedByUserId) {
+    throw new StudentTransferValidationError('requestedByUserId is required');
+  }
+
+  const student = await studentRepository.findById(client, studentId);
+  if (student === null) {
+    throw new StudentTransferStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
+  }
+
+  const principal = await staffService.findPrincipal(client, student.college_id);
+
+  const workflowRequest = await workflowService.submitRequest(client, {
+    collegeId: student.college_id,
+    entityType: 'student_transfer',
+    entityId: student.id,
+    requestedByUserId,
+    origin,
+    approverChain: [{ step: 1, role: 'principal', user_id: principal.user_id }],
+  });
+
+  const transferRequest = await studentTransferRequestRepository.create(client, {
+    collegeId: student.college_id,
+    studentId,
+    permanentStudentId: student.permanent_student_id,
+    transferType: 'inter_college',
+    destinationCollegeId,
+    reason,
+    requestedByUserId,
+    workflowRequestId: workflowRequest.id,
+  });
+
+  return { workflowRequest, transferRequest };
+}
+
+async function loadPendingTransferRequest(client, studentId, transferRequestId) {
+  const transferRequest = await studentTransferRequestRepository.findById(client, transferRequestId);
+  if (transferRequest === null || transferRequest.student_id !== studentId) {
+    throw new StudentTransferNotFoundError(
+      `transfer request ${JSON.stringify(transferRequestId)} for student ${JSON.stringify(studentId)} does not exist`,
+    );
+  }
+  if (transferRequest.workflow_request_id === null) {
+    throw new StudentTransferNoPendingRequestError(`transfer request ${JSON.stringify(transferRequestId)} has no workflow request`);
+  }
+  const pending = await workflowService.getRequest(client, transferRequest.workflow_request_id);
+  if (pending === null || pending.status !== 'Pending') {
+    throw new StudentTransferNoPendingRequestError(`transfer request ${JSON.stringify(transferRequestId)} has no pending approval request`);
+  }
+  return { transferRequest, pending };
+}
+
+// Approving an 'internal' transfer is the one case that actually
+// changes the student's own row (class_id) — via studentRepository
+// directly, bypassing assertCanModifyStudent's ordinary tutor/hod/
+// principal scoping on purpose: this IS the sanctioned path
+// BusinessRules.md names ("except through an official ... workflow"),
+// not a second, looser way to edit classId. Approving an
+// 'inter_college' transfer changes nothing on the student row itself
+// (see requestInterCollegeTransfer's own comment) — only marks the
+// request applied.
+async function approveStudentTransfer(client, studentId, transferRequestId, { actorUserId, remarks } = {}) {
+  const { transferRequest, pending } = await loadPendingTransferRequest(client, studentId, transferRequestId);
+  await workflowService.approveRequest(client, pending.id, { actorUserId, remarks });
+
+  if (transferRequest.transfer_type === 'internal') {
+    await studentRepository.update(client, studentId, { classId: transferRequest.destination_class_id });
+  }
+
+  const applied = await studentTransferRequestRepository.markApplied(client, transferRequestId);
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: transferRequest.college_id,
+    userId: actorUserId,
+    action: transferRequest.transfer_type === 'internal' ? 'student_internal_transfer_approved' : 'student_inter_college_transfer_approved',
+    entity: 'students',
+    entityId: studentId,
+    metadata: null,
+  });
+
+  return applied;
+}
+
+async function rejectStudentTransfer(client, studentId, transferRequestId, { actorUserId, remarks } = {}) {
+  const { transferRequest, pending } = await loadPendingTransferRequest(client, studentId, transferRequestId);
+  await workflowService.rejectRequest(client, pending.id, { actorUserId, remarks });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: transferRequest.college_id,
+    userId: actorUserId,
+    action: transferRequest.transfer_type === 'internal' ? 'student_internal_transfer_rejected' : 'student_inter_college_transfer_rejected',
+    entity: 'students',
+    entityId: studentId,
+    metadata: null,
+  });
+
+  return transferRequest;
+}
+
+async function listTransferRequestsForStudent(client, studentId) {
+  return studentTransferRequestRepository.listForStudent(client, studentId);
+}
+
+function assertKnownLifecycleStatus(newStatus) {
+  if (!LIFECYCLE_STATES.includes(newStatus)) {
+    throw new StudentLifecycleValidationError(`newStatus ${JSON.stringify(newStatus)} is not a recognized lifecycle state`);
+  }
+}
+
+// BusinessRules.md Student lifecycle: "the Class Tutor may update a
+// student's status with a mandatory reason, subject to that same
+// configured workflow for high-severity transitions." This is the
+// direct path — for any status NOT in APPROVAL_REQUIRED_STATES. A
+// caller attempting Discontinued/Debarred/Dismissed/Graduated here is
+// rejected outright (StudentLifecycleApprovalRequiredError), not
+// silently downgraded to "still requires approval" after the fact.
+async function updateStudentLifecycleStatus(client, studentId, { newStatus, reason, effectiveDate }, { actorUserId } = {}) {
+  if (!reason) {
+    throw new StudentLifecycleValidationError('reason is required');
+  }
+  assertKnownLifecycleStatus(newStatus);
+  if (APPROVAL_REQUIRED_STATES.includes(newStatus)) {
+    throw new StudentLifecycleApprovalRequiredError(
+      `${JSON.stringify(newStatus)} requires approval — use requestLifecycleStatusChange instead`,
+    );
+  }
+
+  const student = await studentRepository.findById(client, studentId);
+  if (student === null) {
+    throw new StudentLifecycleStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
+  }
+
+  await studentLifecycleEventRepository.create(client, {
+    collegeId: student.college_id,
+    studentId,
+    previousStatus: student.lifecycle_status,
+    newStatus,
+    effectiveDate: effectiveDate || new Date().toISOString().slice(0, 10),
+    reason,
+    updatedByUserId: actorUserId,
+  });
+
+  return studentRepository.update(client, studentId, { lifecycleStatus: newStatus });
+}
+
+// The approval-required counterpart — Discontinued/Debarred/Dismissed/
+// Graduated only. Single-step chain (Principal), same reasoning every
+// other under-specified-actor chain in this codebase uses.
+async function requestLifecycleStatusChange(client, studentId, { newStatus, reason, effectiveDate }, { requestedByUserId, origin = 'human' } = {}) {
+  if (!reason) {
+    throw new StudentLifecycleValidationError('reason is required');
+  }
+  assertKnownLifecycleStatus(newStatus);
+  if (!APPROVAL_REQUIRED_STATES.includes(newStatus)) {
+    throw new StudentLifecycleValidationError(
+      `${JSON.stringify(newStatus)} does not require approval — use updateStudentLifecycleStatus instead`,
+    );
+  }
+  if (!requestedByUserId) {
+    throw new StudentLifecycleValidationError('requestedByUserId is required');
+  }
+
+  const student = await studentRepository.findById(client, studentId);
+  if (student === null) {
+    throw new StudentLifecycleStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
+  }
+
+  const principal = await staffService.findPrincipal(client, student.college_id);
+
+  const workflowRequest = await workflowService.submitRequest(client, {
+    collegeId: student.college_id,
+    entityType: 'student_lifecycle_change',
+    entityId: student.id,
+    requestedByUserId,
+    origin,
+    approverChain: [{ step: 1, role: 'principal', user_id: principal.user_id }],
+  });
+
+  const updated = await studentRepository.update(client, studentId, {
+    pendingLifecycleStatus: newStatus,
+    pendingLifecycleReason: reason,
+  });
+
+  return { workflowRequest, student: updated, effectiveDate: effectiveDate || new Date().toISOString().slice(0, 10) };
+}
+
+async function loadPendingLifecycleChange(client, studentId) {
+  const student = await studentRepository.findById(client, studentId);
+  if (student === null) {
+    throw new StudentLifecycleStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
+  }
+  const pending = await workflowService.findPendingForEntity(client, 'student_lifecycle_change', studentId);
+  if (pending === null) {
+    throw new StudentLifecycleNoPendingRequestError(`student ${JSON.stringify(studentId)} has no pending lifecycle change request`);
+  }
+  return { student, pending };
+}
+
+// BusinessRules.md Semester progression and graduation: "Alumni status
+// is automatic on graduation approval." A newStatus of 'Graduated' is
+// therefore recorded as two lifecycle events in the same call
+// (previous -> Graduated, then Graduated -> Alumni) and the student's
+// final resting status is 'Alumni', not 'Graduated' — matching the
+// rule's own wording that the Alumni transition isn't a later, separate
+// action anyone has to remember to trigger.
+async function approveLifecycleStatusChange(client, studentId, { actorUserId, remarks, effectiveDate } = {}) {
+  const { student, pending } = await loadPendingLifecycleChange(client, studentId);
+  await workflowService.approveRequest(client, pending.id, { actorUserId, remarks });
+
+  const when = effectiveDate || new Date().toISOString().slice(0, 10);
+  const newStatus = student.pending_lifecycle_status;
+  const reason = student.pending_lifecycle_reason;
+
+  await studentLifecycleEventRepository.create(client, {
+    collegeId: student.college_id,
+    studentId,
+    previousStatus: student.lifecycle_status,
+    newStatus,
+    effectiveDate: when,
+    reason,
+    updatedByUserId: actorUserId,
+    workflowRequestId: pending.id,
+  });
+
+  let finalStatus = newStatus;
+  if (newStatus === 'Graduated') {
+    await studentLifecycleEventRepository.create(client, {
+      collegeId: student.college_id,
+      studentId,
+      previousStatus: 'Graduated',
+      newStatus: 'Alumni',
+      effectiveDate: when,
+      reason: 'Automatic — Alumni status follows graduation approval',
+      updatedByUserId: actorUserId,
+      workflowRequestId: pending.id,
+    });
+    finalStatus = 'Alumni';
+  }
+
+  return studentRepository.update(client, studentId, {
+    lifecycleStatus: finalStatus,
+    pendingLifecycleStatus: null,
+    pendingLifecycleReason: null,
+  });
+}
+
+async function rejectLifecycleStatusChange(client, studentId, { actorUserId, remarks } = {}) {
+  const { student, pending } = await loadPendingLifecycleChange(client, studentId);
+  await workflowService.rejectRequest(client, pending.id, { actorUserId, remarks });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: student.college_id,
+    userId: actorUserId,
+    action: 'student_lifecycle_change_rejected',
+    entity: 'students',
+    entityId: studentId,
+    metadata: { attemptedStatus: student.pending_lifecycle_status },
+  });
+
+  return studentRepository.update(client, studentId, {
+    pendingLifecycleStatus: null,
+    pendingLifecycleReason: null,
+  });
+}
+
+async function listLifecycleEventsForStudent(client, studentId) {
+  return studentLifecycleEventRepository.listForStudent(client, studentId);
+}
+
+// BusinessRules.md Semester progression and graduation: "promotion
+// occurs automatically when the current semester is officially closed
+// ... arrears do not block progression unless regulations say
+// otherwise ... Suspended students are promoted or blocked according to
+// institution policy ... generates an exception report for students not
+// promoted." One class at a time (matches the roster-scoped shape
+// every other per-class action in this codebase uses, e.g.
+// academicService.generateTimetable). The institution's Suspended
+// policy is read from ConfigurationService category 'academic', key
+// promoteSuspendedStudents — defaults to NOT promoting (false) when
+// unconfigured, the conservative default this codebase's own
+// scholarship-threshold precedent (financeService.checkScholarship
+// Eligibility) already establishes for "don't invent institution
+// policy the tenant hasn't actually set."
+async function promoteSemesterForClass(client, classId, { actorUserId } = {}) {
+  const roster = await studentRepository.findByClassId(client, classId);
+  if (roster.length === 0) {
+    return { promoted: [], exceptions: [] };
+  }
+
+  const collegeId = roster[0].college_id;
+  const config = await configurationService.getConfiguration(client, { collegeId, category: 'academic' });
+  const promoteSuspended = Boolean(config && config.configuration && config.configuration.promoteSuspendedStudents);
+
+  const promoted = [];
+  const exceptions = [];
+
+  for (const student of roster) {
+    if (PROMOTION_BLOCKING_STATES.includes(student.lifecycle_status)) {
+      exceptions.push({ studentId: student.id, reason: `lifecycle status is ${student.lifecycle_status}` });
+      continue; // eslint-disable-line no-continue
+    }
+    if (student.lifecycle_status === 'Suspended' && !promoteSuspended) {
+      exceptions.push({ studentId: student.id, reason: 'Suspended and institution policy does not promote Suspended students' });
+      continue; // eslint-disable-line no-continue
+    }
+
+    const nextSemester = (student.current_semester || 0) + 1;
+    // eslint-disable-next-line no-await-in-loop
+    const updated = await studentRepository.update(client, student.id, { currentSemester: nextSemester });
+    // eslint-disable-next-line no-await-in-loop
+    await auditLogRepository.createAuditLogEntry(client, {
+      collegeId,
+      userId: actorUserId,
+      action: 'student_semester_promoted',
+      entity: 'students',
+      entityId: student.id,
+      metadata: { toSemester: nextSemester },
+    });
+    promoted.push(updated);
+  }
+
+  return { promoted, exceptions };
+}
+
 module.exports = {
   StudentValidationError,
   StudentRollNoConflictError,
@@ -477,6 +959,29 @@ module.exports = {
   StudentClassMismatchError,
   StudentClassNotFoundError,
   StudentNotAuthorizedError,
+  StudentTransferValidationError,
+  StudentTransferStudentNotFoundError,
+  StudentTransferClassNotFoundError,
+  StudentTransferNotFoundError,
+  StudentTransferNoPendingRequestError,
+  LIFECYCLE_STATES,
+  APPROVAL_REQUIRED_STATES,
+  StudentLifecycleValidationError,
+  StudentLifecycleStudentNotFoundError,
+  StudentLifecycleApprovalRequiredError,
+  StudentLifecycleNoPendingRequestError,
+  listStudentsForClass,
+  updateStudentLifecycleStatus,
+  requestLifecycleStatusChange,
+  approveLifecycleStatusChange,
+  rejectLifecycleStatusChange,
+  listLifecycleEventsForStudent,
+  promoteSemesterForClass,
+  requestInternalTransfer,
+  requestInterCollegeTransfer,
+  approveStudentTransfer,
+  rejectStudentTransfer,
+  listTransferRequestsForStudent,
   createStudent,
   getStudent,
   updateStudent,

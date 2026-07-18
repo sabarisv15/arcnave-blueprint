@@ -355,10 +355,11 @@ async function invokeTool(name, { client, actor, params } = {}) {
 // Confidential/Restricted rows). Thin wrapper over
 // collegeProfileService.getProfile (CLAUDE.md rule 1 — the Business
 // Service, never collegeProfileRepository directly). Scoped to
-// principal/college_admin/hod, not plain staff — profile-level
-// college metadata isn't every staff member's concern, same
-// conservative-placeholder reasoning routes/collegeProfile.js's own
-// college_admin-only RBAC gate already uses for the human-facing route.
+// principal/hod, not plain staff — profile-level college metadata
+// isn't every staff member's concern, same conservative-placeholder
+// reasoning routes/collegeProfile.js's own principal-only RBAC gate
+// already uses for the human-facing route (moved from college_admin —
+// see that file's comment).
 const collegeProfileService = require('./collegeProfileService');
 
 registerTool({
@@ -366,7 +367,7 @@ registerTool({
   level: 'L1',
   dataClassification: 'Internal',
   description: "Reads the acting user's own college profile (name, affiliating university, year established, address).",
-  allowedRoles: ['principal', 'college_admin', 'hod'],
+  allowedRoles: ['principal', 'hod'],
   params: { type: 'object', properties: {}, additionalProperties: false },
   handler: (client, params, actor) => collegeProfileService.getProfile(client, actor.collegeId),
 });
@@ -397,7 +398,7 @@ registerTool({
   dataClassification: 'Confidential',
   description: 'Drafts an outbound notification (channel, recipient, subject, body) for later human approval and sending. '
     + 'Never sends anything by itself — the draft must be submitted via request_notification_send and approved by a human first.',
-  allowedRoles: ['principal', 'college_admin', 'hod'],
+  allowedRoles: ['principal', 'hod'],
   params: {
     type: 'object',
     properties: {
@@ -445,7 +446,7 @@ registerTool({
   dataClassification: 'Confidential',
   description: 'Submits a previously drafted notification (from draft_notification) for human approval. '
     + 'Does NOT send it — a human must approve via the workflow approvals screen before anything is dispatched.',
-  allowedRoles: ['principal', 'college_admin', 'hod'],
+  allowedRoles: ['principal', 'hod'],
   params: {
     type: 'object',
     properties: {
@@ -483,7 +484,7 @@ registerTool({
   description: "Semantic search over the college's own uploaded documents (certificates, templates, etc.) — "
     + 'returns the most relevant text chunks for a natural-language query, scoped to what the acting role is '
     + 'permitted to see.',
-  allowedRoles: ['principal', 'college_admin', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff'],
   params: {
     type: 'object',
     properties: {
@@ -493,6 +494,90 @@ registerTool({
     additionalProperties: false,
   },
   handler: (client, params, actor) => documentSearchService.searchDocuments(client, { query: params.query }, actor),
+});
+
+// --- Real tool #5 — AI attendance assistant ----------------------------
+// mark_attendance_nl: BusinessRules.md AI Attendance Management. AI-
+// Governance.md §1 lists "modify attendance" as its own L3 example
+// ("AI, please mark Sunil absent") — but that example is the AI
+// deciding/initiating a change on someone else's behalf. This tool is
+// structurally the other case §1 already carves out for Send Alert: a
+// human's own real-time command about their own already-eligible
+// action, with the AI acting only as a natural-language front end, not
+// an independent decision-maker. It can never do anything the acting
+// user couldn't already do by calling POST /api/v1/attendance directly
+// — attendanceService.markAttendanceByRollNumbers's own call into
+// markAttendance re-verifies the exact same tutor/HOD/scheduled-staff/
+// substitute eligibility check (assertCanMark) that route already
+// enforces; the tool grants no authority the human didn't already have.
+// Registered L1 (not L3) for that reason — see AI-Governance.md §1's
+// own updated note for the explicit carve-out, added in this same
+// slice. No WorkflowService submission here, matching Send Alert's own
+// "direct, human-triggered action" precedent, not a new exception
+// invented ad hoc.
+const attendanceService = require('./attendanceService');
+
+registerTool({
+  name: 'mark_attendance_nl',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: 'Marks attendance for the session the acting faculty member is currently teaching, from a list of '
+    + 'absent roll numbers (e.g. "mark roll numbers 35, 67, and 25 absent") — every other enrolled student in that '
+    + "session is marked Present. Resolves the current session from the acting user's own approved timetable "
+    + 'allocation or substitute assignment; fails if they have no active session right now.',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      absent_roll_numbers: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Roll numbers to mark Absent. Every other student enrolled in the resolved class is marked Present.',
+      },
+    },
+    required: ['absent_roll_numbers'],
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => attendanceService.markAttendanceByRollNumbers(
+    client,
+    { absentRollNumbers: params.absent_roll_numbers },
+    { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+  ),
+});
+
+// --- Real tool #6 — Academic Calendar read (task #20) -------------------
+// list_calendar_events: BusinessRules.md Platform administration,
+// Academic Calendar — "AI can answer calendar questions but never
+// creates or edits an event without authorization." L1/Inform, a pure
+// read with no external effect; Internal classification (semester
+// dates/holidays/exam windows carry no student-identifying or contact
+// data, unlike AI-Governance.md §4's Confidential/Restricted rows).
+// Thin wrapper over calendarService.listEvents, which itself has no
+// write path at all — the "never creates or edits" half of the rule is
+// satisfied structurally, not by a runtime check this tool would have
+// to get right. Open to every tenant role, same as the human-facing
+// GET /calendar-events route (one shared institutional calendar, not
+// scoped per role).
+const calendarService = require('./calendarService');
+
+registerTool({
+  name: 'list_calendar_events',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: 'Lists academic calendar events (semester dates, holidays, exams, and other institution-defined '
+    + 'events) for the acting college, optionally within a date range. Read-only — never creates or edits an event.',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      from_date: { type: 'string', description: "Optional ISO date (YYYY-MM-DD) — only events starting on or after this date." },
+      to_date: { type: 'string', description: "Optional ISO date (YYYY-MM-DD) — only events starting on or before this date." },
+    },
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => calendarService.listEvents(client, {
+    collegeId: actor.collegeId, fromDate: params.from_date, toDate: params.to_date,
+  }),
 });
 
 module.exports = {

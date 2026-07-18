@@ -13,12 +13,14 @@ function requireResolvedTenant(req, res) {
   return true;
 }
 
-// college_admin only, both read and write — BusinessRules.md's College
-// Admin resolution, item 3: maintaining the college's own profile is
-// this role's own ongoing operational duty, not a Principal capability
-// extended here. No requireAuth-for-reads/requireRole-for-writes split
-// like finance.js/staff.js's placeholder: this whole resource is
-// college_admin's, full stop.
+// principal only, both read and write. Was college_admin-only under
+// the earlier College Admin design; BusinessRules.md's College Admin
+// — final model made College Admin an ARCNAVE support employee with
+// no seat in any tenant's users table, so college profile maintenance
+// (an in-tenant, ongoing operational duty) now belongs to Principal
+// instead. No requireAuth-for-reads/requireRole-for-writes split like
+// finance.js/staff.js's placeholder: this whole resource is
+// principal's, full stop.
 const COLLEGE_PROFILE_BODY_FIELDS = [
   ['affiliating_university', 'affiliatingUniversity'],
   ['year_established', 'yearEstablished'],

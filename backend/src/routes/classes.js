@@ -7,6 +7,7 @@ const academicService = require('../services/academicService');
 const staffService = require('../services/staffService');
 const workflowService = require('../services/workflowService');
 const visibilityService = require('../services/visibilityService');
+const studentService = require('../services/studentService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -52,6 +53,26 @@ function bodyToServiceFields(body) {
 function mapAcademicServiceError(err, res) {
   if (err instanceof academicService.ClassValidationError) {
     res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof academicService.SubstituteAssignmentValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof academicService.SubstituteAssignmentPeriodNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof academicService.SubstituteAssignmentConflictError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof academicService.TimetableGenerationValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof academicService.TimetableGenerationClassApprovedError) {
+    res.status(409).json({ detail: err.message });
     return true;
   }
   if (err instanceof academicService.ClassTimetableStatusError) {
@@ -240,6 +261,102 @@ function createClassesRouter() {
       if (mapAcademicServiceError(err, res)) return;
       throw err;
     }
+  }));
+
+  // BusinessRules.md Substitute teacher provision: "an authorized
+  // academic authority may temporarily assign another qualified
+  // faculty member" — requirePermission('substitute_assignments.create')
+  // (mapped to ['hod', 'principal']) is that authority check.
+  router.post('/classes/:id/substitute-assignments', requirePermission('substitute_assignments.create'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const {
+      timetable_period_id: timetablePeriodId,
+      assignment_date: assignmentDate,
+      original_staff_user_id: originalStaffUserId,
+      substitute_staff_user_id: substituteStaffUserId,
+      reason,
+    } = req.body || {};
+    try {
+      const assignment = await academicService.assignSubstitute(
+        req.dbClient,
+        {
+          classId: req.params.id, timetablePeriodId, assignmentDate, originalStaffUserId, substituteStaffUserId, reason,
+        },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(assignment);
+    } catch (err) {
+      if (mapAcademicServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.get('/classes/:id/substitute-assignments', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const assignments = await academicService.listSubstituteAssignmentsForClass(req.dbClient, req.params.id);
+    res.json(assignments);
+  }));
+
+  // requirements: [{ subject, staff_user_id, periods_per_week }] — see
+  // academicService.generateTimetable's own comment for why this is a
+  // caller-supplied input, not derived automatically.
+  router.post('/classes/:id/generate-timetable', requirePermission('timetables.generate'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const requirements = ((req.body || {}).requirements || []).map((r) => ({
+      subject: r.subject, staffUserId: r.staff_user_id, periodsPerWeek: r.periods_per_week,
+    }));
+    try {
+      const result = await academicService.generateTimetable(
+        req.dbClient,
+        req.params.id,
+        requirements,
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      if (mapAcademicServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // BusinessRules.md Semester progression and graduation: "promotion
+  // occurs automatically when the current semester is officially
+  // closed" — this is the manual trigger for that (no scheduled job
+  // ties it to Academic Year closing yet, same honest gap
+  // attendanceService.lockAttendanceSession's own comment already
+  // flags for time-based locking). requirePermission, not requireAuth:
+  // unlike lifecycle-status changes (which name Class Tutor),
+  // BusinessRules.md names no actor for triggering a whole class's
+  // promotion — same conservative default other un-named-actor create
+  // actions in this codebase use.
+  router.post('/classes/:id/promote-semester', requirePermission('classes.promote_semester'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const result = await studentService.promoteSemesterForClass(req.dbClient, req.params.id, { actorUserId: req.jwtClaims.sub });
+    res.json(result);
+  }));
+
+  // Read-only — BusinessRules.md Timetable revision: "all revisions are
+  // permanently retained." requireAuth, same as every other read in
+  // this router; nothing scopes revision history to a narrower actor.
+  router.get('/classes/:id/timetable-revisions', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const revisions = await academicService.listTimetableRevisions(req.dbClient, req.params.id);
+    res.json(revisions);
+  }));
+
+  // "attendance always uses the revision effective on the class date"
+  // — the same lookup exposed as its own endpoint for any caller
+  // (human or AI) that needs to resolve it directly, without assuming
+  // today's date. ?date=YYYY-MM-DD; defaults to today when omitted.
+  router.get('/classes/:id/timetable-revisions/effective', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const revision = await academicService.getEffectiveTimetableRevision(req.dbClient, req.params.id, date);
+    if (revision === null) {
+      res.status(404).json({ detail: `No timetable revision is effective for class ${JSON.stringify(req.params.id)} on ${JSON.stringify(date)}` });
+      return;
+    }
+    res.json(revision);
   }));
 
   // Send Alert (item 5 of this session's task) — requireAuth, not a

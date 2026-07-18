@@ -128,8 +128,6 @@ function IndexRedirect() {
     return <Navigate to="/dashboard/hod" replace />;
   } else if (user.role === 'principal') {
     return <Navigate to="/dashboard/principal" replace />;
-  } else if (user.role === 'college_admin') {
-    return <Navigate to="/dashboard/college-admin" replace />;
   }
   return <Navigate to="/login" replace />;
 }
@@ -310,8 +308,8 @@ export default function App() {
               </ProtectedRoute>
             } />
 
-            <Route path="/dashboard/college-admin" element={
-              <ProtectedRoute allowedRoles={['college_admin']}>
+            <Route path="/dashboard/principal/institution-profile" element={
+              <ProtectedRoute allowedRoles={['principal']}>
                 <CollegeAdminDashboard />
               </ProtectedRoute>
             } />

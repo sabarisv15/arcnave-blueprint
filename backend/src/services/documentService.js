@@ -106,7 +106,15 @@ function assertValidReviewStatus(status) {
 // 1752800000000) — omitted for files not owned by one student, e.g.
 // ReportService's generated exports. Every existing per-student caller
 // is unaffected; this only widens what's allowed.
-async function uploadDocument(client, { collegeId, studentId, docType, fileName, mimeType, fileBuffer }, { actorUserId } = {}) {
+// classId (nullable, added for BusinessRules.md Examination management
+// — see the migration's own comment): a document belongs to a student
+// OR a class, never assumed to need both. Unlike studentId, an unknown
+// classId isn't given its own domain error here — no caller in this
+// codebase passes a classId yet outside examinationService, which
+// already resolves and validates the class itself before calling this.
+async function uploadDocument(client, {
+  collegeId, studentId, classId, docType, fileName, mimeType, fileBuffer,
+}, { actorUserId } = {}) {
   if (!docType || !fileName || !mimeType || !fileBuffer || !actorUserId) {
     throw new DocumentValidationError('docType, fileName, mimeType, fileBuffer, and actorUserId are required');
   }
@@ -119,6 +127,7 @@ async function uploadDocument(client, { collegeId, studentId, docType, fileName,
     document = await documentRepository.create(client, {
       collegeId,
       studentId,
+      classId,
       docType,
       fileName,
       storagePath,
@@ -190,6 +199,10 @@ async function downloadDocument(client, id) {
 
 async function listDocumentsForStudent(client, studentId) {
   return documentRepository.findByStudentId(client, studentId);
+}
+
+async function listDocumentsForClass(client, classId) {
+  return documentRepository.findByClassId(client, classId);
 }
 
 async function getLatestDocumentForStudentAndType(client, studentId, docType) {
@@ -332,8 +345,9 @@ class DocumentNotAuthorizedError extends Error {}
 // hod/principal boundary as every other student-data read). student_id
 // null: a template (doc_type === TEMPLATE_DOC_TYPE) is open to any
 // authenticated user to read/use — BusinessRules.md's College Admin
-// scope reserves only upload/manage for college_admin, never read,
-// same restriction routes/documents.js's own
+// scope reserves only upload/manage for principal (moved from
+// college_admin — see routes/collegeProfile.js's comment), never
+// read, same restriction routes/documents.js's own
 // requirePermission('documents.templates.upload') already enforces at
 // the write side, unchanged here. Anything else with no student_id
 // (a generated report/merged output) is visible only to the college's
@@ -385,6 +399,7 @@ module.exports = {
   getDocument,
   downloadDocument,
   listDocumentsForStudent,
+  listDocumentsForClass,
   getLatestDocumentForStudentAndType,
   reviewDocument,
   removeDocument,

@@ -79,6 +79,37 @@ async function list(client, { limit = 50, offset = 0 } = {}) {
   return result.rows;
 }
 
+// Every period for a college, unpaginated — the whole shared bell
+// schedule, needed by AcademicService's automatic timetable generator
+// to know the full weekly grid it's placing allocations into. Ordered
+// by hour_index only; day_of_week is free text (not a real calendar
+// type), so calendar-order sorting by day happens in JS at the
+// service layer, not here (same "no business logic in this file"
+// boundary every other function here already draws).
+async function findAllByCollege(client, collegeId) {
+  const result = await client.query(
+    'SELECT * FROM timetable_periods WHERE college_id = $1 ORDER BY hour_index',
+    [collegeId],
+  );
+  return result.rows;
+}
+
+// The "what period is happening right now" lookup the AI attendance
+// assistant needs (BusinessRules.md AI Attendance Management: "AI
+// determines the current class using the approved timetable"). A
+// currentTime of exactly a period's end_time is deliberately excluded
+// (< not <=) — that period has just finished, the next one (if any)
+// owns that instant, matching ordinary half-open interval convention.
+async function findCurrentByCollegeAndDay(client, collegeId, dayOfWeek, currentTime) {
+  const result = await client.query(
+    `SELECT * FROM timetable_periods
+     WHERE college_id = $1 AND day_of_week = $2
+       AND start_time <= $3::time AND end_time > $3::time`,
+    [collegeId, dayOfWeek, currentTime],
+  );
+  return result.rows[0] || null;
+}
+
 module.exports = {
   create,
   findById,
@@ -86,4 +117,6 @@ module.exports = {
   update,
   remove,
   list,
+  findAllByCollege,
+  findCurrentByCollegeAndDay,
 };

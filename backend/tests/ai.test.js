@@ -93,7 +93,6 @@ async function seedTenant(adminPool, label) {
     ['principaluser', 'principal'],
     ['staffuser', 'staff'],
     ['hoduser', 'hod'],
-    ['adminuser', 'college_admin'],
   ]) {
     // eslint-disable-next-line no-await-in-loop
     const result = await adminPool.query(
@@ -196,14 +195,10 @@ test('ai', async (t) => {
     assert.equal(profile.address, collegeA.address);
   });
 
-  await t.test('hod and college_admin can also invoke get_college_profile', async () => {
+  await t.test('hod can also invoke get_college_profile', async () => {
     const hodToken = await login(collegeA, 'hoduser');
     const hodResp = await post(baseUrl, '/api/v1/ai/tools/get_college_profile/invoke', headersFor(collegeA, hodToken), { params: {} });
     assert.equal(hodResp.status, 200);
-
-    const adminToken = await login(collegeA, 'adminuser');
-    const adminResp = await post(baseUrl, '/api/v1/ai/tools/get_college_profile/invoke', headersFor(collegeA, adminToken), { params: {} });
-    assert.equal(adminResp.status, 200);
   });
 
   await t.test('invoking an unknown tool returns 404', async () => {

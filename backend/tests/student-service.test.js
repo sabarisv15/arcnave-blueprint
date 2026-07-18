@@ -441,7 +441,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
     t.after(() => updateMock.mock.restore());
 
     await assert.rejects(
-      () => studentService.updateStudent({}, 'student-id', { fullName: 'X' }, { userId: 'u1', actorRole: 'college_admin' }),
+      () => studentService.updateStudent({}, 'student-id', { fullName: 'X' }, { userId: 'u1', actorRole: 'unmapped_role' }),
       studentService.StudentNotAuthorizedError,
     );
     assert.equal(updateMock.mock.callCount(), 0);
@@ -733,7 +733,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
   });
 
   await t.test('listStudents (unrecognized role) returns an empty list', async () => {
-    const result = await studentService.listStudents({}, {}, { actorUserId: 'u1', actorRole: 'college_admin' });
+    const result = await studentService.listStudents({}, {}, { actorUserId: 'u1', actorRole: 'unmapped_role' });
     assert.deepEqual(result, []);
   });
 });

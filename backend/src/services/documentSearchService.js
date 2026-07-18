@@ -64,6 +64,7 @@ const tesseractOcr = require('../ocr/tesseractOcr');
 const pdfRasterizer = require('../ocr/pdfRasterizer');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const aiDocumentChunkRepository = require('../repositories/aiDocumentChunkRepository');
+const visibilityService = require('./visibilityService');
 
 // searchDocuments given a missing/non-string query.
 class DocumentSearchValidationError extends Error {}
@@ -240,6 +241,16 @@ async function searchDocuments(client, { query, limit } = {}, actor) {
   }
 
   const classifications = aiClassificationAccess.permittedClassifications(actor.role);
+  // Same department/class scoping the GET /documents route already
+  // enforces via visibilityService.assertCanViewStudent — without this,
+  // an hod could reach a student document outside their own
+  // department through AI search alone. null means unrestricted
+  // (principal); see aiDocumentChunkRepository.search's own comment.
+  const classIds = await visibilityService.getVisibleClassIds(client, {
+    actorUserId: actor.userId,
+    actorRole: actor.role,
+    collegeId: actor.collegeId,
+  });
   const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, actor.collegeId);
   const [queryEmbedding] = await adapter.embed(aiConfig, [query], { inputType: 'query' });
   const rows = await aiDocumentChunkRepository.search(client, {
@@ -247,6 +258,7 @@ async function searchDocuments(client, { query, limit } = {}, actor) {
     classifications,
     embedding: queryEmbedding,
     limit: limit || DEFAULT_SEARCH_LIMIT,
+    classIds,
   });
 
   return rows.map((row) => ({

@@ -1,13 +1,14 @@
 'use strict';
 
-// Business logic for the College Admin profile slice — validation and
+// Business logic for the college profile slice — validation and
 // audit logging on top of collegeProfileRepository.js/
 // departmentRepository.js, neither of which does either (CLAUDE.md
-// rule 1). BusinessRules.md's College Admin resolution, item 3:
-// college_admin is the only role that reads/writes this file's two
-// resources — enforced at the route/RBAC layer (requireRole
-// ('college_admin')), not here (same division every other service in
-// this codebase draws).
+// rule 1). Originally a College Admin duty; BusinessRules.md's College
+// Admin — final model made College Admin an ARCNAVE support employee
+// with no tenant role, so principal is now the only role that
+// reads/writes this file's two resources — enforced at the
+// route/RBAC layer (requirePermission), not here (same division every
+// other service in this codebase draws).
 //
 // getProfile/updateProfile touch exactly the three columns
 // collegeProfileRepository.js owns (affiliating_university/

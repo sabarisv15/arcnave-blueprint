@@ -24,7 +24,7 @@ async function createUser(client, { collegeId, username, email, passwordHash, ro
 
 async function getUserByUsername(client, collegeId, username) {
   const result = await client.query(
-    `SELECT id, college_id, username, password_hash, role, is_active
+    `SELECT id, college_id, username, email, password_hash, role, is_active, mfa_enabled
      FROM users WHERE college_id = $1 AND username = $2`,
     [collegeId, username],
   );
@@ -33,7 +33,7 @@ async function getUserByUsername(client, collegeId, username) {
 
 async function getUserById(client, userId) {
   const result = await client.query(
-    `SELECT id, college_id, username, password_hash, role, is_active
+    `SELECT id, college_id, username, email, password_hash, role, is_active, mfa_enabled
      FROM users WHERE id = $1`,
     [userId],
   );
@@ -73,6 +73,40 @@ async function activateUser(client, userId, { passwordHash, activatedBy }) {
      WHERE id = $3
      RETURNING id, college_id, username, email, role, is_active, activated_by`,
     [passwordHash, activatedBy, userId],
+  );
+  return result.rows[0] || null;
+}
+
+// BusinessRules.md Staff lifecycle: "staff accounts are deactivated,
+// never deleted." The `is_active` flip alone — no password_hash
+// change, unlike activateUser: a deactivated account has no business
+// reason to also invalidate whatever credentials it had, since it
+// can't log in regardless while is_active is false. Flipping
+// is_active also fires this table's own users_sync_active_hod_department
+// trigger (1753800000000), automatically clearing
+// active_hod_department_id if this user was the department's active
+// HOD — no separate step needed here for that.
+async function deactivateUser(client, userId) {
+  const result = await client.query(
+    `UPDATE users SET is_active = false
+     WHERE id = $1
+     RETURNING id, college_id, username, email, role, is_active, activated_by`,
+    [userId],
+  );
+  return result.rows[0] || null;
+}
+
+// authService.enableMfa/disableMfa — the user's own self-opt-in flag
+// (meaningful only under institution mode 'optional'; see the
+// 1756100000000 migration's own file-level comment for why this is a
+// plain column here rather than a 'auth' configurations-category
+// field: per-user state, not per-tenant policy).
+async function setMfaEnabled(client, userId, enabled) {
+  const result = await client.query(
+    `UPDATE users SET mfa_enabled = $1
+     WHERE id = $2
+     RETURNING id, college_id, username, email, role, is_active, mfa_enabled`,
+    [enabled, userId],
   );
   return result.rows[0] || null;
 }
@@ -129,6 +163,8 @@ module.exports = {
   getUserByEmail,
   updatePasswordHash,
   activateUser,
+  deactivateUser,
+  setMfaEnabled,
   createRefreshToken,
   getRefreshTokenByHash,
   revokeRefreshToken,

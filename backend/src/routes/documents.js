@@ -134,12 +134,14 @@ function createDocumentsRouter() {
     }
   }));
 
-  // Template-fill: upload is college_admin only (BusinessRules.md's
-  // College Admin resolution, item 2 — "uploading/managing college
-  // document templates"), via requirePermission('documents.templates.upload')
-  // (mapped to ['college_admin']), unlike the principal-mapped
-  // permissions every other write on this router uses. Calls
-  // uploadTemplate specifically
+  // Template-fill: upload is principal only (BusinessRules.md's
+  // College Admin resolution — "uploading/managing college document
+  // templates," moved from college_admin to principal now that
+  // College Admin is no longer a tenant role — see
+  // middleware/permissions.js's own note), via
+  // requirePermission('documents.templates.upload')
+  // (mapped to ['principal']), same as every other write on this
+  // router. Calls uploadTemplate specifically
   // (not the general POST /documents above), which fixes
   // doc_type='template'/student_id=null structurally — a caller here
   // cannot forge a template row with a student_id, or a student
@@ -165,7 +167,7 @@ function createDocumentsRouter() {
     }
   }));
 
-  // requireAuth, not college_admin-only: picking a template to
+  // requireAuth, not principal-only: picking a template to
   // generate a document from (the student-profile "Generate from
   // template" caller) is a read, needed by whoever is looking at a
   // student's profile — same "reads are requireAuth, writes are the

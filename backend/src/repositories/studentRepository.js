@@ -49,6 +49,23 @@ const COLUMNS = [
   ['bikeNumber', 'bike_number'],
   ['annualIncome', 'annual_income'],
   ['classId', 'class_id'],
+  // Not in studentService's own ALLOWED_FIELDS (a separate whitelist —
+  // same defense-in-depth split every other service in this codebase
+  // draws) — only CurriculumService writes this column, via
+  // requestCurriculumMigration/approveCurriculumMigration, per
+  // BusinessRules.md: "a student's regulation is fixed after admission
+  // except through an official Curriculum Migration workflow."
+  ['regulationId', 'regulation_id'],
+  ['pendingRegulationId', 'pending_regulation_id'],
+  // Not in studentService's own ALLOWED_FIELDS (a separate whitelist) —
+  // only StudentService's own lifecycle functions write these columns,
+  // per BusinessRules.md Student lifecycle's "every status change is
+  // permanently audited" — a plain profile-edit path deliberately
+  // cannot touch them.
+  ['lifecycleStatus', 'lifecycle_status'],
+  ['pendingLifecycleStatus', 'pending_lifecycle_status'],
+  ['pendingLifecycleReason', 'pending_lifecycle_reason'],
+  ['currentSemester', 'current_semester'],
 ];
 
 async function create(client, fields) {

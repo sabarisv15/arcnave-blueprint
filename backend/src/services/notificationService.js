@@ -306,6 +306,24 @@ async function sendPasswordResetEmail(client, { to, token }) {
   return sendEmail(client, { to, subject, body });
 }
 
+// Business rule task #19 (institution-configurable MFA): the second-
+// factor code itself must go out through the existing notification
+// flow, never in an API response or a log line — same send-first,
+// best-effort, non-ledger treatment as sendPasswordResetEmail above (a
+// deterministic consequence of the user's own login attempt, no
+// discretionary content for the ledger to gate).
+async function sendMfaCodeEmail(client, { to, code, expireMinutes }) {
+  const subject = 'Your ARCNAVE verification code';
+  const body = [
+    `Your ARCNAVE sign-in verification code is ${code}.`,
+    `It expires in ${expireMinutes} minutes.`,
+    '',
+    'If you did not attempt to sign in, you can safely ignore this email.',
+  ].join('\n');
+
+  return sendEmail(client, { to, subject, body });
+}
+
 // This session's own task: principal invitation must go out through
 // the existing notification flow, never in an API response. Same
 // treatment as sendPasswordResetEmail above — the platform admin's own
@@ -566,6 +584,7 @@ module.exports = {
   sendEmail,
   sendStaffCredentialsEmail,
   sendPasswordResetEmail,
+  sendMfaCodeEmail,
   sendPrincipalInvitationEmail,
   draftNotification,
   submitForApproval,

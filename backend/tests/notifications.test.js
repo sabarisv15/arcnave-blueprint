@@ -155,7 +155,7 @@ test('notifications API', async (t) => {
     assert.equal(resp.status, 401);
   });
 
-  await t.test('staff (not principal/college_admin/hod) cannot draft: 403', async () => {
+  await t.test('staff (not principal/hod) cannot draft: 403', async () => {
     const token = await login('staffuser');
     const resp = await post(baseUrl, '/api/v1/notifications', headersFor(token), { channel: 'email', to_address: 'x@example.com', body: 'hi' });
     assert.equal(resp.status, 403);

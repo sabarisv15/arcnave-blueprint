@@ -16,10 +16,51 @@
 // discipline studentService.js established first.
 
 const classRepository = require('../repositories/classRepository');
-const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
 const studentRepository = require('../repositories/studentRepository');
 const staffRepository = require('../repositories/staffRepository');
 const staffService = require('./staffService');
+const scopeResolver = require('./scopeResolver');
+const { buildActorContext } = require('./actorContextService');
+const { SCOPE_LEVELS } = require('../constants/scopeLevels');
+
+// Every public function below accepts EITHER the legacy
+// {actorUserId, actorRole[, collegeId]} shape (built into an
+// ActorContext internally, per-call) OR an already-built ActorContext
+// directly — dual-input support so existing callers (studentService,
+// routes/*) keep working unchanged while a caller that already has an
+// ActorContext (e.g. a route sitting behind middleware/actorContext.js
+// in a later milestone) can pass it straight through without a
+// redundant rebuild. An ActorContext is distinguished from the legacy
+// shape by the presence of `scopeLevel` — the legacy shape never has
+// that key.
+function isActorContext(input) {
+  return input !== null && typeof input === 'object' && 'scopeLevel' in input;
+}
+
+async function resolveActorContext(client, input, tenantIdOverride) {
+  if (isActorContext(input)) {
+    return input;
+  }
+  const { actorUserId, actorRole, collegeId } = input;
+  return buildActorContext(client, {
+    actorId: actorUserId,
+    role: actorRole,
+    tenantId: tenantIdOverride !== undefined ? tenantIdOverride : collegeId,
+  });
+}
+
+// Cheap accessors that read straight through either input shape
+// without triggering buildActorContext's DB lookups — used to decide
+// *whether* a full ActorContext is even worth resolving (e.g. a role
+// that can never pass a given check has no reason to pay for a
+// department/class lookup first).
+function actorIdOf(input) {
+  return isActorContext(input) ? input.actorId : input.actorUserId;
+}
+
+function actorRoleOf(input) {
+  return isActorContext(input) ? input.role : input.actorRole;
+}
 
 // The one error every visibility check throws — a caller only needs to
 // know "not allowed to view this," not which of several checks failed,
@@ -63,46 +104,43 @@ async function assertIsPrincipalOfCollege(client, collegeId, actorUserId) {
 // does not call this function). hod: every class in their own, real,
 // verified department. principal: unrestricted within the tenant (RLS
 // already scopes reads to one college, so null here means exactly
-// that, not literally every class in the DB). college_admin/anything
-// else: no visibility, per this session's own task ("no
-// student-private class visibility unless explicitly allowed").
+// that, not literally every class in the DB). Anything else: no
+// visibility, per this session's own task ("no student-private class
+// visibility unless explicitly allowed").
 // actorRole === undefined means an internal system caller — also
 // unrestricted, same convention studentService.js already established
 // for getStudent/listStudents.
-async function getVisibleClassIds(client, { collegeId, actorUserId, actorRole }) {
-  if (actorRole === undefined || actorRole === 'principal') {
+async function getVisibleClassIds(client, input) {
+  const actorContext = await resolveActorContext(client, input);
+  // actorRole === undefined means an internal system caller —
+  // unrestricted, same convention studentService.js already
+  // established. This is not a scope level (no role means no
+  // role->scope mapping to resolve), so it stays an explicit
+  // exception rather than folding into scopeResolver.
+  if (actorContext.role === undefined || scopeResolver.isAuthorizedForCollege(actorContext)) {
     return null;
   }
-  if (actorRole === 'staff') {
-    const classIds = new Set();
-    const tutorClass = await classRepository.findByTutorUserId(client, actorUserId);
-    if (tutorClass !== null) {
-      classIds.add(tutorClass.id);
-    }
-    const allocations = await facultyAllocationRepository.findByStaffUserId(client, actorUserId);
-    for (const allocation of allocations) {
-      classIds.add(allocation.class_id);
-    }
-    return [...classIds];
+  if (actorContext.scopeLevel === SCOPE_LEVELS.SELF_ASSIGNED) {
+    return actorContext.assignedClassIds;
   }
-  if (actorRole === 'hod') {
-    const departmentId = await staffService.findHodDepartmentId(client, collegeId, actorUserId);
-    if (departmentId === null) {
+  if (actorContext.scopeLevel === SCOPE_LEVELS.DEPARTMENT) {
+    if (actorContext.departmentIds.length === 0) {
       return [];
     }
-    const classes = await classRepository.findByDepartmentId(client, departmentId);
+    const classes = await classRepository.findByDepartmentId(client, actorContext.departmentIds[0]);
     return classes.map((cls) => cls.id);
   }
   return [];
 }
 
-async function assertCanViewClass(client, classId, { actorUserId, actorRole, collegeId }) {
-  const visibleIds = await getVisibleClassIds(client, { collegeId, actorUserId, actorRole });
+async function assertCanViewClass(client, classId, input) {
+  const actorContext = await resolveActorContext(client, input);
+  const visibleIds = await getVisibleClassIds(client, actorContext);
   if (visibleIds === null || visibleIds.includes(classId)) {
     return;
   }
   throw new VisibilityForbiddenError(
-    `role ${JSON.stringify(actorRole)} (user ${JSON.stringify(actorUserId)}) may not view class ${JSON.stringify(classId)}`,
+    `role ${JSON.stringify(actorContext.role)} (user ${JSON.stringify(actorContext.actorId)}) may not view class ${JSON.stringify(classId)}`,
   );
 }
 
@@ -116,20 +154,29 @@ async function resolveStudent(client, studentOrId) {
   return studentRepository.findById(client, studentOrId);
 }
 
-async function assertCanViewStudent(client, studentOrId, { actorUserId, actorRole }) {
+async function assertCanViewStudent(client, studentOrId, input) {
   const student = await resolveStudent(client, studentOrId);
   if (student === null) {
     return; // caller's own 404, not this function's concern
   }
 
+  const actorRole = actorRoleOf(input);
+  const actorId = actorIdOf(input);
+
+  // Each branch below only resolves an ActorContext (which is what
+  // triggers staffService/classRepository/facultyAllocationRepository
+  // lookups) when the role could plausibly pass the check — same
+  // "only look up what this role needs" shape the original per-role
+  // branches had, now expressed via scopeResolver instead of inline
+  // role-string logic.
   if (actorRole === 'staff') {
     if (student.class_id !== null) {
-      const visibleIds = await getVisibleClassIds(client, { collegeId: student.college_id, actorUserId, actorRole });
-      if (visibleIds.includes(student.class_id)) {
+      const actorContext = await resolveActorContext(client, input, student.college_id);
+      if (scopeResolver.isAuthorizedForClass(actorContext, student.class_id)) {
         return;
       }
     }
-    throw new VisibilityForbiddenError(`user ${JSON.stringify(actorUserId)} does not tutor or teach student ${JSON.stringify(student.id)}'s class`);
+    throw new VisibilityForbiddenError(`user ${JSON.stringify(actorId)} does not tutor or teach student ${JSON.stringify(student.id)}'s class`);
   }
 
   if (actorRole === 'hod') {
@@ -137,12 +184,33 @@ async function assertCanViewStudent(client, studentOrId, { actorUserId, actorRol
     if (sourceClass === null || !sourceClass.department_id) {
       throw new VisibilityForbiddenError(`student ${JSON.stringify(student.id)} has no department-linked class to authorize against`);
     }
-    await assertIsHodOfDepartment(client, student.college_id, sourceClass.department_id, actorUserId);
+    // Kept as a direct call to assertIsHodOfDepartment (forward
+    // direction: department -> its one real hod, via
+    // staffService.findHodForDepartment) rather than routing through
+    // ActorContext.departmentIds (reverse direction: actor -> their
+    // one real department, via staffService.findHodDepartmentId).
+    // Both resolve the same real assignment and are logically
+    // equivalent (a department has exactly one hod), but existing
+    // callers (studentService.js's own assertIsHodOfDepartment
+    // wrapper) and this file's own tests are wired to the forward
+    // lookup specifically — switching the lookup direction here would
+    // be an internal implementation change with no observable
+    // authorization difference, but is not required by this pass and
+    // only adds risk.
+    await assertIsHodOfDepartment(client, student.college_id, sourceClass.department_id, actorId);
     return;
   }
 
   if (actorRole === 'principal') {
-    await assertIsPrincipalOfCollege(client, student.college_id, actorUserId);
+    // Kept as a direct, REAL-verified call (staffService.findPrincipal
+    // + user_id match) rather than scopeResolver.isAuthorizedForCollege
+    // — ActorContext.scopeLevel for 'principal' is a pure role->scope
+    // mapping with no DB verification behind it (see
+    // roleScopeLevels.js), and other callers (getVisibleClassIds,
+    // assertCanViewStaff below) rely on exactly that unverified trust
+    // already. Verifying here but not there would be a scoping
+    // behavior change this pass may not make.
+    await assertIsPrincipalOfCollege(client, student.college_id, actorId);
     return;
   }
 
@@ -167,31 +235,46 @@ async function resolveStaffTarget(client, target) {
 }
 
 // self always. hod sees their own (real, verified) department's staff.
-// principal/college_admin see the whole college directory — a staff
-// row has no student-linked or aadhaar field to withhold (unlike
-// documents/students), so "operational/profile staff directory" per
-// BusinessRules.md's College Admin scope is exactly this table,
-// college-wide, same as principal gets. Ordinary staff cannot view
-// another staff member's profile.
-async function assertCanViewStaff(client, target, { actorUserId, actorRole }) {
+// principal sees the whole college directory — a staff row has no
+// student-linked or aadhaar field to withhold (unlike documents/
+// students), so "operational/profile staff directory" is exactly this
+// table, college-wide. Ordinary staff cannot view another staff
+// member's profile. (College Admin previously got the same
+// college-wide reach here; BusinessRules.md's College Admin — final
+// model removed it as a tenant role entirely, so that carve-out is
+// gone too — see middleware/permissions.js's own note.)
+async function assertCanViewStaff(client, target, input) {
   const staff = await resolveStaffTarget(client, target);
   if (staff === null) {
     return null;
   }
-  if (staff.user_id === actorUserId) {
+
+  const actorId = actorIdOf(input);
+  if (staff.user_id === actorId) {
     return staff;
   }
-  if (actorRole === 'principal' || actorRole === 'college_admin') {
+
+  const actorRole = actorRoleOf(input);
+  // 'principal' resolves to the college scope level (unverified — see
+  // assertCanViewStudent's comment on the same trade-off). No
+  // ActorContext is resolved at all for a role that can never pass
+  // either check below — same "nothing to look up" outcome the
+  // original role-string branches had for e.g. a plain 'staff' actor.
+  if (actorRole !== 'principal' && actorRole !== 'hod') {
+    throw new VisibilityForbiddenError(
+      `role ${JSON.stringify(actorRole)} (user ${JSON.stringify(actorId)}) may not view staff ${JSON.stringify(staff.id)}`,
+    );
+  }
+
+  const actorContext = await resolveActorContext(client, input, staff.college_id);
+  if (scopeResolver.isAuthorizedForCollege(actorContext)) {
     return staff;
   }
-  if (actorRole === 'hod' && staff.department_id) {
-    const departmentId = await staffService.findHodDepartmentId(client, staff.college_id, actorUserId);
-    if (departmentId !== null && departmentId === staff.department_id) {
-      return staff;
-    }
+  if (staff.department_id && scopeResolver.isAuthorizedForDepartment(actorContext, staff.department_id)) {
+    return staff;
   }
   throw new VisibilityForbiddenError(
-    `role ${JSON.stringify(actorRole)} (user ${JSON.stringify(actorUserId)}) may not view staff ${JSON.stringify(staff.id)}`,
+    `role ${JSON.stringify(actorContext.role)} (user ${JSON.stringify(actorContext.actorId)}) may not view staff ${JSON.stringify(staff.id)}`,
   );
 }
 

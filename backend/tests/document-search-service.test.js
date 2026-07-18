@@ -20,6 +20,7 @@ const pdfRasterizer = require('../src/ocr/pdfRasterizer');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const aiDocumentChunkRepository = require('../src/repositories/aiDocumentChunkRepository');
 const documentSearchService = require('../src/services/documentSearchService');
+const visibilityService = require('../src/services/visibilityService');
 
 // documentSearchService resolves { adapter, config } via
 // configurationService.getAiConfig, then calls adapter.embed(config,
@@ -269,48 +270,78 @@ test('documentSearchService.searchDocuments', async (t) => {
     assert.equal(embedMock.mock.callCount(), 0);
   });
 
-  await t.test('embeds the query as a query (not a passage) and scopes the repository search to the actor tenant/classifications', async () => {
+  await t.test('embeds the query as a query (not a passage) and scopes the repository search to the actor tenant/classifications/visible classes', async () => {
     const embedMock = mockAiConfig(t, async () => [[0.4, 0.5, 0.6]]);
+    const visibleClassIdsMock = t.mock.method(visibilityService, 'getVisibleClassIds', async () => ['class-1']);
     const searchMock = t.mock.method(aiDocumentChunkRepository, 'search', async () => [
       {
         document_id: 'doc-1', chunk_index: 0, chunk_text: 'a chunk', classification: 'Internal', doc_type: 'birth_cert', file_name: 'x.txt', distance: 0.1,
       },
     ]);
     t.after(() => {
+      visibleClassIdsMock.mock.restore();
       searchMock.mock.restore();
     });
 
     const results = await documentSearchService.searchDocuments(
       {},
       { query: 'what is in my birth certificate?' },
-      { role: 'hod', collegeId: 'college-a' },
+      { userId: 'hod-1', role: 'hod', collegeId: 'college-a' },
     );
 
     assert.equal(embedMock.mock.callCount(), 1);
     const [, , embedOptions] = embedMock.mock.calls[0].arguments;
     assert.equal(embedOptions.inputType, 'query');
 
+    assert.equal(visibleClassIdsMock.mock.callCount(), 1);
+    const [, visibleClassIdsArgs] = visibleClassIdsMock.mock.calls[0].arguments;
+    assert.equal(visibleClassIdsArgs.actorUserId, 'hod-1');
+    assert.equal(visibleClassIdsArgs.actorRole, 'hod');
+    assert.equal(visibleClassIdsArgs.collegeId, 'college-a');
+
     assert.equal(searchMock.mock.callCount(), 1);
     const [, searchArgs] = searchMock.mock.calls[0].arguments;
     assert.equal(searchArgs.collegeId, 'college-a');
     assert.deepEqual(searchArgs.classifications, ['Internal', 'Confidential']);
     assert.deepEqual(searchArgs.embedding, [0.4, 0.5, 0.6]);
+    assert.deepEqual(searchArgs.classIds, ['class-1']);
 
     assert.equal(results.length, 1);
     assert.equal(results[0].chunkText, 'a chunk');
   });
 
-  await t.test('an unrecognized role gets no permitted classifications, so the repository is called with an empty list', async () => {
-    mockAiConfig(t, async () => [[0.1]]);
+  await t.test('a principal (unrestricted) gets null classIds, not a filtered list', async () => {
+    mockAiConfig(t, async () => [[0.1, 0.2]]);
+    const visibleClassIdsMock = t.mock.method(visibilityService, 'getVisibleClassIds', async () => null);
     const searchMock = t.mock.method(aiDocumentChunkRepository, 'search', async () => []);
     t.after(() => {
+      visibleClassIdsMock.mock.restore();
+      searchMock.mock.restore();
+    });
+
+    await documentSearchService.searchDocuments(
+      {},
+      { query: 'anything' },
+      { userId: 'principal-1', role: 'principal', collegeId: 'college-a' },
+    );
+
+    const [, searchArgs] = searchMock.mock.calls[0].arguments;
+    assert.equal(searchArgs.classIds, null);
+  });
+
+  await t.test('an unrecognized role gets no permitted classifications, so the repository is called with an empty list', async () => {
+    mockAiConfig(t, async () => [[0.1]]);
+    const visibleClassIdsMock = t.mock.method(visibilityService, 'getVisibleClassIds', async () => []);
+    const searchMock = t.mock.method(aiDocumentChunkRepository, 'search', async () => []);
+    t.after(() => {
+      visibleClassIdsMock.mock.restore();
       searchMock.mock.restore();
     });
 
     const results = await documentSearchService.searchDocuments(
       {},
       { query: 'anything' },
-      { role: 'someone_unrecognized', collegeId: 'college-a' },
+      { userId: 'u1', role: 'someone_unrecognized', collegeId: 'college-a' },
     );
 
     const [, searchArgs] = searchMock.mock.calls[0].arguments;

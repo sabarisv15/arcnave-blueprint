@@ -53,10 +53,12 @@
 
 const financeRepository = require('../repositories/financeRepository');
 const feePaymentRepository = require('../repositories/feePaymentRepository');
+const scholarshipDecisionRepository = require('../repositories/scholarshipDecisionRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const workflowService = require('./workflowService');
 const staffService = require('./staffService');
 const studentService = require('./studentService');
+const classRepository = require('../repositories/classRepository');
 const configurationService = require('./configurationService');
 
 // Missing academicYear, classId, feeCategory, or amount — fee_structures'
@@ -131,6 +133,18 @@ class ScholarshipStudentNotFoundError extends Error {}
 // yet, an administrative gap this tenant needs to fix, not a real
 // eligibility outcome.
 class ScholarshipThresholdNotConfiguredError extends Error {}
+
+// Missing schemeName, or eligible not a boolean —
+// recordScholarshipDecision's own required inputs.
+class ScholarshipDecisionValidationError extends Error {}
+
+// recordScholarshipDecision called by a user who is not the student's
+// current class's tutor — BusinessRules.md Scholarship: "the Class
+// Tutor reviews students and marks each one Eligible or Not Eligible."
+// Same per-row identity check studentService.createStudent's own
+// StudentNotClassTutorError already establishes for a Tutor-scoped
+// action, not a role-only check.
+class ScholarshipDecisionNotTutorError extends Error {}
 
 const VALID_FEE_PAYMENT_STATUSES = ['paid', 'not_paid'];
 
@@ -497,18 +511,21 @@ async function removeFeePayment(client, id, { userId } = {}) {
   return payment;
 }
 
-// BusinessRules.md Finance: "Students below a configured income
-// threshold become scholarship eligible" (exact threshold is
-// per-tenant config, not hardcoded). Reads the student's own
-// annual_income through StudentService, never studentRepository
-// directly (CLAUDE.md rule 1/Architecture.md 2.5 — FinanceService owns
-// scholarship eligibility, but a student record is StudentService's
-// table), and the threshold through ConfigurationService category
-// 'finance', key scholarshipIncomeThreshold — never a hardcoded
-// number, per BusinessRules.md's own parenthetical. A student with no
-// annual_income on file is reported ineligible with a distinct reason
-// rather than throwing: "we don't know this student's income" is a
-// normal, expected state (income collection is optional), not an
+// BusinessRules.md Finance — Scholarship eligibility (superseded): this
+// income-threshold check is retained ONLY as one advisory input a
+// Class Tutor may consult — never the eligibility outcome itself. It
+// is not called from anywhere that records or acts on eligibility;
+// recordScholarshipDecision below (the Tutor's real, audited decision)
+// is the actual outcome BusinessRules.md now describes. Reads the
+// student's own annual_income through StudentService, never
+// studentRepository directly (CLAUDE.md rule 1/Architecture.md 2.5 —
+// FinanceService owns scholarship eligibility, but a student record is
+// StudentService's table), and the threshold through
+// ConfigurationService category 'finance', key
+// scholarshipIncomeThreshold — never a hardcoded number. A student
+// with no annual_income on file is reported ineligible with a distinct
+// reason rather than throwing: "we don't know this student's income"
+// is a normal, expected state (income collection is optional), not an
 // error the caller needs to handle specially.
 async function checkScholarshipEligibility(client, collegeId, studentId, { actorUserId, actorRole } = {}) {
   const student = await studentService.getStudent(client, studentId, { actorUserId, actorRole });
@@ -540,6 +557,61 @@ async function checkScholarshipEligibility(client, collegeId, studentId, { actor
   };
 }
 
+// BusinessRules.md Scholarship: "the Class Tutor reviews students and
+// marks each one Eligible or Not Eligible according to the
+// institution's own policy... every eligibility decision is audited."
+// This is that decision — the real outcome, unlike
+// checkScholarshipEligibility above (advisory only). No hardcoded
+// criteria enforced here either: eligible is whatever the Tutor
+// decided, for whatever reason they recorded, per institution policy
+// this codebase doesn't (and per BusinessRules.md, shouldn't) encode.
+async function recordScholarshipDecision(client, studentId, {
+  schemeName, eligible, reason, supportingDocumentId,
+}, { actorUserId } = {}) {
+  if (!schemeName) {
+    throw new ScholarshipDecisionValidationError('schemeName is required');
+  }
+  if (typeof eligible !== 'boolean') {
+    throw new ScholarshipDecisionValidationError('eligible must be a boolean');
+  }
+
+  const student = await studentService.getStudent(client, studentId);
+  if (student === null) {
+    throw new ScholarshipStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
+  }
+  const cls = student.class_id ? await classRepository.findById(client, student.class_id) : null;
+  if (cls === null || cls.tutor_user_id !== actorUserId) {
+    throw new ScholarshipDecisionNotTutorError(
+      `user ${JSON.stringify(actorUserId)} is not the class tutor for student ${JSON.stringify(studentId)}`,
+    );
+  }
+
+  const decision = await scholarshipDecisionRepository.create(client, {
+    collegeId: student.college_id,
+    studentId,
+    schemeName,
+    eligible,
+    reason,
+    supportingDocumentId,
+    decidedByUserId: actorUserId,
+  });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: student.college_id,
+    userId: actorUserId,
+    action: 'scholarship_decision_recorded',
+    entity: 'scholarship_decisions',
+    entityId: decision.id,
+    metadata: { schemeName, eligible },
+  });
+
+  return decision;
+}
+
+async function listScholarshipDecisionsForStudent(client, studentId) {
+  return scholarshipDecisionRepository.listForStudent(client, studentId);
+}
+
 module.exports = {
   FeeStructureValidationError,
   FeeStructureConflictError,
@@ -553,6 +625,8 @@ module.exports = {
   FeePaymentConflictError,
   ScholarshipStudentNotFoundError,
   ScholarshipThresholdNotConfiguredError,
+  ScholarshipDecisionValidationError,
+  ScholarshipDecisionNotTutorError,
   createFeeStructure,
   getFeeStructure,
   updateFeeStructure,
@@ -568,4 +642,6 @@ module.exports = {
   listFeePayments,
   removeFeePayment,
   checkScholarshipEligibility,
+  recordScholarshipDecision,
+  listScholarshipDecisionsForStudent,
 };

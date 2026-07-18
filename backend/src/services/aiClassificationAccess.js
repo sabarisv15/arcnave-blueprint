@@ -18,7 +18,6 @@
 // Proposed, not settled; see ADR-020.
 const ROLE_CLASSIFICATION_ACCESS = {
   principal: ['Internal', 'Confidential', 'Restricted'],
-  college_admin: ['Internal', 'Confidential'],
   hod: ['Internal', 'Confidential'],
   staff: ['Internal'],
 };

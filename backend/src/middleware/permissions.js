@@ -26,6 +26,14 @@
 // today.
 
 const PERMISSION_ROLES = {
+  // routes/academicYears.js — BusinessRules.md Academic Year: "only the
+  // Principal may request lifecycle transitions." Reads are requireAuth
+  // (any authenticated tenant user), not gated here.
+  'academic_years.create': ['principal'],
+  'academic_years.activate': ['principal'],
+  'academic_years.close': ['principal'],
+  'academic_years.archive': ['principal'],
+
   // routes/analytics.js — GET /analytics/attendance-rate
   'analytics.attendance_rate.read': ['principal', 'hod'],
 
@@ -35,33 +43,51 @@ const PERMISSION_ROLES = {
   // operational/internal concern (job status, error text) — no
   // BusinessRules.md rule names ordinary staff/hod as needing this,
   // same conservative-default reasoning finance.js's own writes use.
-  'background_jobs.read': ['principal', 'college_admin'],
+  'background_jobs.read': ['principal'],
 
   // routes/classes.js — POST/PUT/DELETE /classes
   'classes.create': ['principal'],
   'classes.update': ['principal'],
   'classes.delete': ['principal'],
+  'classes.promote_semester': ['principal', 'hod'],
 
-  // routes/collegeProfile.js — GET/PUT /college-profile
-  'college_profile.read': ['college_admin'],
-  'college_profile.update': ['college_admin'],
+  // routes/collegeProfile.js — GET/PUT /college-profile. Moved from
+  // college_admin to principal: college_admin is no longer a tenant
+  // users.role (BusinessRules.md's College Admin — final model: an
+  // ARCNAVE support employee, not a seat in any tenant's users table
+  // — see Staff/Multi-tenancy). College profile maintenance is now a
+  // Principal duty in-tenant.
+  'college_profile.read': ['principal'],
+  'college_profile.update': ['principal'],
 
   // routes/configurations.js — PUT /configurations/:category
   'configurations.update': ['principal'],
+
+  // routes/calendar.js — POST/PUT/DELETE /calendar-events (task #20,
+  // BusinessRules.md Platform administration, Academic Calendar).
+  // Reads are requireAuth-only (any tenant user); writes are
+  // Principal-only, same conservative default as configurations.update
+  // above.
+  'calendar.write': ['principal'],
 
   // routes/aiConfig.js — GET/PUT /ai-config
   'ai_config.read': ['principal'],
   'ai_config.update': ['principal'],
 
-  // routes/departments.js — GET/POST/PUT/DELETE /departments
-  'departments.read': ['college_admin'],
-  'departments.create': ['college_admin'],
-  'departments.update': ['college_admin'],
-  'departments.delete': ['college_admin'],
+  // routes/departments.js — GET/POST/PUT/DELETE /departments. Moved
+  // from college_admin to principal — see the college_profile note
+  // above.
+  'departments.read': ['principal'],
+  'departments.create': ['principal'],
+  'departments.update': ['principal'],
+  'departments.delete': ['principal'],
+  'hod_in_charge.appoint': ['principal'],
 
   // routes/documents.js
   'documents.upload': ['principal'],
-  'documents.templates.upload': ['college_admin'],
+  // Template upload moved from college_admin to principal — see the
+  // college_profile note above.
+  'documents.templates.upload': ['principal'],
   'documents.ocr.run': ['principal'],
   'documents.review': ['principal'],
   'documents.delete': ['principal'],
@@ -83,9 +109,53 @@ const PERMISSION_ROLES = {
   // BusinessRules.md's Notifications section names ordinary staff as a
   // drafter, only that drafts (human- or AI-origin) require Principal
   // approval before dispatch.
-  'notifications.draft': ['principal', 'college_admin', 'hod'],
-  'notifications.submit': ['principal', 'college_admin', 'hod'],
-  'notifications.read': ['principal', 'college_admin', 'hod'],
+  'notifications.draft': ['principal', 'hod'],
+  'notifications.submit': ['principal', 'hod'],
+  'notifications.read': ['principal', 'hod'],
+
+  // routes/classes.js — substitute assignment. BusinessRules.md names
+  // the actor as "an authorized academic authority (HOD or
+  // equivalent)" — HOD is the ordinary case, Principal as the
+  // college-wide fallback authority, same pairing
+  // analytics.attendance_rate.read already uses for a similarly-worded
+  // "HOD or above" rule.
+  'substitute_assignments.create': ['hod', 'principal'],
+  // BusinessRules.md Automatic timetable generation names no actor for
+  // triggering generation itself (only "HOD reviews and approves" the
+  // result, already gated by the existing submit/approve chain) — same
+  // conservative default other un-named-actor create actions in this
+  // table use.
+  'timetables.generate': ['principal', 'hod'],
+
+  // routes/attendance.js — locking a session is an administrative
+  // action (BusinessRules.md frames it as time-based/automatic, not a
+  // named human actor — see attendanceService.lockAttendanceSession's
+  // own comment); restricted to HOD/Principal rather than left open to
+  // any authenticated user, pending a real scheduled-job trigger.
+  // Correction submit/approve/reject are requireAuth, not gated here —
+  // same "the service is the gate" reasoning the rest of this router
+  // already uses for markAttendance.
+  'attendance.lock': ['hod', 'principal'],
+
+  // routes/curriculum.js — regulations/subjects are Principal-created
+  // (BusinessRules.md doesn't name a different actor for this, same
+  // conservative default other create/update/delete actions in this
+  // table use); curriculum-migration submit/approve/reject are
+  // requireAuth, not gated here — same "the service is the gate, not
+  // requireRole" reasoning staff.js's submit-registration route uses.
+  // routes/assessments.js — assessment types are institution-wide
+  // configuration; mark entry/read/delete are requireAuth, gated by
+  // assessmentService's own assigned-faculty check instead.
+  'workflow_delegations.create': ['principal'],
+  'archived_records.create': ['principal'],
+
+  'assessment_types.create': ['principal'],
+  'assessment_types.update': ['principal'],
+
+  'regulations.create': ['principal'],
+  'subjects.create': ['principal'],
+  'subjects.update': ['principal'],
+  'subjects.delete': ['principal'],
 
   // routes/reports.js — all three POST /reports/* routes shared one
   // requireRole('principal') each; one permission covers all three,
@@ -106,9 +176,9 @@ const PERMISSION_ROLES = {
   // other than hod/principal "passes through untouched" as 'staff').
   // This role check alone doesn't enforce "own class only" (that's
   // studentService.createStudent's job, resolving classes.tutor_user_id
-  // = actorUserId itself) — it only excludes principal/hod/college_admin,
-  // none of whom are ever a class's tutor_user_id in practice, from
-  // reaching the route at all.
+  // = actorUserId itself) — it only excludes principal/hod, neither of
+  // whom is ever a class's tutor_user_id in practice, from reaching
+  // the route at all.
   'students.create': ['staff'],
   // students.update/delete changed from ['principal'] to
   // ['staff', 'hod', 'principal']: each is scoped to their own

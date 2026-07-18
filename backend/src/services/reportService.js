@@ -31,6 +31,7 @@ const generatedReportRepository = require('../repositories/generatedReportReposi
 const attendanceRepository = require('../repositories/attendanceRepository');
 const financeRepository = require('../repositories/financeRepository');
 const feePaymentRepository = require('../repositories/feePaymentRepository');
+const assessmentService = require('./assessmentService');
 const csvGenerator = require('../generators/csvGenerator');
 const pdfGenerator = require('../generators/pdfGenerator');
 const excelGenerator = require('../generators/excelGenerator');
@@ -277,10 +278,52 @@ async function generateFinanceReport(client, { collegeId, format = 'csv' }, opts
   }, opts);
 }
 
+// BusinessRules.md Assessment marks: "marks can be exported using
+// selected filters; CSV is the primary supported export format." No
+// grade/weightage column here either — the raw stored value only,
+// same "no automatic calculation" rule this codebase's own
+// assessmentService.recordMark already follows; a Generator Module
+// export must not silently introduce a calculation the entry path
+// itself deliberately doesn't perform (ADR-008: the Generator Module
+// is a pure formatter, never a second place business rules could
+// diverge).
+function buildAssessmentMarksReportModel(rows) {
+  return {
+    title: 'Assessment Marks',
+    columns: [
+      { id: 'academic_year', label: 'Academic Year' },
+      { id: 'class_id', label: 'Class' },
+      { id: 'subject', label: 'Subject' },
+      { id: 'assessment_type_id', label: 'Assessment Type' },
+      { id: 'student_id', label: 'Student' },
+      { id: 'marks_obtained', label: 'Marks Obtained' },
+    ],
+    rows: rows.map((row) => ({
+      academic_year: row.academic_year,
+      class_id: row.class_id,
+      subject: row.subject,
+      assessment_type_id: row.assessment_type_id,
+      student_id: row.student_id,
+      marks_obtained: row.marks_obtained,
+    })),
+  };
+}
+
+async function generateAssessmentMarksReport(client, { collegeId, format = 'csv', filters = {} }, opts = {}) {
+  return generateSimpleReport(client, {
+    collegeId,
+    format,
+    reportType: 'assessment_marks_report',
+    titleBuilder: buildAssessmentMarksReportModel,
+    loadRows: () => assessmentService.listMarksForFilters(client, filters),
+  }, opts);
+}
+
 module.exports = {
   ReportValidationError,
   ReportFormatError,
   generateStudentExportReport,
   generateAttendanceReport,
   generateFinanceReport,
+  generateAssessmentMarksReport,
 };

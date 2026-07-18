@@ -90,6 +90,22 @@ function mapStaffServiceError(err, res) {
     res.status(404).json({ detail: err.message });
     return true;
   }
+  if (err instanceof staffService.StaffDeactivationNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.StaffDeactivationHasActiveDutiesError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.HodInChargeValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.HodInChargeAlreadyActiveError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
   // submitStaffRegistration's own error surface, per its own comment:
   // resolves the department's real HOD and the college's real Principal
   // (each throws if none exists yet), then calls
@@ -186,9 +202,8 @@ function createStaffRouter() {
   }));
 
   // requireAuth gates "must be logged in"; the real scope (self, hod of
-  // the target's own department, principal/college_admin college-wide —
-  // this session's own task) is visibilityService.assertCanViewStaff's
-  // job.
+  // the target's own department, principal college-wide — this
+  // session's own task) is visibilityService.assertCanViewStaff's job.
   router.get('/staff/:id', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     let staff;
@@ -211,9 +226,9 @@ function createStaffRouter() {
   // staffRepository already default them to 50/0, not re-implemented
   // here. Scoped by role (this session's own task: this route used to
   // return the whole college's staff directory to anyone
-  // authenticated): principal/college_admin see the whole college,
-  // hod sees their own (real, verified) department, ordinary staff see
-  // only their own profile.
+  // authenticated): principal sees the whole college, hod sees their
+  // own (real, verified) department, ordinary staff see only their own
+  // profile.
   router.get('/staff', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { limit: rawLimit, offset: rawOffset } = req.query;
@@ -222,7 +237,7 @@ function createStaffRouter() {
     const actorRole = req.jwtClaims.role;
     const actorUserId = req.jwtClaims.sub;
 
-    if (actorRole === 'principal' || actorRole === 'college_admin') {
+    if (actorRole === 'principal') {
       const staff = await staffService.listStaff(req.dbClient, { limit, offset });
       res.json(staff);
       return;
@@ -289,6 +304,24 @@ function createStaffRouter() {
         { requestedByUserId: req.jwtClaims.sub },
       );
       res.status(201).json(workflowRequest);
+    } catch (err) {
+      if (mapStaffServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // requireAuth, not requirePermission: BusinessRules.md names real,
+  // per-row actors ("faculty deactivation is performed by HOD; HOD
+  // deactivation is performed by Principal") this router has no
+  // per-row check to enforce today (unlike sendClassAlert's own
+  // tutor_user_id comparison) — left as a conservative gap, not
+  // silently narrowed to a role-only check that would be wrong for
+  // one of the two cases. Revisit once a real per-row check exists.
+  router.post('/staff/:id/deactivate', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const result = await staffService.deactivateStaff(req.dbClient, req.params.id, { actorUserId: req.jwtClaims.sub });
+      res.json(result);
     } catch (err) {
       if (mapStaffServiceError(err, res)) return;
       throw err;

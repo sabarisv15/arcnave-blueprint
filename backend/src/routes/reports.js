@@ -86,6 +86,32 @@ function createReportsRouter() {
     }
   }));
 
+  router.post('/reports/assessment-marks', requirePermission('reports.generate'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const body = req.body || {};
+    try {
+      const report = await reportService.generateAssessmentMarksReport(
+        req.dbClient,
+        {
+          collegeId: req.collegeId,
+          format: body.format,
+          filters: {
+            academicYear: body.academic_year,
+            departmentId: body.department_id,
+            classId: body.class_id,
+            subject: body.subject,
+            assessmentTypeId: body.assessment_type_id,
+          },
+        },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(report);
+    } catch (err) {
+      if (mapReportServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
   return router;
 }
 

@@ -2,9 +2,10 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const attendanceService = require('../services/attendanceService');
 const visibilityService = require('../services/visibilityService');
+const workflowService = require('../services/workflowService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -80,6 +81,34 @@ function mapAttendanceServiceError(err, res) {
   }
   if (err instanceof visibilityService.VisibilityForbiddenError) {
     res.status(403).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof attendanceService.AttendanceSessionNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof attendanceService.AttendanceNotLockedError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof attendanceService.AttendanceCorrectionValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof attendanceService.AttendanceCorrectionNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof attendanceService.AttendanceCorrectionNoPendingRequestError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestConflictError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestValidationError) {
+    res.status(400).json({ detail: err.message });
     return true;
   }
   return false;
@@ -180,6 +209,82 @@ function createAttendanceRouter() {
     }
     const sessions = await attendanceService.listAttendanceSessionsForClassInRange(req.dbClient, classId, { startDate, endDate });
     res.json(sessions);
+  }));
+
+  router.post('/attendance/:id/lock', requirePermission('attendance.lock'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const session = await attendanceService.lockAttendanceSession(req.dbClient, req.params.id, { actorUserId: req.jwtClaims.sub });
+      res.json(session);
+    } catch (err) {
+      if (mapAttendanceServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.get('/attendance/:id/effective', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const session = await attendanceService.getEffectiveAttendanceSession(req.dbClient, req.params.id);
+    if (session === null) {
+      res.status(404).json({ detail: `No attendance session found with id ${JSON.stringify(req.params.id)}` });
+      return;
+    }
+    res.json(session);
+  }));
+
+  // requireAuth, not requirePermission: BusinessRules.md names the
+  // actor ("Subject Faculty submits a correction request") — same
+  // "service is the gate" reasoning the rest of this router already
+  // uses. Nothing here restricts *which* faculty may submit; the
+  // approval step (Class Tutor only, via workflowService's own
+  // step-matching) is the real gate on the outcome.
+  router.post('/attendance/:id/corrections', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const {
+      proposed_absent_student_ids: proposedAbsentStudentIds,
+      proposed_total_students: proposedTotalStudents,
+      reason,
+    } = req.body || {};
+    try {
+      const result = await attendanceService.requestAttendanceCorrection(
+        req.dbClient,
+        req.params.id,
+        { proposedAbsentStudentIds, proposedTotalStudents, reason },
+        { requestedByUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(result);
+    } catch (err) {
+      if (mapAttendanceServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.get('/attendance/:id/corrections', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const corrections = await attendanceService.listAttendanceCorrectionsForSession(req.dbClient, req.params.id);
+    res.json(corrections);
+  }));
+
+  router.post('/attendance/corrections/:correctionId/approve', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const correction = await attendanceService.approveAttendanceCorrection(req.dbClient, req.params.correctionId, { actorUserId: req.jwtClaims.sub });
+      res.json(correction);
+    } catch (err) {
+      if (mapAttendanceServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/attendance/corrections/:correctionId/reject', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const correction = await attendanceService.rejectAttendanceCorrection(req.dbClient, req.params.correctionId, { actorUserId: req.jwtClaims.sub });
+      res.json(correction);
+    } catch (err) {
+      if (mapAttendanceServiceError(err, res)) return;
+      throw err;
+    }
   }));
 
   // No DELETE route: attendance_sessions is soft-delete only per

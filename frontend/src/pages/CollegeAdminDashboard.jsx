@@ -3,13 +3,17 @@ import SidebarLayout from '../components/SidebarLayout';
 import { useToast, useAuth } from '../App';
 import { Building, Plus, Edit3, Trash2, Save, FileText, Upload } from 'lucide-react';
 
-// College Admin's own dashboard — BusinessRules.md's College Admin
-// resolution: "College Profile" (item 3 — the 3 colleges columns +
-// departments CRUD) and template upload (item 2 —
-// "uploading/managing college document templates"), same
-// card+list+modal convention PrincipalDashboard.jsx's Fee Structures
-// tab already uses. Bulk-provisioning (item 1) is a separate,
-// not-yet-built slice of this same role — not guessed at here.
+// Institution profile page — originally College Admin's own dashboard.
+// BusinessRules.md's College Admin — final model made College Admin
+// an ARCNAVE support employee with no seat in any tenant, so this
+// page (college profile columns + departments CRUD + document
+// template upload) is now reached by Principal instead — see
+// App.jsx's route (principal-only) and middleware/permissions.js
+// (college_profile.*/departments.*/documents.templates.upload all
+// moved to ['principal']). Same card+list+modal convention
+// PrincipalDashboard.jsx's Fee Structures tab already uses; not yet
+// folded into PrincipalDashboard's own tab set as a follow-up polish
+// item, reachable as its own route for now.
 export default function CollegeAdminDashboard() {
   const { accessToken } = useAuth();
   const { showToast } = useToast();
@@ -170,13 +174,13 @@ export default function CollegeAdminDashboard() {
     }
   };
 
-  const menuItems = [{ id: 'college_profile', label: 'College Profile', icon: Building }];
+  const menuItems = [{ id: 'college_profile', label: 'Institution Profile', icon: Building }];
 
   return (
-    <SidebarLayout activeTab="college_profile" onTabChange={() => {}} menuItems={menuItems} roleLabel="College Admin">
+    <SidebarLayout activeTab="college_profile" onTabChange={() => {}} menuItems={menuItems} roleLabel="Principal">
       <div className="space-y-6 animate-slide-up">
         <div>
-          <p className="section-title mb-1">College Admin · Institution Profile</p>
+          <p className="section-title mb-1">Principal · Institution Profile</p>
           <h1 className="text-3xl font-black text-slate-805 tracking-tight">College Profile</h1>
           <p className="text-slate-500 text-sm mt-1">Maintain your college's own profile details and departments.</p>
         </div>

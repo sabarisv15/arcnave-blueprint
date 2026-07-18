@@ -109,6 +109,14 @@ function mapFinanceServiceError(err, res) {
     res.status(409).json({ detail: err.message });
     return true;
   }
+  if (err instanceof financeService.ScholarshipDecisionValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof financeService.ScholarshipDecisionNotTutorError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
   // submitFeeStructureApproval's own error surface, per its file-level
   // comment: resolves the Principal via staffService.findPrincipal
   // (throws if none exists yet) then calls workflowService.submitRequest
@@ -332,6 +340,9 @@ function createFinanceRouter() {
   // checkScholarshipEligibility via studentService, not this route
   // (this session's own task: this route used to let any authenticated
   // user pull any student's scholarship data).
+  // Advisory only — see financeService.checkScholarshipEligibility's
+  // own comment. Never the eligibility outcome; recordScholarshipDecision
+  // below is.
   router.get('/finance/students/:id/scholarship-eligibility', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
@@ -343,6 +354,33 @@ function createFinanceRouter() {
       if (mapFinanceServiceError(err, res)) return;
       throw err;
     }
+  }));
+
+  // requireAuth, not requirePermission: BusinessRules.md names the
+  // Class Tutor as the actor — financeService.recordScholarshipDecision's
+  // own tutor_user_id check (ScholarshipDecisionNotTutorError) is the
+  // real gate, same "the service is the gate" reasoning every other
+  // Tutor-scoped action in this codebase uses.
+  router.post('/finance/students/:id/scholarship-decisions', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const {
+      scheme_name: schemeName, eligible, reason, supporting_document_id: supportingDocumentId,
+    } = req.body || {};
+    try {
+      const decision = await financeService.recordScholarshipDecision(
+        req.dbClient, req.params.id, { schemeName, eligible, reason, supportingDocumentId }, { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(decision);
+    } catch (err) {
+      if (mapFinanceServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.get('/finance/students/:id/scholarship-decisions', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const decisions = await financeService.listScholarshipDecisionsForStudent(req.dbClient, req.params.id);
+    res.json(decisions);
   }));
 
   return router;

@@ -20,7 +20,7 @@ function requireResolvedTenant(req, res) {
 // data at that level; the various provider categories hold — even if
 // encrypted at rest, per notificationChannelRepository/cryptoUtil —
 // vendor account identifiers no ordinary staff member has a reason to
-// read). Restricted to principal/college_admin, not left to "any
+// read). Restricted to principal, not left to "any
 // authenticated tenant user" the way a category like attendance-rule
 // display config still reasonably is. A static list, same reasoning
 // middleware/permissions.js's own PERMISSION_ROLES table gives for
@@ -28,6 +28,12 @@ function requireResolvedTenant(req, res) {
 // names a need for per-tenant customization of which categories count
 // as sensitive.
 const SENSITIVE_CONFIGURATION_CATEGORIES = [
+  // Business rule task #19: institution MFA mode/role-scope
+  // (authService.getAuthConfig) — who is forced through a second
+  // factor, and which roles are exempt, is exactly the kind of
+  // security-posture policy the categories below already exist to
+  // protect from ordinary-staff read access.
+  'auth',
   'finance',
   'notifications',
   'notification_channels',
@@ -35,6 +41,11 @@ const SENSITIVE_CONFIGURATION_CATEGORIES = [
   'ai_config',
   'approval',
   'workflow',
+  // workflowChainService's own configurable-approval-chain category
+  // (BusinessRules.md Configurable approval workflow) — who approves
+  // what is exactly the kind of policy 'approval'/'workflow' above
+  // already exist to protect; this is that category's real name.
+  'workflow_chains',
   'smtp',
   'sms',
   'whatsapp',
@@ -47,13 +58,13 @@ function createConfigurationsRouter() {
   // Any authenticated tenant user may read a non-sensitive category —
   // matches the Python version's require_role(*TENANT_ROLES). A
   // sensitive category (SENSITIVE_CONFIGURATION_CATEGORIES above) is
-  // restricted to principal/college_admin instead (this session's own
-  // task: this route used to let any authenticated user read finance/
+  // restricted to principal instead (this session's own task: this
+  // route used to let any authenticated user read finance/
   // notification-provider/AI-provider config, credentials included).
   router.get('/configurations/:category', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     if (SENSITIVE_CONFIGURATION_CATEGORIES.includes(req.params.category)
-      && !['principal', 'college_admin'].includes(req.jwtClaims.role)) {
+      && req.jwtClaims.role !== 'principal') {
       res.status(403).json({ detail: `role ${JSON.stringify(req.jwtClaims.role)} may not read configuration category ${JSON.stringify(req.params.category)}` });
       return;
     }
