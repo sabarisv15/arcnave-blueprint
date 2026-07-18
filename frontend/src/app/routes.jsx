@@ -1,6 +1,7 @@
 import { createBrowserRouter } from 'react-router-dom';
 import { AppShell } from '@/components/layout/AppShell';
 import { ProtectedRoute } from '@/components/layout/ProtectedRoute';
+import { PlatformProtectedRoute } from '@/components/layout/PlatformProtectedRoute';
 
 import { LoginPage } from '@/features/auth/pages/LoginPage';
 import { MfaChallengePage } from '@/features/auth/pages/MfaChallengePage';
@@ -79,6 +80,11 @@ export const router = createBrowserRouter([
 
   // Platform (Super Admin) app — structurally separate auth domain
   { path: '/platform/login', element: <PlatformLoginPage /> },
-  { path: '/platform/colleges', element: <CollegesPage /> },
-  { path: '/platform/invitations', element: <InvitationsPage /> },
+  {
+    element: <PlatformProtectedRoute />,
+    children: [
+      { path: '/platform/colleges', element: <CollegesPage /> },
+      { path: '/platform/invitations', element: <InvitationsPage /> },
+    ],
+  },
 ]);
