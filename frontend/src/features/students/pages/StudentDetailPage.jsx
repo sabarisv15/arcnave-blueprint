@@ -24,6 +24,7 @@ import { RoleGate } from '@/components/layout/RoleGate';
 import { studentsApi } from '@/api/students';
 import { ApiError } from '@/api/client';
 import { StudentFormDialog } from '@/features/students/components/StudentFormDialog';
+import { StudentFinanceTab } from '@/features/finance/components/StudentFinanceTab';
 import {
   LIFECYCLE_STATUSES, APPROVAL_REQUIRED_STATUSES, lifecycleChangeSchema,
   transferRequestSchema, phoneOtpRequestSchema, phoneOtpVerifySchema,
@@ -454,11 +455,13 @@ export function StudentDetailPage() {
           <TabsTrigger value="lifecycle">Lifecycle</TabsTrigger>
           <TabsTrigger value="transfer">Transfer</TabsTrigger>
           <TabsTrigger value="phone">Phone verification</TabsTrigger>
+          <TabsTrigger value="finance">Finance</TabsTrigger>
         </TabsList>
         <TabsContent value="profile"><ProfileTab student={student} id={id} navigate={navigate} /></TabsContent>
         <TabsContent value="lifecycle"><LifecycleTab student={student} id={id} /></TabsContent>
         <TabsContent value="transfer"><TransferTab id={id} /></TabsContent>
         <TabsContent value="phone"><PhoneVerificationTab student={student} id={id} /></TabsContent>
+        <TabsContent value="finance"><StudentFinanceTab studentId={id} /></TabsContent>
       </Tabs>
     </div>
   );
