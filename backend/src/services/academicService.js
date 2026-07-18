@@ -1031,7 +1031,7 @@ async function importTimetablePeriodsCsv(client, { collegeId, fileName = 'timeta
     await classRepository.update(client, classId, { timetableData: JSON.stringify([...existing, ...entries]) });
   }
 
-  return { rawDocumentId: rawDocument.id, imported, skipped, totalRows: lines.length - 1 };
+  return { rawDocumentId: rawDocument.id, imported, skipped, totalRows: rows.length };
 }
 
 // null means no period exists with this id — not an error. The route

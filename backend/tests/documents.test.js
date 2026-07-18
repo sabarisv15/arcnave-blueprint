@@ -117,6 +117,17 @@ async function seedTenant(adminPool, label) {
     userIds[username] = result.rows[0].id;
   }
 
+  // visibilityService.assertIsPrincipalOfCollege (studentService.
+  // assertCanViewStudent's own real scope check, which every
+  // student-scoped document read routes through) verifies via
+  // staffService.findPrincipal, which JOINs staff to users — a plain
+  // users row with role='principal' alone does not satisfy it, same
+  // as real principal onboarding always creating both together.
+  await adminPool.query(
+    `INSERT INTO staff (college_id, user_id, full_name) VALUES ($1, $2, 'Documents API Test Principal')`,
+    [college.collegeId, userIds.principaluser],
+  );
+
   const student = await adminPool.query(
     `INSERT INTO students (college_id, roll_no, full_name) VALUES ($1, $2, $3) RETURNING id`,
     [college.collegeId, `DOC-${suffix}`, 'Documents API Test Student'],
@@ -130,6 +141,7 @@ async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM ocr_results WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM documents WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM students WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM staff WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM colleges WHERE college_id = $1', [college.collegeId]);

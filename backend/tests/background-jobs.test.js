@@ -67,6 +67,9 @@ async function seedTenant(adminPool) {
 }
 
 async function cleanupTenant(adminPool, college) {
+  // audit_log.user_id FKs users(id) — must go before the users delete
+  // below (task #17's login audit logging).
+  await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM background_jobs WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [college.collegeId]);
