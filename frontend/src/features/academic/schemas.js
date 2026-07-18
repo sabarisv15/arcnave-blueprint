@@ -73,3 +73,21 @@ export const assessmentMarkFormSchema = z.object({
   studentId: z.string().min(1, 'Student is required'),
   marksObtained: z.coerce.number().min(0, 'Marks obtained is required'),
 });
+
+export const archiveRecordFormSchema = z.object({
+  entityType: z.string().min(1, 'Entity type is required'),
+  entityId: z.string().min(1, 'Entity ID is required'),
+  reason: z.string().optional().or(z.literal('')),
+});
+
+export const restorationRequestFormSchema = z.object({
+  reason: z.string().optional().or(z.literal('')),
+});
+
+export const calendarEventFormSchema = z.object({
+  title: z.string().min(1, 'Title is required'),
+  eventType: z.string().min(1, 'Event type is required'),
+  startDate: z.string().min(1, 'Start date is required'),
+  endDate: z.string().optional().or(z.literal('')),
+  description: z.string().optional().or(z.literal('')),
+});
