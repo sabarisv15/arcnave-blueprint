@@ -50,6 +50,7 @@ function ProfileTab({ student, id, navigate }) {
   const deleteMutation = useMutation({
     mutationFn: () => studentsApi.remove(id),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['students'] });
       toast.success('Student removed');
       navigate('/students');
     },
