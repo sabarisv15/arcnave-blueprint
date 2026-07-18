@@ -21,7 +21,7 @@ const aiToolRegistry = require('../src/services/aiToolRegistry');
 const aiContextBuilder = require('../src/services/aiContextBuilder');
 const aiPromptSafetyLayer = require('../src/services/aiPromptSafetyLayer');
 const aiService = require('../src/services/aiService');
-const llmProvider = require('../src/services/llmProvider');
+const nimAdapter = require('../src/services/aiProviders/nim');
 const config = require('../src/config');
 const notificationRepository = require('../src/repositories/notificationRepository');
 const workflowService = require('../src/services/workflowService');
@@ -62,6 +62,77 @@ test('aiToolRegistry: listTools returns the real registered tool, including its 
   assert.equal(profile.level, 'L1');
   assert.equal(profile.dataClassification, 'Internal');
   assert.deepEqual(profile.params, { type: 'object', properties: {}, additionalProperties: false });
+});
+
+// R0-R5 risk ladder — computeRiskLevel is a pure function over the
+// same RISK_MATRIX every registered tool's own riskLevel is derived
+// from at registration time (see registerTool's own comment) — tested
+// directly here so the matrix's exact values are pinned down, not just
+// exercised incidentally through whichever real tools happen to exist.
+test('aiToolRegistry.computeRiskLevel: monotonic R0-R5 ladder derived from (level, dataClassification)', () => {
+  assert.equal(aiToolRegistry.computeRiskLevel('L1', 'Internal'), 0);
+  assert.equal(aiToolRegistry.computeRiskLevel('L1', 'Confidential'), 1);
+  assert.equal(aiToolRegistry.computeRiskLevel('L1', 'Restricted'), 1);
+  assert.equal(aiToolRegistry.computeRiskLevel('L2', 'Internal'), 2);
+  assert.equal(aiToolRegistry.computeRiskLevel('L2', 'Restricted'), 3);
+  assert.equal(aiToolRegistry.computeRiskLevel('L3', 'Internal'), 3);
+  assert.equal(aiToolRegistry.computeRiskLevel('L3', 'Confidential'), 4);
+  assert.equal(aiToolRegistry.computeRiskLevel('L3', 'Restricted'), 5);
+  assert.equal(aiToolRegistry.computeRiskLevel('L9', 'Internal'), null);
+});
+
+test('aiToolRegistry: real registered tools carry the correct derived riskLevel via listTools', () => {
+  const tools = aiToolRegistry.listTools();
+  const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+  assert.equal(byName.get_college_profile.riskLevel, 0); // L1 + Internal
+  assert.equal(byName.draft_notification.riskLevel, 2); // L2 + Confidential
+  assert.equal(byName.request_notification_send.riskLevel, 4); // L3 + Confidential
+  assert.equal(byName.search_documents.riskLevel, 0); // L1 + Internal
+});
+
+test('Action Manifest: invokeTool builds and passes a real manifest to an L3 handler, and passes none to L1/L2', async () => {
+  let capturedL3Manifest;
+  aiToolRegistry.registerTool({
+    name: 'test_only_l3_manifest_tool',
+    level: 'L3',
+    dataClassification: 'Restricted',
+    description: 'test fixture',
+    allowedRoles: ['principal'],
+    handler: async (client, params, actor, manifest) => {
+      capturedL3Manifest = manifest;
+      return { ok: 'l3', workflow_request_id: 'wf-manifest-1', status: 'Pending' };
+    },
+  });
+  let capturedL2Manifest = 'not-yet-called';
+  aiToolRegistry.registerTool({
+    name: 'test_only_l2_manifest_tool',
+    level: 'L2',
+    dataClassification: 'Internal',
+    description: 'test fixture',
+    allowedRoles: ['principal'],
+    handler: async (client, params, actor, manifest) => {
+      capturedL2Manifest = manifest;
+      return { ok: 'l2' };
+    },
+  });
+
+  const client = fakeClient();
+  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+
+  await aiToolRegistry.invokeTool('test_only_l3_manifest_tool', { client, actor, params: { foo: 'bar' } });
+  assert.equal(capturedL3Manifest.toolName, 'test_only_l3_manifest_tool');
+  assert.equal(capturedL3Manifest.actionLevel, 'L3');
+  assert.equal(capturedL3Manifest.dataClassification, 'Restricted');
+  assert.equal(capturedL3Manifest.riskLevel, 5);
+  assert.equal(capturedL3Manifest.actorUserId, 'u1');
+  assert.equal(capturedL3Manifest.actorRole, 'principal');
+  assert.equal(capturedL3Manifest.collegeId, 'college-a');
+  assert.deepEqual(capturedL3Manifest.params, { foo: 'bar' });
+  assert.ok(capturedL3Manifest.requestedAt);
+  assert.equal(capturedL3Manifest.manifestVersion, 1);
+
+  await aiToolRegistry.invokeTool('test_only_l2_manifest_tool', { client, actor, params: {} });
+  assert.equal(capturedL2Manifest, undefined, 'an L2 handler must never receive an Action Manifest');
 });
 
 test('aiToolRegistry: invoking an unknown tool throws AiToolNotFoundError and writes no ai_tool_denied row (no real tool to have denied)', async () => {
@@ -361,23 +432,23 @@ function withMockFetch(mockFetch, fn) {
   return fn().finally(() => { global.fetch = original; });
 }
 
-test('llmProvider.isConfigured/complete: unconfigured (no NIM_API_KEY, this test environment\'s default) throws LlmNotConfiguredError, no fetch attempted', async () => {
+test('nim adapter.isConfigured/complete: unconfigured (no apiKey) throws LlmNotConfiguredError, no fetch attempted', async () => {
   await withNimConfig(null, async () => {
-    assert.equal(llmProvider.isConfigured(), false);
+    assert.equal(nimAdapter.isConfigured(config.nim), false);
     let fetchCalled = false;
     await withMockFetch(async () => { fetchCalled = true; }, async () => {
       await assert.rejects(
-        () => llmProvider.complete({ systemPrompt: 's', userPrompt: 'u' }),
-        llmProvider.LlmNotConfiguredError,
+        () => nimAdapter.complete(config.nim, { systemPrompt: 's', userPrompt: 'u' }),
+        nimAdapter.LlmNotConfiguredError,
       );
     });
     assert.equal(fetchCalled, false);
   });
 });
 
-test('llmProvider.complete: when configured, sends the right OpenAI-compatible request shape and parses choices[0].message.content', async () => {
+test('nim adapter.complete: when configured, sends the right OpenAI-compatible request shape and parses choices[0].message.content', async () => {
   await withNimConfig('test-nim-key', async () => {
-    assert.equal(llmProvider.isConfigured(), true);
+    assert.equal(nimAdapter.isConfigured(config.nim), true);
     let capturedUrl;
     let capturedOptions;
     await withMockFetch(async (url, options) => {
@@ -388,7 +459,7 @@ test('llmProvider.complete: when configured, sends the right OpenAI-compatible r
         json: async () => ({ choices: [{ message: { content: 'mocked answer' } }] }),
       };
     }, async () => {
-      const answer = await llmProvider.complete({ systemPrompt: 'system text', userPrompt: 'user text' });
+      const answer = await nimAdapter.complete(config.nim, { systemPrompt: 'system text', userPrompt: 'user text' });
       assert.equal(answer, 'mocked answer');
     });
 
@@ -402,7 +473,7 @@ test('llmProvider.complete: when configured, sends the right OpenAI-compatible r
   });
 });
 
-test('llmProvider.complete: a non-ok response throws LlmRequestError, not a silent failure', async () => {
+test('nim adapter.complete: a non-ok response throws LlmRequestError, not a silent failure', async () => {
   await withNimConfig('test-nim-key', async () => {
     await withMockFetch(async () => ({
       ok: false,
@@ -410,8 +481,8 @@ test('llmProvider.complete: a non-ok response throws LlmRequestError, not a sile
       text: async () => 'upstream broke',
     }), async () => {
       await assert.rejects(
-        () => llmProvider.complete({ systemPrompt: 's', userPrompt: 'u' }),
-        llmProvider.LlmRequestError,
+        () => nimAdapter.complete(config.nim, { systemPrompt: 's', userPrompt: 'u' }),
+        nimAdapter.LlmRequestError,
       );
     });
   });
@@ -456,7 +527,7 @@ test('aiService.askAboutTool: an unconfigured LLM provider throws LlmNotConfigur
   await withNimConfig(null, async () => {
     await assert.rejects(
       () => aiService.askAboutTool(client, 'get_college_profile', {}, 'What college is this?', { actor }),
-      llmProvider.LlmNotConfiguredError,
+      nimAdapter.LlmNotConfiguredError,
     );
   });
 
@@ -504,10 +575,14 @@ test('aiService.askAgent: unconfigured LLM provider throws LlmNotConfiguredError
   await withNimConfig(null, async () => {
     await assert.rejects(
       () => aiService.askAgent(client, 'What college is this?', { actor }),
-      llmProvider.LlmNotConfiguredError,
+      nimAdapter.LlmNotConfiguredError,
     );
   });
-  assert.deepEqual(client.queries, []);
+  // The only query is getAiConfig's own college_ai_config lookup
+  // (resolving which provider/config to use) — no tool ever ran, so
+  // no Business Service call and no audit row either.
+  assert.equal(client.queries.length, 1);
+  assert.match(client.queries[0].text, /FROM college_ai_config/);
 });
 
 test('aiService.askAgent: the LLM picks the registered tool -> the same Policy Gate re-validates it -> the tool actually runs', async () => {
@@ -563,8 +638,11 @@ test('aiService.askAgent: the LLM picks an unknown/hallucinated tool name -> a c
 
   // No tool ran, so no ai_tool_invoked/ai_tool_denied row either — the
   // hallucinated name never named a real tool for the Policy Gate to
-  // have an opinion about at all.
-  assert.deepEqual(client.queries, []);
+  // have an opinion about at all. The one query that did run is
+  // getAiConfig's own college_ai_config lookup, made before the LLM
+  // call (and thus before the hallucinated name is even known).
+  assert.equal(client.queries.length, 1);
+  assert.match(client.queries[0].text, /FROM college_ai_config/);
 });
 
 test('aiService.askAgent: the LLM picks no tool -> returns its direct answer, still wrapped in the Prompt Safety Layer\'s envelope', async () => {
@@ -582,8 +660,10 @@ test('aiService.askAgent: the LLM picks no tool -> returns its direct answer, st
     });
   });
 
-  // No tool ran — no Business Service call, no audit row.
-  assert.deepEqual(client.queries, []);
+  // No tool ran — no Business Service call, no audit row. The one
+  // query that did run is getAiConfig's own college_ai_config lookup.
+  assert.equal(client.queries.length, 1);
+  assert.match(client.queries[0].text, /FROM college_ai_config/);
 });
 
 // --- draft_notification (L2) / request_notification_send (L3) ---
@@ -625,7 +705,7 @@ test('draft_notification: staff (not in allowedRoles) is rejected by the Policy 
 
 test('draft_notification: a role permitted to invoke the tool but not permitted to see Confidential data is rejected on classification, distinctly from role — proven with a dummy allowedRoles override', async () => {
   // Every role currently in draft_notification's own allowedRoles
-  // (principal/college_admin/hod) already has Confidential access in
+  // (principal/hod) already has Confidential access in
   // ROLE_CLASSIFICATION_ACCESS, so the real tool can't exercise a
   // role-permitted-but-classification-denied case on its own — proven
   // instead with a dummy tool sharing draft_notification's exact

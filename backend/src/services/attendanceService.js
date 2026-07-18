@@ -41,8 +41,11 @@
 // different reason.
 
 const attendanceRepository = require('../repositories/attendanceRepository');
+const attendanceCorrectionRepository = require('../repositories/attendanceCorrectionRepository');
 const academicService = require('./academicService');
+const studentService = require('./studentService');
 const auditLogRepository = require('../repositories/auditLogRepository');
+const workflowService = require('./workflowService');
 
 // Missing classId/sessionDate/hourIndex/totalStudents, or missing
 // actor identity (actorUserId/actorRole). Unlike e.g.
@@ -82,6 +85,40 @@ class AttendanceLockedError extends Error {}
 // instant. Same defense-in-depth reasoning academicService.js gives
 // for mapping its own rare-but-real constraint violations.
 class AttendanceSessionConflictError extends Error {}
+
+// requestAttendanceCorrection given a session id with no matching row.
+class AttendanceSessionNotFoundError extends Error {}
+
+// requestAttendanceCorrection called on a session that isn't locked
+// yet — BusinessRules.md Attendance correction: "before attendance is
+// locked, routine corrections are allowed [directly, via markAttendance
+// above]." The correction workflow exists specifically for the
+// after-lock case; a caller correcting an unlocked session should use
+// markAttendance directly instead.
+class AttendanceNotLockedError extends Error {}
+
+// Missing proposedTotalStudents, or missing actor identity — the
+// correction's own required inputs, same "actor identity required to
+// evaluate authorization/attribution" reasoning markAttendance's own
+// AttendanceValidationError already gives.
+class AttendanceCorrectionValidationError extends Error {}
+
+// approveAttendanceCorrection/rejectAttendanceCorrection given a
+// correction id with no matching row.
+class AttendanceCorrectionNotFoundError extends Error {}
+
+// approveAttendanceCorrection/rejectAttendanceCorrection called for a
+// correction with no live Pending workflow_requests row (never
+// submitted — not possible through requestAttendanceCorrection's own
+// path — or already resolved).
+class AttendanceCorrectionNoPendingRequestError extends Error {}
+
+// markAttendanceByRollNumbers called for a staff member with no
+// current, resolvable teaching session (outside teaching hours, or
+// nothing scheduled this period) — BusinessRules.md AI Attendance
+// Management's own "AI identifies the current class from the approved
+// timetable" has nothing to identify.
+class AttendanceNoActiveSessionError extends Error {}
 
 // CLAUDE.md rule 7's gate, checked against classes.timetable_status
 // exactly as it's stored — no bypass, no "any non-Rejected status is
@@ -165,6 +202,19 @@ async function assertCanMark(client, cls, sessionDate, hourIndex, actorUserId, a
   if (period !== null) {
     const allocation = await academicService.getFacultyAllocationForClassAndPeriod(client, cls.id, period.id);
     if (allocation !== null && allocation.staff_user_id === actorUserId) {
+      return;
+    }
+
+    // BusinessRules.md Substitute teacher provision: "AI recognizes the
+    // substitute as authorized only for the assigned session" — a
+    // fourth eligible marker alongside tutor/HOD/scheduled faculty,
+    // scoped to this exact (period, date) pair only, per
+    // academicService.getSubstituteAssignment's own comment. Composed
+    // through AcademicService, never substituteAssignmentRepository
+    // directly, same boundary the scheduled-faculty check above already
+    // draws.
+    const substitution = await academicService.getSubstituteAssignment(client, cls.id, period.id, sessionDate);
+    if (substitution !== null && substitution.substitute_staff_user_id === actorUserId) {
       return;
     }
   }
@@ -278,6 +328,253 @@ async function listAttendanceSessionsForClassAndDate(client, classId, sessionDat
   return attendanceRepository.findByClassAndDate(client, classId, sessionDate);
 }
 
+// The range counterpart of the exact-date lookup above — startDate/
+// endDate are both optional, so omitting either (or both) means
+// all-time for this class, not zero rows.
+async function listAttendanceSessionsForClassInRange(client, classId, { startDate, endDate } = {}) {
+  return attendanceRepository.findByClassAndDateRange(client, classId, { startDate, endDate });
+}
+
+// Sets locked_at, the flag markAttendance's own existing check already
+// enforces (AttendanceLockedError). BusinessRules.md frames locking as
+// time-based ("after the window closes") rather than a named human
+// action — nothing in this codebase runs a scheduled job yet
+// (background_jobs exists as a table/service but nothing populates an
+// attendance-lock job today), so this is exposed as its own callable
+// action for whatever eventually triggers it (a future background job,
+// or manual use in the meantime) rather than guessed at with an
+// invented cron schedule.
+async function lockAttendanceSession(client, id, { actorUserId } = {}) {
+  const session = await attendanceRepository.findById(client, id);
+  if (session === null) {
+    throw new AttendanceSessionNotFoundError(`attendance session ${JSON.stringify(id)} does not exist`);
+  }
+  if (session.locked_at !== null) {
+    return session;
+  }
+
+  const locked = await attendanceRepository.update(client, id, { lockedAt: new Date().toISOString() });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: session.college_id,
+    userId: actorUserId,
+    action: 'attendance_locked',
+    entity: 'attendance_sessions',
+    entityId: id,
+    metadata: null,
+  });
+
+  return locked;
+}
+
+// BusinessRules.md Attendance correction: "after attendance is locked,
+// Subject Faculty submits a correction request; Class Tutor approves
+// routine corrections." Single-step chain (Class Tutor) — "high-risk
+// corrections follow the institution's configured approval workflow"
+// is a real, separate rule this function doesn't implement: the
+// configurable, per-institution approval-workflow engine
+// BusinessRules.md's own Configurable Approval Workflow section
+// describes doesn't exist yet in this codebase (no per-module,
+// per-institution approver-chain configuration is read anywhere today
+// — every chain in this codebase, this one included, is still
+// hardcoded at the call site). Every correction here routes through
+// the one routine (Tutor-only) chain until that engine exists to
+// decide what counts as "high-risk" — a real, flagged gap, not a
+// silent narrowing of the rule.
+async function requestAttendanceCorrection(client, sessionId, {
+  proposedAbsentStudentIds, proposedTotalStudents, reason,
+}, { requestedByUserId, origin = 'human' } = {}) {
+  if (proposedTotalStudents === undefined || proposedTotalStudents === null) {
+    throw new AttendanceCorrectionValidationError('proposedTotalStudents is required');
+  }
+  if (!requestedByUserId) {
+    throw new AttendanceCorrectionValidationError('requestedByUserId is required');
+  }
+
+  const session = await attendanceRepository.findById(client, sessionId);
+  if (session === null) {
+    throw new AttendanceSessionNotFoundError(`attendance session ${JSON.stringify(sessionId)} does not exist`);
+  }
+  if (session.locked_at === null) {
+    throw new AttendanceNotLockedError(
+      `attendance session ${JSON.stringify(sessionId)} is not locked — edit it directly via markAttendance instead`,
+    );
+  }
+
+  const cls = await academicService.getClass(client, session.class_id);
+
+  const workflowRequest = await workflowService.submitRequest(client, {
+    collegeId: session.college_id,
+    entityType: 'attendance_correction',
+    entityId: sessionId,
+    requestedByUserId,
+    origin,
+    approverChain: [{ step: 1, role: 'tutor', user_id: cls.tutor_user_id }],
+  });
+
+  const correction = await attendanceCorrectionRepository.create(client, {
+    collegeId: session.college_id,
+    attendanceSessionId: sessionId,
+    requestedByUserId,
+    proposedAbsentStudentIds: JSON.stringify(proposedAbsentStudentIds || []),
+    proposedTotalStudents,
+    reason,
+    workflowRequestId: workflowRequest.id,
+  });
+
+  return { workflowRequest, correction };
+}
+
+async function loadPendingCorrectionApproval(client, correctionId) {
+  const correction = await attendanceCorrectionRepository.findById(client, correctionId);
+  if (correction === null) {
+    throw new AttendanceCorrectionNotFoundError(`attendance correction ${JSON.stringify(correctionId)} does not exist`);
+  }
+  if (correction.workflow_request_id === null) {
+    throw new AttendanceCorrectionNoPendingRequestError(`attendance correction ${JSON.stringify(correctionId)} has no workflow request`);
+  }
+  const pending = await workflowService.getRequest(client, correction.workflow_request_id);
+  if (pending === null || pending.status !== 'Pending') {
+    throw new AttendanceCorrectionNoPendingRequestError(`attendance correction ${JSON.stringify(correctionId)} has no pending approval request`);
+  }
+  return { correction, pending };
+}
+
+// BusinessRules.md: "approved correction becomes the effective
+// attendance value... all dependent attendance calculations are
+// automatically recalculated." There is no percentage/shortage/report
+// calculation reading attendance_sessions directly yet in this
+// codebase to "recalculate" — getEffectiveAttendanceSession below is
+// what any future such calculation is expected to read from, so it
+// picks up an approved correction automatically the moment one exists,
+// not a separate recalculation step to remember to run.
+async function approveAttendanceCorrection(client, correctionId, { actorUserId, remarks } = {}) {
+  const { correction, pending } = await loadPendingCorrectionApproval(client, correctionId);
+  await workflowService.approveRequest(client, pending.id, { actorUserId, remarks });
+
+  const applied = await attendanceCorrectionRepository.markApplied(client, correctionId);
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: correction.college_id,
+    userId: actorUserId,
+    action: 'attendance_correction_approved',
+    entity: 'attendance_corrections',
+    entityId: correctionId,
+    metadata: null,
+  });
+
+  return applied;
+}
+
+async function rejectAttendanceCorrection(client, correctionId, { actorUserId, remarks } = {}) {
+  const { correction, pending } = await loadPendingCorrectionApproval(client, correctionId);
+  await workflowService.rejectRequest(client, pending.id, { actorUserId, remarks });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: correction.college_id,
+    userId: actorUserId,
+    action: 'attendance_correction_rejected',
+    entity: 'attendance_corrections',
+    entityId: correctionId,
+    metadata: null,
+  });
+
+  return correction;
+}
+
+async function listAttendanceCorrectionsForSession(client, sessionId) {
+  return attendanceCorrectionRepository.listForSession(client, sessionId);
+}
+
+// BusinessRules.md: "AI uses the latest effective attendance value in
+// operational reports [and] preserves original and corrected values for
+// authorized audit views." The original session row (getAttendanceSession
+// above) is untouched and always available for that audit view; this
+// is the "latest effective value" half — the original's own fields,
+// overridden by the latest approved correction's proposed values, if
+// one exists.
+async function getEffectiveAttendanceSession(client, sessionId) {
+  const session = await attendanceRepository.findById(client, sessionId);
+  if (session === null) {
+    return null;
+  }
+
+  const latestApplied = await attendanceCorrectionRepository.findLatestApplied(client, sessionId);
+  if (latestApplied === null) {
+    return { ...session, effective: false };
+  }
+
+  return {
+    ...session,
+    absent_student_ids: latestApplied.proposed_absent_student_ids,
+    total_students: latestApplied.proposed_total_students,
+    effective: true,
+    effective_correction_id: latestApplied.id,
+  };
+}
+
+// BusinessRules.md AI Attendance Management: "faculty may send a
+// natural language attendance message during the attendance window...
+// AI identifies the current class from the approved timetable...
+// specified roll numbers are marked Absent and all remaining enrolled
+// students are marked Present." This is the one Business Service
+// method the AI tool wraps (aiToolRegistry.js's own "no business logic
+// in the handler" rule) — roll-number resolution and session lookup
+// both happen here, not in the tool.
+//
+// Deliberately calls markAttendance (not attendanceRepository
+// directly) to actually save the mark: markAttendance's own
+// assertCanMark is the real authorization gate, re-verified here even
+// though resolveCurrentSessionForStaff already found a matching
+// allocation/substitution — defense in depth, not a redundant check,
+// same reasoning every other service in this codebase gives for not
+// trusting one lookup to also BE the authorization decision.
+//
+// Unknown roll numbers (typos, a student not in this class) are
+// reported back, not silently dropped or hard-failed — the caller (the
+// AI tool, then the LLM relaying it to the faculty member) decides
+// what to do with "roll 999 doesn't exist in this class," not this
+// function.
+async function markAttendanceByRollNumbers(client, { absentRollNumbers }, { actorUserId, actorRole, collegeId } = {}) {
+  if (!Array.isArray(absentRollNumbers)) {
+    throw new AttendanceValidationError('absentRollNumbers must be an array');
+  }
+  if (!actorUserId || !actorRole || !collegeId) {
+    throw new AttendanceValidationError('actorUserId, actorRole, and collegeId are required');
+  }
+
+  const session = await academicService.resolveCurrentSessionForStaff(client, collegeId, actorUserId);
+  if (session === null) {
+    throw new AttendanceNoActiveSessionError(
+      `user ${JSON.stringify(actorUserId)} has no active teaching session right now`,
+    );
+  }
+
+  const roster = await studentService.listStudentsForClass(client, session.classId);
+  const rollToStudent = new Map(roster.map((s) => [s.roll_no, s]));
+
+  const absentStudentIds = [];
+  const unknownRollNumbers = [];
+  for (const rollNo of absentRollNumbers) {
+    const student = rollToStudent.get(String(rollNo));
+    if (student === undefined) {
+      unknownRollNumbers.push(rollNo);
+    } else {
+      absentStudentIds.push(student.id);
+    }
+  }
+
+  const markedSession = await markAttendance(client, {
+    classId: session.classId,
+    sessionDate: session.sessionDate,
+    hourIndex: session.hourIndex,
+    absentStudentIds,
+    totalStudents: roster.length,
+  }, { actorUserId, actorRole });
+
+  return { session: markedSession, unknownRollNumbers };
+}
+
 module.exports = {
   AttendanceValidationError,
   AttendanceClassNotFoundError,
@@ -285,7 +582,21 @@ module.exports = {
   AttendanceForbiddenError,
   AttendanceLockedError,
   AttendanceSessionConflictError,
+  AttendanceSessionNotFoundError,
+  AttendanceNotLockedError,
+  AttendanceCorrectionValidationError,
+  AttendanceCorrectionNotFoundError,
+  AttendanceCorrectionNoPendingRequestError,
+  AttendanceNoActiveSessionError,
   markAttendance,
+  markAttendanceByRollNumbers,
   getAttendanceSession,
   listAttendanceSessionsForClassAndDate,
+  listAttendanceSessionsForClassInRange,
+  lockAttendanceSession,
+  requestAttendanceCorrection,
+  approveAttendanceCorrection,
+  rejectAttendanceCorrection,
+  listAttendanceCorrectionsForSession,
+  getEffectiveAttendanceSession,
 };

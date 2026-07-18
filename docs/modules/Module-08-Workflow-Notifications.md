@@ -231,9 +231,13 @@ toast, and `console` free of runtime errors at every step.
 - Who/what creates the *initial* `users` row a staff profile links to
   (before any registration chain starts) is still unbuilt — unchanged
   since the first Staff slice, still explicitly flagged.
-- `staffRepository`'s HOD/Principal lookups pick the earliest-created
+- ~~`staffRepository`'s HOD/Principal lookups pick the earliest-created
   matching row if more than one exists — nothing enforces at most one
-  HOD per department or one Principal per college today.
+  HOD per department or one Principal per college today.~~ —
+  **resolved**: `staffService.assertSingleActiveRoleHolder` is invoked
+  inline on the real activation path (`approveStaffRegistration`),
+  backed by two dedicated migrations (`single-active-principal`,
+  `single-active-hod`) — not just a lookup-ordering quirk anymore.
 - NotificationService's real SMTP send path is unit-tested with a
   mocked transporter only — no real mail server exists in this dev
   environment to prove an actual outbound send.

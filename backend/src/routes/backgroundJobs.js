@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requirePermission } = require('../middleware/rbac');
 const backgroundJobService = require('../services/backgroundJobService');
 
 function requireResolvedTenant(req, res) {
@@ -16,7 +16,7 @@ function requireResolvedTenant(req, res) {
 function createBackgroundJobsRouter() {
   const router = express.Router();
 
-  router.post('/background-jobs', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/background-jobs', requirePermission('background_jobs.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const body = req.body || {};
     const job = await backgroundJobService.enqueue(req.dbClient, {
@@ -27,12 +27,12 @@ function createBackgroundJobsRouter() {
     res.status(202).json(job);
   }));
 
-  router.get('/background-jobs', requireAuth, asyncHandler(async (req, res) => {
+  router.get('/background-jobs', requirePermission('background_jobs.read'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     res.json(await backgroundJobService.list(req.dbClient));
   }));
 
-  router.get('/background-jobs/:id', requireAuth, asyncHandler(async (req, res) => {
+  router.get('/background-jobs/:id', requirePermission('background_jobs.read'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const job = await backgroundJobService.find(req.dbClient, req.params.id);
     if (!job) {

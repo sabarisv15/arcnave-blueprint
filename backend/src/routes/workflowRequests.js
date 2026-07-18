@@ -147,6 +147,17 @@ function mapWorkflowRequestsError(err, res) {
     res.status(409).json({ detail: err.message });
     return true;
   }
+  // 501: the approval itself succeeded (workflowService.approveRequest
+  // already resolved, same as any other approved chain) — dispatch is
+  // what has no real implementation for this channel yet, an honest
+  // "this isn't built" rather than a 500 (this server's own bug) or a
+  // silent 200 pretending a send happened. The notification stays
+  // 'Approved', not 'Dispatched' — see dispatchApprovedNotification's
+  // own comment.
+  if (err instanceof notificationService.NotificationChannelNotImplementedError) {
+    res.status(501).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 

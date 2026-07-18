@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireRole } = require('../middleware/rbac');
+const { requirePermission } = require('../middleware/rbac');
 const reportService = require('../services/reportService');
 
 function requireResolvedTenant(req, res) {
@@ -31,7 +31,7 @@ function createReportsRouter() {
   // RBAC is the same deliberately conservative placeholder
   // students.js/staff.js/finance.js/documents.js all use, not a final
   // decision — BusinessRules.md names no specific actor for report
-  // generation either. requireRole('principal') gates the only
+  // generation either. requirePermission('reports.generate') gates the only
   // endpoint this slice has.
 
   // 201, not 200: this always inserts a new generated_reports row
@@ -41,7 +41,7 @@ function createReportsRouter() {
   // same reasoning createFeeStructure's 201 uses. The response body's
   // `status` field is how a caller learns the business outcome, not
   // the HTTP status code.
-  router.post('/reports/student-export', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/reports/student-export', requirePermission('reports.generate'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const report = await reportService.generateStudentExportReport(
@@ -56,7 +56,7 @@ function createReportsRouter() {
     }
   }));
 
-  router.post('/reports/attendance', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/reports/attendance', requirePermission('reports.generate'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const report = await reportService.generateAttendanceReport(
@@ -71,12 +71,38 @@ function createReportsRouter() {
     }
   }));
 
-  router.post('/reports/finance', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/reports/finance', requirePermission('reports.generate'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const report = await reportService.generateFinanceReport(
         req.dbClient,
         { collegeId: req.collegeId, format: (req.body || {}).format },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(report);
+    } catch (err) {
+      if (mapReportServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/reports/assessment-marks', requirePermission('reports.generate'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const body = req.body || {};
+    try {
+      const report = await reportService.generateAssessmentMarksReport(
+        req.dbClient,
+        {
+          collegeId: req.collegeId,
+          format: body.format,
+          filters: {
+            academicYear: body.academic_year,
+            departmentId: body.department_id,
+            classId: body.class_id,
+            subject: body.subject,
+            assessmentTypeId: body.assessment_type_id,
+          },
+        },
         { actorUserId: req.jwtClaims.sub },
       );
       res.status(201).json(report);

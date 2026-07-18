@@ -129,6 +129,10 @@ async function seedTenant(adminPool) {
 
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM approval_history WHERE college_id = $1', [college.collegeId]);
+  // timetable_revisions.workflow_request_id FKs workflow_requests(id)
+  // (task #3's own revision ledger, created on terminal Approved
+  // transition) — must go before the workflow_requests delete below.
+  await adminPool.query('DELETE FROM timetable_revisions WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM workflow_requests WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM attendance_sessions WHERE college_id = $1', [college.collegeId]);

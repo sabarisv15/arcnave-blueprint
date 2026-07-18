@@ -10,7 +10,7 @@ import {
   Users, Upload, ImageIcon, Link2, Edit3, Trash2, Plus,
   Download, AlertTriangle, CalendarDays, UserCheck,
   Activity, Phone, Shield, Car, TrendingDown,
-  RefreshCw, BookOpen, Zap, Search, SlidersHorizontal, UserPlus, Clock
+  RefreshCw, BookOpen, Zap, Search, SlidersHorizontal, UserPlus, Clock, Send
 } from 'lucide-react';
 
 const FALLBACK_STUDENTS = [
@@ -227,6 +227,59 @@ export default function TutorClass() {
         .catch(err => console.error('Failed to fetch department classes:', err));
     }
   }, [user, accessToken]);
+
+  // Send Alert (item 5 of this session's task) needs a real
+  // classes.id to POST /api/v1/classes/:id/send-alert against —
+  // resolved here as "the class whose tutor_user_id is me," since
+  // nothing else on this page already tracks that (selectedTutorId
+  // above is a username, not a real class id — see the GET
+  // /api/v1/classes comment). null (not found) simply hides the Send
+  // Alert panel below rather than erroring — a tutor with no class
+  // assigned yet has nothing to send to.
+  const [myClassId, setMyClassId] = useState(null);
+  const [alertText, setAlertText] = useState('');
+  const [alertSending, setAlertSending] = useState(false);
+  const [alertResults, setAlertResults] = useState(null);
+  const [alertError, setAlertError] = useState('');
+
+  useEffect(() => {
+    if (!user?.user_id || !accessToken) return;
+    fetch('/api/v1/classes', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+      .then(res => (res.ok ? res.json() : []))
+      .then(data => {
+        const mine = Array.isArray(data) ? data.find(c => c.tutor_user_id === user.user_id) : null;
+        setMyClassId(mine ? mine.id : null);
+      })
+      .catch(() => setMyClassId(null));
+  }, [user, accessToken]);
+
+  const handleSendAlert = async (e) => {
+    e.preventDefault();
+    if (!alertText.trim() || !myClassId) return;
+    setAlertSending(true);
+    setAlertError('');
+    setAlertResults(null);
+    try {
+      const res = await fetch(`/api/v1/classes/${myClassId}/send-alert`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ body: alertText.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || 'Failed to send alert');
+      setAlertResults(data.results || []);
+      setAlertText('');
+    } catch (err) {
+      setAlertError(err.message || 'Failed to send alert');
+    } finally {
+      setAlertSending(false);
+    }
+  };
 
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState('roll_number');
@@ -851,6 +904,48 @@ export default function TutorClass() {
             </div>
           )}
         </div>
+
+        {/* ── Send Alert (WhatsApp, own class only) ── */}
+        {user?.role !== 'hod' && selectedTutorId === user?.username && myClassId && (
+          <div className="card p-5 animate-slide-up animate-delay-100">
+            <div className="flex items-center gap-2 mb-3">
+              <Send className="w-4 h-4 text-violet-600" />
+              <h3 className="font-bold text-slate-800">Send Alert to Class (WhatsApp)</h3>
+            </div>
+            <form onSubmit={handleSendAlert} className="flex flex-col gap-3">
+              <textarea
+                value={alertText}
+                onChange={(e) => setAlertText(e.target.value)}
+                placeholder="Type a plain-text message to send to every student/parent with a verified WhatsApp number in this class…"
+                className="w-full min-h-[80px] rounded-lg border border-slate-200 p-3 text-sm"
+                disabled={alertSending}
+              />
+              <div>
+                <button type="submit" className="btn-primary" disabled={alertSending || !alertText.trim()}>
+                  <Send className="w-4 h-4" /> {alertSending ? 'Sending…' : 'Send Alert'}
+                </button>
+              </div>
+            </form>
+            {alertError && (
+              <p className="text-xs text-rose-600 font-bold mt-2">{alertError}</p>
+            )}
+            {alertResults && (
+              <div className="mt-3 text-xs">
+                <p className="font-bold text-slate-600 mb-1">
+                  {alertResults.filter(r => r.status === 'sent').length} / {alertResults.length} delivered
+                </p>
+                <ul className="space-y-1 max-h-48 overflow-y-auto">
+                  {alertResults.map((r, idx) => (
+                    <li key={idx} className={`flex justify-between gap-2 ${r.status === 'sent' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      <span>{r.phone} ({r.target === 'phone' ? 'student' : 'parent'})</span>
+                      <span className="font-bold">{r.status}{r.error ? `: ${r.error}` : ''}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ── Timetable Schedule & Active Marking Panel ── */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

@@ -82,6 +82,19 @@ async function findByCollegeAndClassName(client, collegeId, className) {
   return result.rows[0] || null;
 }
 
+// The "every class in a department" lookup visibilityService.
+// getVisibleClassIds needs to scope an hod's own read access — no
+// pagination, same "return everything, let the caller slice/filter"
+// choice studentRepository.findByDepartmentId already makes for the
+// structurally identical lookup.
+async function findByDepartmentId(client, departmentId) {
+  const result = await client.query(
+    'SELECT * FROM classes WHERE department_id = $1 ORDER BY created_at',
+    [departmentId],
+  );
+  return result.rows;
+}
+
 async function update(client, id, fields) {
   const entries = COLUMNS.filter(([key]) => fields[key] !== undefined);
   if (entries.length === 0) {
@@ -117,6 +130,7 @@ module.exports = {
   findById,
   findByTutorUserId,
   findByCollegeAndClassName,
+  findByDepartmentId,
   update,
   remove,
   list,

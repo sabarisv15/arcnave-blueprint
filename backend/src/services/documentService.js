@@ -24,10 +24,12 @@
 // documentRepository has no hard-delete function at all, so there is
 // no branch here that could accidentally do so.
 
+const PizZip = require('pizzip');
 const documentRepository = require('../repositories/documentRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const fileStorage = require('../storage/fileStorage');
 const templateMerger = require('../generators/templateMerger');
+const visibilityService = require('./visibilityService');
 
 // Missing studentId, docType, fileName, mimeType, fileBuffer, or
 // actorUserId — documents' own NOT NULL columns, plus the actor
@@ -67,6 +69,28 @@ const TEMPLATE_DOC_TYPE = 'template';
 // establishes for its own known-value constant.
 const AADHAAR_DOC_TYPE = 'aadhaar';
 
+// uploadTemplate rejects a non-.docx upload with this at upload time,
+// rather than only discovering it later at mergeTemplate time (a
+// corrupt/wrong-type template could otherwise sit in storage,
+// undetected, until the first merge attempt).
+class DocumentInvalidTemplateError extends Error {}
+
+// Same structural check mergeTemplate's own PizZip(templateBuffer)
+// already relies on to prove "this is a real .docx" — a .docx is a
+// zip with a word/document.xml entry, not just any zip. Reused here,
+// not duplicated: both call sites agree on what "valid .docx" means.
+function assertValidDocxTemplate(fileBuffer) {
+  let zip;
+  try {
+    zip = new PizZip(fileBuffer);
+  } catch (err) {
+    throw new DocumentInvalidTemplateError(`file is not a valid .docx: ${err.message}`);
+  }
+  if (!zip.file('word/document.xml')) {
+    throw new DocumentInvalidTemplateError('file is not a valid .docx: missing word/document.xml');
+  }
+}
+
 function assertValidReviewStatus(status) {
   if (!VALID_REVIEW_STATUSES.includes(status)) {
     throw new DocumentReviewStatusError(`status ${JSON.stringify(status)} is not a valid review outcome`);
@@ -82,7 +106,15 @@ function assertValidReviewStatus(status) {
 // 1752800000000) — omitted for files not owned by one student, e.g.
 // ReportService's generated exports. Every existing per-student caller
 // is unaffected; this only widens what's allowed.
-async function uploadDocument(client, { collegeId, studentId, docType, fileName, mimeType, fileBuffer }, { actorUserId } = {}) {
+// classId (nullable, added for BusinessRules.md Examination management
+// — see the migration's own comment): a document belongs to a student
+// OR a class, never assumed to need both. Unlike studentId, an unknown
+// classId isn't given its own domain error here — no caller in this
+// codebase passes a classId yet outside examinationService, which
+// already resolves and validates the class itself before calling this.
+async function uploadDocument(client, {
+  collegeId, studentId, classId, docType, fileName, mimeType, fileBuffer,
+}, { actorUserId } = {}) {
   if (!docType || !fileName || !mimeType || !fileBuffer || !actorUserId) {
     throw new DocumentValidationError('docType, fileName, mimeType, fileBuffer, and actorUserId are required');
   }
@@ -95,6 +127,7 @@ async function uploadDocument(client, { collegeId, studentId, docType, fileName,
     document = await documentRepository.create(client, {
       collegeId,
       studentId,
+      classId,
       docType,
       fileName,
       storagePath,
@@ -131,6 +164,9 @@ async function uploadDocument(client, { collegeId, studentId, docType, fileName,
 // time); mergeTemplate below is what actually needs a valid .docx, and
 // it validates that at merge time, not here.
 async function uploadTemplate(client, { collegeId, fileName, mimeType, fileBuffer }, { actorUserId } = {}) {
+  if (fileBuffer) {
+    assertValidDocxTemplate(fileBuffer);
+  }
   return uploadDocument(
     client,
     { collegeId, studentId: null, docType: TEMPLATE_DOC_TYPE, fileName, mimeType, fileBuffer },
@@ -165,6 +201,10 @@ async function listDocumentsForStudent(client, studentId) {
   return documentRepository.findByStudentId(client, studentId);
 }
 
+async function listDocumentsForClass(client, classId) {
+  return documentRepository.findByClassId(client, classId);
+}
+
 async function getLatestDocumentForStudentAndType(client, studentId, docType) {
   return documentRepository.findLatestByStudentAndType(client, studentId, docType);
 }
@@ -192,12 +232,24 @@ class DocumentNotATemplateError extends Error {}
 // wrong reason. Only once the row is confirmed to really be a
 // template does this read its bytes (fileStorage.readFile, the same
 // path downloadDocument itself uses -- no second storage mechanism).
+// The doc_type merged output is persisted under -- separate from
+// TEMPLATE_DOC_TYPE so a merged result never gets picked up by
+// listTemplates as if it were itself a fillable template.
+const MERGED_DOC_TYPE = 'merged_document';
+
 // `fields` is whatever flat object the caller sends (e.g. a real
 // student record) -- CLAUDE.md rule 9 still holds here exactly as
 // templateMerger.js's own file comment describes: every value is
 // inserted as literal text, never interpreted as instructions,
 // regardless of where it came from.
-async function mergeDocumentTemplate(client, templateId, fields) {
+//
+// The merged bytes are persisted as a new document row (via
+// uploadDocument -- the one function allowed to write storage/
+// documents, CLAUDE.md rule 2) rather than only streamed back: without
+// this, a merged certificate/report existed nowhere after the response
+// left the server, unlike every other generated artifact this
+// codebase keeps.
+async function mergeDocumentTemplate(client, templateId, fields, { actorUserId } = {}) {
   const document = await documentRepository.findById(client, templateId);
   if (document === null) {
     return null;
@@ -210,7 +262,16 @@ async function mergeDocumentTemplate(client, templateId, fields) {
 
   const templateBuffer = await fileStorage.readFile(document.storage_path);
   const buffer = templateMerger.mergeTemplate(templateBuffer, fields);
-  return { document, buffer };
+
+  const mergedDocument = await uploadDocument(client, {
+    collegeId: document.college_id,
+    docType: MERGED_DOC_TYPE,
+    fileName: `merged-${document.file_name}`,
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    fileBuffer: buffer,
+  }, { actorUserId });
+
+  return { document: mergedDocument, buffer };
 }
 
 // The only path that mutates an existing document row. Stamps
@@ -270,12 +331,64 @@ async function listDocuments(client, { limit, offset } = {}) {
   return documentRepository.list(client, { limit, offset });
 }
 
+// A document with no student_id is a document that isn't scoped to one
+// student — a template if doc_type says so, otherwise a generated
+// artifact (e.g. mergeDocumentTemplate's own MERGED_DOC_TYPE output),
+// per this session's own task.
+class DocumentNotAuthorizedError extends Error {}
+
+// The one shared read-access rule for every route that resolves a
+// document before returning its metadata/bytes/OCR text (GET
+// /documents/:id, .../download, .../ocr — this session's own task).
+// student_id present: delegates entirely to visibilityService (student
+// -> class/department/college scoping, same tutor(+faculty-allocation)/
+// hod/principal boundary as every other student-data read). student_id
+// null: a template (doc_type === TEMPLATE_DOC_TYPE) is open to any
+// authenticated user to read/use — BusinessRules.md's College Admin
+// scope reserves only upload/manage for principal (moved from
+// college_admin — see routes/collegeProfile.js's comment), never
+// read, same restriction routes/documents.js's own
+// requirePermission('documents.templates.upload') already enforces at
+// the write side, unchanged here. Anything else with no student_id
+// (a generated report/merged output) is visible only to the college's
+// principal or whoever actually generated it (uploaded_by_user_id) —
+// never a broad, tenant-wide read. actorRole === undefined means an
+// internal system caller — unrestricted, same convention
+// studentService.js/visibilityService.js already established.
+async function assertCanViewDocument(client, document, { actorUserId, actorRole } = {}) {
+  if (actorRole === undefined) {
+    return;
+  }
+  if (document.student_id !== null) {
+    try {
+      await visibilityService.assertCanViewStudent(client, document.student_id, { actorUserId, actorRole });
+    } catch (err) {
+      if (err instanceof visibilityService.VisibilityForbiddenError) {
+        throw new DocumentNotAuthorizedError(err.message);
+      }
+      throw err;
+    }
+    return;
+  }
+  if (document.doc_type === TEMPLATE_DOC_TYPE) {
+    return;
+  }
+  if (actorRole === 'principal' || document.uploaded_by_user_id === actorUserId) {
+    return;
+  }
+  throw new DocumentNotAuthorizedError(
+    `role ${JSON.stringify(actorRole)} (user ${JSON.stringify(actorUserId)}) may not view document ${JSON.stringify(document.id)}`,
+  );
+}
+
 module.exports = {
   DocumentValidationError,
   DocumentStudentNotFoundError,
   DocumentReviewStatusError,
   TemplateMergeError: templateMerger.TemplateMergeError,
   DocumentNotATemplateError,
+  DocumentInvalidTemplateError,
+  DocumentNotAuthorizedError,
   TEMPLATE_DOC_TYPE,
   AADHAAR_DOC_TYPE,
   uploadDocument,
@@ -286,8 +399,10 @@ module.exports = {
   getDocument,
   downloadDocument,
   listDocumentsForStudent,
+  listDocumentsForClass,
   getLatestDocumentForStudentAndType,
   reviewDocument,
   removeDocument,
   listDocuments,
+  assertCanViewDocument,
 };

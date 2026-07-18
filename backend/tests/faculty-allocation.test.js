@@ -103,10 +103,29 @@ async function seedTenant(adminPool, label) {
     userIds[username] = result.rows[0].id;
   }
 
+  // visibilityService.assertCanViewStaff (GET /faculty-allocation?
+  // staff_user_id=...) resolves via staffRepository.findByUserId — a
+  // real staff profile row, not just a users row, same as real staff
+  // onboarding always creates both together. teacher1/teacher2 need
+  // one for the staff_user_id-scoped list test below.
+  for (const username of ['teacher1', 'teacher2']) {
+    // eslint-disable-next-line no-await-in-loop
+    await adminPool.query(
+      `INSERT INTO staff (college_id, user_id, full_name) VALUES ($1, $2, $3)`,
+      [college.collegeId, userIds[username], username],
+    );
+  }
+
   const class1 = await adminPool.query(
     `INSERT INTO classes (college_id, class_name) VALUES ($1, 'Fac Alloc Class One') RETURNING id`,
     [college.collegeId],
   );
+  // visibilityService scopes 'staff' reads to SELF_ASSIGNED (own
+  // tutor/faculty-allocated classes only) — staffuser is made class1's
+  // tutor so the "read is allowed for staff" RBAC test below has a
+  // real assignment to be visible through, not a leftover assumption
+  // from before that scoping existed.
+  await adminPool.query('UPDATE classes SET tutor_user_id = $1 WHERE id = $2', [userIds.staffuser, class1.rows[0].id]);
   const class2 = await adminPool.query(
     `INSERT INTO classes (college_id, class_name) VALUES ($1, 'Fac Alloc Class Two') RETURNING id`,
     [college.collegeId],
@@ -135,6 +154,7 @@ async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM faculty_allocation WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM timetable_periods WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM classes WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM staff WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM colleges WHERE college_id = $1', [college.collegeId]);

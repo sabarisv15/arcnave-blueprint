@@ -373,15 +373,31 @@ test('classes', async (t) => {
     assert.equal(resp.status, 401);
   });
 
-  await t.test('read is allowed for staff, not just principal', async () => {
+  // visibilityService scopes 'staff' to SELF_ASSIGNED (their own
+  // tutor/faculty-allocated classes only, not every class in the
+  // college — the access-leak fix this codebase's own checkpoint
+  // documents). tutor_user_id is what makes staffuser "assigned" here.
+  await t.test('read is allowed for staff assigned as tutor, not just principal', async () => {
     const principalToken = await login(collegeA, 'principaluser');
     const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, principalToken), {
       class_name: 'Readable By Staff Class',
+      tutor_user_id: collegeA.userIds.staffuser,
     });
 
     const staffToken = await login(collegeA, 'staffuser');
     const resp = await get(baseUrl, `/api/v1/classes/${created.body.id}`, headersFor(collegeA, staffToken));
     assert.equal(resp.status, 200);
+  });
+
+  await t.test('read is forbidden for staff with no tutor/faculty-allocation assignment to the class', async () => {
+    const principalToken = await login(collegeA, 'principaluser');
+    const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, principalToken), {
+      class_name: 'Unassigned Staff Class',
+    });
+
+    const staffToken = await login(collegeA, 'staffuser');
+    const resp = await get(baseUrl, `/api/v1/classes/${created.body.id}`, headersFor(collegeA, staffToken));
+    assert.equal(resp.status, 403);
   });
 
   await t.test('read requires authentication', async () => {

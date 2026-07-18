@@ -77,6 +77,19 @@ module.exports = {
   // specifies this either.
   passwordResetTokenExpireHours: Number(process.env.PASSWORD_RESET_TOKEN_EXPIRE_HOURS) || 2,
 
+  // How long a student/parent phone-verification OTP (services/
+  // phoneVerificationService.js) stays acceptable, and how many
+  // mismatched attempts a single OTP tolerates before it's locked out
+  // (still expires normally either way — a locked-out row is never
+  // deleted, just unusable; requesting a new OTP always works). Short
+  // expiry + a low attempt cap are the only real defense a 6-digit code
+  // has against brute-forcing; no rate limit on requestOtp itself
+  // exists yet (a future gap, not solved here).
+  otp: {
+    expireMinutes: Number(process.env.OTP_EXPIRE_MINUTES) || 10,
+    maxAttempts: Number(process.env.OTP_MAX_ATTEMPTS) || 5,
+  },
+
   // Local-disk root DocumentService writes uploaded files under (see
   // ADR-017). Not a secret — a plain path, defaulted like appName/
   // logLevel rather than required() like the connection strings above.
@@ -105,18 +118,27 @@ module.exports = {
     fromAddress: process.env.SMTP_FROM_ADDRESS || 'no-reply@arcnave.local',
   },
 
-  // NVIDIA NIM (OpenAI-compatible /chat/completions) — the LLM
-  // services/llmProvider.js calls at the end of Module 9's pipeline
-  // (Tool Registry -> Context Builder -> Prompt Safety Layer -> LLM,
-  // AI-Governance.md §2). Optional, same reasoning as smtp above:
-  // unset apiKey means the LLM step is simply unavailable
-  // (llmProvider.complete throws LlmNotConfiguredError, mapped to a
+  // NotificationService's real sms/whatsapp/email channels are now
+  // resolved per-college from college_notification_channels (see
+  // notificationChannelRepository.js/notificationService.js's
+  // PROVIDER_REGISTRY) — there is no more app-wide sms/whatsapp
+  // credential block here. Twilio was the only global provider this
+  // config ever held for those two channels; it's been replaced by the
+  // per-vendor adapters under services/notificationProviders/ (msg91,
+  // meta) and removed, not left as an unused fallback.
+
+  // NVIDIA NIM (OpenAI-compatible /chat/completions) — the GLOBAL
+  // default provider ConfigurationService.getAiConfig falls back to
+  // for a college with no college_ai_config row of its own (see
+  // services/aiProviders/nim.js and services/configurationService.js).
+  // Optional, same reasoning as smtp above: unset apiKey means the LLM
+  // step is simply unavailable (LlmNotConfiguredError, mapped to a
   // real 503 by routes/ai.js) rather than a startup failure — this
   // app must keep running (every non-LLM route, including the plain
   // tool-invoke path with no `question`) whether or not a provider key
-  // exists. Global only, not per-tenant, despite AI-Governance.md §6
-  // naming ConfigurationService/per-tenant provider selection as a
-  // future option — no tenant has asked for a different provider yet.
+  // exists. Per-tenant override now exists (college_ai_config) — this
+  // remains the fallback every pre-existing college without a row
+  // still gets, unchanged from before that table existed.
   nim: {
     apiKey: process.env.NIM_API_KEY || null,
     baseUrl: process.env.NIM_BASE_URL || 'https://integrate.api.nvidia.com/v1',
@@ -125,10 +147,11 @@ module.exports = {
     // above (chat completion and embeddings are different model
     // families even within one provider). nv-embedqa-e5-v5 is
     // purpose-built for retrieval (asymmetric query/passage embeddings
-    // — see llmProvider.js's embed()) and fixes the embedding
-    // dimension the ai_document_chunks migration's vector(1024) column
-    // is sized against; changing this to a model with a different
-    // output dimension needs a new migration, not just this env var.
+    // — see services/aiProviders/nim.js's embed()) and fixes the
+    // embedding dimension the ai_document_chunks migration's
+    // vector(1024) column is sized against; changing this to a model
+    // with a different output dimension needs a new migration, not
+    // just this env var.
     embeddingModel: process.env.NIM_EMBEDDING_MODEL || 'nvidia/nv-embedqa-e5-v5',
   },
 };

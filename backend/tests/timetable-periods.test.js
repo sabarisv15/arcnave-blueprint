@@ -190,6 +190,40 @@ test('timetable periods', async (t) => {
     assert.equal(resp.body.total_rows, 3);
   });
 
+  await t.test('CSV import with class_id/subject/staff_user_id columns also creates faculty_allocation and appends classes.timetable_data', async () => {
+    const token = await login(collegeA, 'principaluser');
+    const classResp = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, token), {
+      class_name: 'CSV Alloc Class',
+    });
+    assert.equal(classResp.status, 201);
+    const classId = classResp.body.id;
+    const staffUserId = collegeA.userIds.staffuser;
+
+    const csv = [
+      'day_of_week,hour_index,start_time,end_time,class_id,subject,staff_user_id',
+      `Thursday,61,09:00,10:00,${classId},Maths,${staffUserId}`,
+    ].join('\n');
+    const resp = await post(baseUrl, '/api/v1/timetable-periods/import-csv', headersFor(collegeA, token), {
+      file_name: 'timetable-alloc.csv',
+      file_base64: Buffer.from(csv).toString('base64'),
+    });
+    assert.equal(resp.status, 201);
+    assert.equal(resp.body.imported.length, 1);
+    assert.equal(resp.body.skipped.length, 0);
+
+    const allocation = await adminPool.query(
+      'SELECT subject, staff_user_id FROM faculty_allocation WHERE class_id = $1',
+      [classId],
+    );
+    assert.equal(allocation.rows.length, 1);
+    assert.equal(allocation.rows[0].subject, 'Maths');
+    assert.equal(allocation.rows[0].staff_user_id, staffUserId);
+
+    const cls = await adminPool.query('SELECT timetable_data FROM classes WHERE id = $1', [classId]);
+    assert.equal(cls.rows[0].timetable_data.length, 1);
+    assert.equal(cls.rows[0].timetable_data[0].subject, 'Maths');
+  });
+
   await t.test('create rejects a missing day_of_week with 400, not a 500', async () => {
     const token = await login(collegeA, 'principaluser');
     const resp = await post(baseUrl, '/api/v1/timetable-periods', headersFor(collegeA, token), {

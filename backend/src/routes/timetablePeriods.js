@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const academicService = require('../services/academicService');
 
 function requireResolvedTenant(req, res) {
@@ -60,13 +60,15 @@ function mapAcademicServiceError(err, res) {
 function createTimetablePeriodsRouter() {
   const router = express.Router();
 
-  // RBAC here is the same deliberately conservative placeholder
+  // RBAC here is the same deliberately conservative default
   // classes.js/staff.js/students.js use, not a final decision.
   // BusinessRules.md names no specific actor for "who may define the
-  // bell schedule" — requireRole('principal') gates writes,
-  // requireAuth gates reads, same as every other Module 3 route.
+  // bell schedule" — requirePermission('timetable_periods.create'/
+  // 'import_csv'/'delete') (mapped to ['principal'] in
+  // middleware/permissions.js) gates writes, requireAuth gates reads,
+  // same as every other Module 3 route.
 
-  router.post('/timetable-periods', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/timetable-periods', requirePermission('timetable_periods.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const period = await academicService.createTimetablePeriod(
@@ -81,7 +83,7 @@ function createTimetablePeriodsRouter() {
     }
   }));
 
-  router.post('/timetable-periods/import-csv', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/timetable-periods/import-csv', requirePermission('timetable_periods.import_csv'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const { file_name: fileName, file_base64: fileBase64 } = req.body || {};
@@ -102,6 +104,9 @@ function createTimetablePeriodsRouter() {
     }
   }));
 
+  // Same "no student/staff/class identity on this row" reasoning as
+  // GET /timetable-periods below — tenant-wide/requireAuth is correct
+  // here too, not a gap.
   router.get('/timetable-periods/:id', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const period = await academicService.getTimetablePeriod(req.dbClient, req.params.id);
@@ -115,6 +120,17 @@ function createTimetablePeriodsRouter() {
   // limit/offset are passed through as-is — academicService/
   // timetablePeriodRepository already default them to 50/0, not
   // re-implemented here, same as classes.js's own list route.
+  //
+  // Deliberately left tenant-wide/requireAuth, not routed through
+  // VisibilityService (this session's own audit, item 9): a
+  // timetable_period row is just the college's shared bell schedule —
+  // day_of_week/hour_index/start_time/end_time, the same slots every
+  // class picks from — with no student, staff, or class identity on
+  // it at all (that link lives on faculty_allocation, which IS scoped —
+  // see routes/facultyAllocation.js). There is nothing here for a
+  // tutor-of-class-A to learn about class B that isn't already
+  // published, non-sensitive information every tenant user needs to
+  // even read a timetable UI.
   router.get('/timetable-periods', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { limit: rawLimit, offset: rawOffset } = req.query;
@@ -125,7 +141,7 @@ function createTimetablePeriodsRouter() {
     res.json(periods);
   }));
 
-  router.delete('/timetable-periods/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.delete('/timetable-periods/:id', requirePermission('timetable_periods.delete'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const period = await academicService.removeTimetablePeriod(req.dbClient, req.params.id, { actorUserId: req.jwtClaims.sub });

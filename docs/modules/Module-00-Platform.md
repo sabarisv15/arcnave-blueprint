@@ -1340,10 +1340,11 @@ not a permission matrix:
     in" pattern already used for password-reset's `501`. Whoever calls
     this endpoint today has to relay the token to the principal
     out-of-band themselves.
-  - **No revoke/resend flow.** `arcnave_platform`'s `UPDATE` grant on
-    `principal_invitations` was added anticipating this, but nothing
-    uses it yet — an invitation can't currently be cancelled or
-    re-issued before it expires or is accepted.
+  - ~~**No revoke/resend flow.**~~ — **resolved**:
+    `platformService.resendPrincipalInvitation`/`revokePrincipalInvitation`
+    (both load-then-validate: reject an already-accepted or
+    already-revoked invitation) are real and routed via
+    `routes/platform.js`.
   - Neither blocks Module 0 from being complete — both are the same
     kind of deliberate, documented scope cut as password reset's
     NotificationService dependency, not unfinished work.
@@ -1372,8 +1373,11 @@ not a permission matrix:
   sessions/devices) are untouched. Full session-family revocation on
   detected reuse is real, standard practice and a deliberate scope cut
   here, not an oversight — see Future Enhancements.
-- Password reset is a stub (`501`) — needs NotificationService (email
-  dispatch) and a reset-token flow, neither of which exist yet.
+- ~~Password reset is a stub (`501`)~~ — **resolved**:
+  `authService.requestPasswordReset`/`resetPassword` implement a real
+  token-hash + expiry + single-use-consumption flow
+  (`authRepository.createPasswordResetToken`/
+  `markPasswordResetTokenUsed`), routed via `routes/auth.js`.
 - `/api/v1/whoami` is a verification route for this module, not a
   real product endpoint — expect it to be removed or repurposed once
   there's a real "who am I" concept tied to RBAC.

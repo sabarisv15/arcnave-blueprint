@@ -112,6 +112,16 @@ async function seedTenant(adminPool, label) {
     userIds[username] = result.rows[0].id;
   }
 
+  // visibilityService.assertIsPrincipalOfCollege (GET /finance/fee-
+  // payments's own real scope check) verifies via
+  // staffService.findPrincipal, which JOINs staff to users — a plain
+  // users row with role='principal' alone does not satisfy it, same
+  // as real principal onboarding always creating both together.
+  await adminPool.query(
+    `INSERT INTO staff (college_id, user_id, full_name) VALUES ($1, $2, 'Finance API Test Principal')`,
+    [college.collegeId, userIds.principaluser],
+  );
+
   const cls = await adminPool.query(
     `INSERT INTO classes (college_id, class_name) VALUES ($1, $2) RETURNING id`,
     [college.collegeId, 'Finance API Test Class'],
@@ -137,6 +147,7 @@ async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM fee_structures WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM students WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM classes WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM staff WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM colleges WHERE college_id = $1', [college.collegeId]);
@@ -479,11 +490,17 @@ test('finance', async (t) => {
     assert.equal(resp.status, 401);
   });
 
+  // RLS scopes studentRepository.findById to tenant B's own session —
+  // collegeA's studentId simply doesn't exist from tenant B's point of
+  // view, so financeService.listFeePaymentsForStudent's own
+  // FeePaymentStudentNotFoundError fires (mapped to 404), same as
+  // "mark with a nonexistent student_id returns 404" above — not a
+  // 200 with an empty array, which would leak that *some* row exists
+  // somewhere for that id.
   await t.test('a student\'s fee payment from tenant A is invisible to tenant B (RLS via a real student_id collision attempt)', async () => {
     const tokenB = await login(collegeB, 'principaluser');
     const resp = await get(baseUrl, `/api/v1/finance/fee-payments?student_id=${collegeA.studentId}`, headersFor(collegeB, tokenB));
-    assert.equal(resp.status, 200);
-    assert.equal(resp.body.length, 0);
+    assert.equal(resp.status, 404);
   });
 
   // --- Audit attribution ---

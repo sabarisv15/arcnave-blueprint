@@ -313,13 +313,10 @@ test('attendance', async (t) => {
     assert.equal(missing.status, 404);
   });
 
-  await t.test('list requires both class_id and session_date', async () => {
+  await t.test('list requires class_id', async () => {
     const token = await login(collegeA, 'tutoruser');
-    const missingBoth = await get(baseUrl, '/api/v1/attendance', headersFor(collegeA, token));
-    assert.equal(missingBoth.status, 400);
-
-    const missingDate = await get(baseUrl, `/api/v1/attendance?class_id=${collegeA.classIds.approved}`, headersFor(collegeA, token));
-    assert.equal(missingDate.status, 400);
+    const missingClassId = await get(baseUrl, '/api/v1/attendance', headersFor(collegeA, token));
+    assert.equal(missingClassId.status, 400);
   });
 
   await t.test('list by class_id and session_date returns this class\'s marked periods that day', async () => {
@@ -333,6 +330,34 @@ test('attendance', async (t) => {
     assert.ok(Array.isArray(resp.body));
     assert.ok(resp.body.length >= 1);
     assert.ok(resp.body.every((row) => row.class_id === collegeA.classIds.approved));
+  });
+
+  await t.test('list by class_id alone (no date filter) returns all-time sessions for that class', async () => {
+    const token = await login(collegeA, 'tutoruser');
+    const resp = await get(baseUrl, `/api/v1/attendance?class_id=${collegeA.classIds.approved}`, headersFor(collegeA, token));
+    assert.equal(resp.status, 200);
+    assert.ok(Array.isArray(resp.body));
+    assert.ok(resp.body.length >= 1);
+    assert.ok(resp.body.every((row) => row.class_id === collegeA.classIds.approved));
+  });
+
+  await t.test('list by class_id with start_date/end_date filters to that window', async () => {
+    const token = await login(collegeA, 'tutoruser');
+    const inRange = await get(
+      baseUrl,
+      `/api/v1/attendance?class_id=${collegeA.classIds.approved}&start_date=${SESSION_DATE}&end_date=${SESSION_DATE}`,
+      headersFor(collegeA, token),
+    );
+    assert.equal(inRange.status, 200);
+    assert.ok(inRange.body.length >= 1);
+
+    const outOfRange = await get(
+      baseUrl,
+      `/api/v1/attendance?class_id=${collegeA.classIds.approved}&start_date=1900-01-01&end_date=1900-01-02`,
+      headersFor(collegeA, token),
+    );
+    assert.equal(outOfRange.status, 200);
+    assert.equal(outOfRange.body.length, 0);
   });
 
   // --- RBAC ---

@@ -47,6 +47,9 @@ const security = require('../security');
 const staffRepository = require('../repositories/staffRepository');
 const authRepository = require('../repositories/authRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
+const hodInChargeRepository = require('../repositories/hodInChargeRepository');
+const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
+const classRepository = require('../repositories/classRepository');
 const workflowService = require('./workflowService');
 const authService = require('./authService');
 const notificationService = require('./notificationService');
@@ -137,6 +140,32 @@ class StaffPrincipalAlreadyActiveError extends Error {}
 // already filters users.is_active = true, matching this rule's own
 // definition of "active").
 class StaffHodAlreadyActiveError extends Error {}
+
+// deactivateStaff given a staffId with no matching row, or an
+// appointHodInCharge/revokeHodInCharge given a departmentId/
+// appointmentId with no matching row.
+class StaffDeactivationNotFoundError extends Error {}
+
+// deactivateStaff refuses to proceed while the target still has live
+// faculty_allocation rows or is still classes.tutor_user_id for any
+// class — BusinessRules.md Staff lifecycle: "before deactivation, the
+// responsible authority reassigns the outgoing staff member's subject
+// allocations, timetable assignments, and responsibilities." This
+// function does not guess a replacement (nothing names one) — it
+// forces that reassignment to happen first, through the real, already-
+// existing mechanisms (facultyAllocation remove/reassign, class tutor
+// reassignment), rather than silently orphaning a teaching duty or
+// inventing an auto-reassignment policy nobody specified.
+class StaffDeactivationHasActiveDutiesError extends Error {}
+
+// Missing departmentId or facultyUserId — appointHodInCharge's own
+// required inputs.
+class HodInChargeValidationError extends Error {}
+
+// hod_in_charge_one_active_per_department violated (Postgres 23505) —
+// this department already has an active in-charge appointment; revoke
+// it first.
+class HodInChargeAlreadyActiveError extends Error {}
 
 // The fields this service accepts for create/update, deliberately
 // listed here rather than trusting staffRepository's own COLUMNS
@@ -299,6 +328,23 @@ async function getStaff(client, id) {
   return staffRepository.findById(client, id);
 }
 
+// The "self" lookup routes/staff.js's own GET /staff (this session's
+// own task) needs to scope an ordinary staff actor's read to their own
+// profile only, without already knowing their staff.id (the JWT only
+// carries the user_id).
+async function getStaffByUserId(client, userId) {
+  return staffRepository.findByUserId(client, userId);
+}
+
+// The "every staff row in a department" lookup routes/staff.js's own
+// GET /staff needs to scope an hod's read — thin wrapper, same
+// "business logic layer, not a route calling a repository directly"
+// reasoning every other service in this codebase already follows
+// (CLAUDE.md rule 1).
+async function listStaffByDepartment(client, departmentId) {
+  return staffRepository.findByDepartmentId(client, departmentId);
+}
+
 async function updateStaff(client, id, fields, { userId }) {
   const patch = pickStaffFields(fields);
   const hasChanges = Object.keys(patch).length > 0;
@@ -360,6 +406,111 @@ async function removeStaff(client, id, { userId }) {
   return staff;
 }
 
+// BusinessRules.md Staff lifecycle: "staff accounts are deactivated,
+// never deleted... deactivated staff cannot access the system." This
+// is the real deactivation path removeStaff's own hard DELETE never
+// was — flips users.is_active via authService.deactivateUser, leaves
+// the staff profile row and every historical record referencing this
+// user_id completely untouched. Refuses (not silently skips) while the
+// target still holds live teaching duties — see
+// StaffDeactivationHasActiveDutiesError's own comment for why this
+// function doesn't guess a replacement itself.
+async function deactivateStaff(client, staffId, { actorUserId } = {}) {
+  const staff = await staffRepository.findById(client, staffId);
+  if (staff === null) {
+    throw new StaffDeactivationNotFoundError(`staff ${JSON.stringify(staffId)} does not exist`);
+  }
+
+  const activeAllocations = await facultyAllocationRepository.findByStaffUserId(client, staff.user_id);
+  if (activeAllocations.length > 0) {
+    throw new StaffDeactivationHasActiveDutiesError(
+      `staff ${JSON.stringify(staffId)} still has ${activeAllocations.length} active faculty allocation(s) — reassign or remove them first`,
+    );
+  }
+  const tutoredClass = await classRepository.findByTutorUserId(client, staff.user_id);
+  if (tutoredClass !== null) {
+    throw new StaffDeactivationHasActiveDutiesError(
+      `staff ${JSON.stringify(staffId)} is still the tutor of class ${JSON.stringify(tutoredClass.id)} — reassign the Class Tutor duty first`,
+    );
+  }
+
+  const user = await authService.deactivateUser(client, staff.user_id);
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: staff.college_id,
+    userId: actorUserId,
+    action: 'staff_deactivated',
+    entity: 'staff',
+    entityId: staffId,
+    metadata: null,
+  });
+
+  return { staff, user };
+}
+
+// BusinessRules.md Staff lifecycle: "if a permanent HOD is
+// unavailable, the Principal may appoint an eligible faculty member as
+// HOD In-Charge... appointment and revocation history are permanently
+// retained." A duty, not a role grant — facultyUserId's own users.role
+// is never touched here, same "Resolved (Module 2 kickoff)" precedent
+// Class Tutor already established.
+async function appointHodInCharge(client, departmentId, facultyUserId, { reason } = {}, { actorUserId, collegeId } = {}) {
+  if (!departmentId || !facultyUserId) {
+    throw new HodInChargeValidationError('departmentId and facultyUserId are required');
+  }
+
+  let appointment;
+  try {
+    appointment = await hodInChargeRepository.create(client, {
+      collegeId, departmentId, facultyUserId, appointedByUserId: actorUserId, reason,
+    });
+  } catch (err) {
+    if (err.code === '23505' && err.constraint === 'hod_in_charge_one_active_per_department') {
+      throw new HodInChargeAlreadyActiveError(
+        `department ${JSON.stringify(departmentId)} already has an active HOD In-Charge appointment — revoke it first`,
+      );
+    }
+    throw err;
+  }
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId,
+    userId: actorUserId,
+    action: 'hod_in_charge_appointed',
+    entity: 'hod_in_charge_appointments',
+    entityId: appointment.id,
+    metadata: null,
+  });
+
+  return appointment;
+}
+
+async function revokeHodInCharge(client, appointmentId, { actorUserId } = {}) {
+  const appointment = await hodInChargeRepository.revoke(client, appointmentId, { revokedByUserId: actorUserId });
+  if (appointment === null) {
+    throw new StaffDeactivationNotFoundError(`HOD In-Charge appointment ${JSON.stringify(appointmentId)} does not exist or is already revoked`);
+  }
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: appointment.college_id,
+    userId: actorUserId,
+    action: 'hod_in_charge_revoked',
+    entity: 'hod_in_charge_appointments',
+    entityId: appointmentId,
+    metadata: null,
+  });
+
+  return appointment;
+}
+
+async function getActiveHodInCharge(client, collegeId, departmentId) {
+  return hodInChargeRepository.findActiveForDepartment(client, collegeId, departmentId);
+}
+
+async function listHodInChargeHistory(client, departmentId) {
+  return hodInChargeRepository.listForDepartment(client, departmentId);
+}
+
 async function listStaff(client, { limit, offset } = {}) {
   return staffRepository.list(client, { limit, offset });
 }
@@ -369,12 +520,32 @@ async function listStaff(client, { limit, offset } = {}) {
 // submission cannot build a valid approver_chain without this, same
 // "required lookup" precedent createStaff's own error mapping already
 // established for a bad FK.
+// BusinessRules.md Staff lifecycle: "if a permanent HOD is
+// unavailable, the Principal may appoint an eligible faculty member as
+// HOD In-Charge" — this is the real interop point that appointment
+// exists for: every existing caller of findHodForDepartment (the
+// Staff/timetable/curriculum-migration approval chains) keeps working
+// unchanged when a department has no permanent HOD but does have an
+// active in-charge appointee. Falls back to the appointee's OWN staff
+// row (via staffRepository.findByUserId) so callers see the identical
+// shape (a staff row with .user_id) either way — an in-charge
+// appointee is never a second kind of "hod row," just a different
+// resolution path to the same shape.
 async function findHodForDepartment(client, collegeId, departmentId) {
   const hod = await staffRepository.findByCollegeDepartmentAndRole(client, collegeId, departmentId, 'hod');
-  if (hod === null) {
-    throw new StaffHodNotFoundError(`no active hod found for departmentId ${JSON.stringify(departmentId)}`);
+  if (hod !== null) {
+    return hod;
   }
-  return hod;
+
+  const inCharge = await hodInChargeRepository.findActiveForDepartment(client, collegeId, departmentId);
+  if (inCharge !== null) {
+    const staff = await staffRepository.findByUserId(client, inCharge.faculty_user_id);
+    if (staff !== null) {
+      return staff;
+    }
+  }
+
+  throw new StaffHodNotFoundError(`no active hod found for departmentId ${JSON.stringify(departmentId)}`);
 }
 
 // Resolves the real Principal of a college from staff+users — same
@@ -385,6 +556,26 @@ async function findPrincipal(client, collegeId) {
     throw new StaffPrincipalNotFoundError(`no principal found for college ${JSON.stringify(collegeId)}`);
   }
   return principal;
+}
+
+// The reverse direction of findHodForDepartment: given a user, which
+// department (if any) are they the REAL, verifiable hod of. Used by
+// studentService.listStudents to scope an hod's own reads without
+// already knowing a target studentId/department to check against (the
+// forward check — findHodForDepartment/assertIsHodOfDepartment — needs
+// the department up front; a list endpoint doesn't have one yet).
+// Returns null (not a throw) for "not a verifiable hod of anything" —
+// a read-scoping caller treats that as "empty scope," not an error.
+async function findHodDepartmentId(client, collegeId, userId) {
+  const staff = await staffRepository.findByUserId(client, userId);
+  if (staff === null || !staff.department_id) {
+    return null;
+  }
+  const hod = await staffRepository.findByCollegeDepartmentAndRole(client, collegeId, staff.department_id, 'hod');
+  if (hod === null || hod.user_id !== userId) {
+    return null;
+  }
+  return staff.department_id;
 }
 
 // BusinessRules.md's Staff registration chain: Faculty submits ->
@@ -499,8 +690,8 @@ async function assignStaffCode(client, staffId) {
 // rejected check leaves nothing mutated (staff_code was already
 // assigned by this point, but that's a harmless, idempotent-on-retry
 // side effect, not a security-relevant one). Only fires for the two
-// roles the rule actually names; every other role (staff, college_admin)
-// passes through untouched. excludeUserId guards a re-approval of the
+// roles the rule actually names; every other role (staff) passes
+// through untouched. excludeUserId guards a re-approval of the
 // SAME account being idempotent rather than tripping over itself as
 // its own "existing" match.
 async function assertSingleActiveRoleHolder(client, staff, user) {
@@ -586,14 +777,26 @@ module.exports = {
   StaffRegistrationNotPendingError,
   StaffPrincipalAlreadyActiveError,
   StaffHodAlreadyActiveError,
+  StaffDeactivationNotFoundError,
+  StaffDeactivationHasActiveDutiesError,
+  HodInChargeValidationError,
+  HodInChargeAlreadyActiveError,
   createStaff,
   provisionHodAccount,
   getStaff,
+  getStaffByUserId,
   updateStaff,
   removeStaff,
+  deactivateStaff,
+  appointHodInCharge,
+  revokeHodInCharge,
+  getActiveHodInCharge,
+  listHodInChargeHistory,
   listStaff,
+  listStaffByDepartment,
   findHodForDepartment,
   findPrincipal,
+  findHodDepartmentId,
   submitStaffRegistration,
   approveStaffRegistration,
   rejectStaffRegistration,

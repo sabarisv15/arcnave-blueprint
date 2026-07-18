@@ -48,8 +48,15 @@ async function findByDocumentId(client, documentId) {
 // before the query — `= ANY('{}')` would just match nothing anyway,
 // but this avoids sending a query for a result the caller already
 // knows will be empty.
+// classIds mirrors visibilityService.getVisibleClassIds's own contract:
+// null means unrestricted (principal/system caller), an array restricts
+// to chunks whose source document is either not student-scoped
+// (document.student_id IS NULL — templates, college-wide docs) or
+// belongs to a student in one of those classes. An empty array (a hod
+// with no verified department) correctly excludes every student-scoped
+// document while still allowing unscoped ones.
 async function search(client, {
-  collegeId, classifications, embedding, limit,
+  collegeId, classifications, embedding, limit, classIds,
 }) {
   if (!classifications || classifications.length === 0) {
     return [];
@@ -60,11 +67,13 @@ async function search(client, {
             c.embedding <=> $3::vector AS distance
      FROM ai_document_chunks c
      JOIN documents d ON d.id = c.document_id AND d.deleted_at IS NULL
+     LEFT JOIN students s ON s.id = d.student_id
      WHERE c.college_id = $1
        AND c.classification = ANY($2)
+       AND ($5::uuid[] IS NULL OR d.student_id IS NULL OR s.class_id = ANY($5))
      ORDER BY c.embedding <=> $3::vector
      LIMIT $4`,
-    [collegeId, classifications, toVectorLiteral(embedding), limit],
+    [collegeId, classifications, toVectorLiteral(embedding), limit, classIds === null || classIds === undefined ? null : classIds],
   );
   return result.rows;
 }

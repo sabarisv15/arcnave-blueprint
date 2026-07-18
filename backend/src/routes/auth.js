@@ -14,6 +14,12 @@ const authService = require('../services/authService');
 function createAuthRouter() {
   const router = express.Router();
 
+  // Business rule task #19: a login this college's 'auth' config gates
+  // into MFA returns { mfa_required: true, challenge_id, expires_at }
+  // instead of tokens — authService.login itself decides which shape
+  // comes back (see its own MFA-gating comment); this route only
+  // relays whichever one it got, same "service decides, route relays"
+  // split every other route in this file already keeps.
   router.post('/auth/login', asyncHandler(async (req, res) => {
     if (req.collegeId === null) {
       res.status(400).json({ detail: 'No tenant could be resolved for this request' });
@@ -21,11 +27,19 @@ function createAuthRouter() {
     }
     const { username, password } = req.body || {};
     try {
-      const tokens = await authService.login(req.dbClient, { collegeId: req.collegeId, username, password });
+      const result = await authService.login(req.dbClient, { collegeId: req.collegeId, username, password });
+      if (result.mfaRequired) {
+        res.json({
+          mfa_required: true,
+          challenge_id: result.challengeId,
+          expires_at: result.expiresAt,
+        });
+        return;
+      }
       res.json({
-        access_token: tokens.accessToken,
-        refresh_token: tokens.refreshToken,
-        token_type: tokens.tokenType,
+        access_token: result.accessToken,
+        refresh_token: result.refreshToken,
+        token_type: result.tokenType,
       });
     } catch (err) {
       if (err instanceof authService.AuthError) {
@@ -34,6 +48,54 @@ function createAuthRouter() {
       }
       throw err;
     }
+  }));
+
+  // Completes an MFA-gated login: exchanges the challenge_id + emailed
+  // code for the real token pair. No requireAuth here — the caller
+  // isn't authenticated yet (that's the entire point of this route),
+  // same as /auth/login itself.
+  router.post('/auth/mfa/verify', asyncHandler(async (req, res) => {
+    if (req.collegeId === null) {
+      res.status(400).json({ detail: 'No tenant could be resolved for this request' });
+      return;
+    }
+    const { challenge_id: challengeId, code } = req.body || {};
+    try {
+      const tokens = await authService.verifyMfaLogin(req.dbClient, { challengeId, code });
+      res.json({
+        access_token: tokens.accessToken,
+        refresh_token: tokens.refreshToken,
+        token_type: tokens.tokenType,
+      });
+    } catch (err) {
+      if (err instanceof authService.MfaChallengeNotFoundError
+        || err instanceof authService.MfaMaxAttemptsExceededError
+        || err instanceof authService.MfaCodeMismatchError
+        || err instanceof authService.AuthError) {
+        // Same one-generic-401 reasoning as /auth/login's own AuthError
+        // mapping — a caller gets no signal about which of "wrong
+        // code", "expired", "already used", or "too many attempts"
+        // actually happened.
+        res.status(401).json({ detail: 'Invalid or expired MFA challenge' });
+        return;
+      }
+      throw err;
+    }
+  }));
+
+  // Self-service opt-in/out for institution mode 'optional' (see
+  // authService.userRequiresMfa) — requireAuth only, no extra
+  // permission: a user managing their own second factor isn't a
+  // role-gated capability, same reasoning /auth/me's own comment gives
+  // for "return my own identity".
+  router.post('/auth/mfa/enable', requireAuth, asyncHandler(async (req, res) => {
+    const user = await authService.enableMfa(req.dbClient, req.jwtClaims.sub);
+    res.json({ mfa_enabled: user.mfa_enabled });
+  }));
+
+  router.post('/auth/mfa/disable', requireAuth, asyncHandler(async (req, res) => {
+    const user = await authService.disableMfa(req.dbClient, req.jwtClaims.sub);
+    res.json({ mfa_enabled: user.mfa_enabled });
   }));
 
   router.post('/auth/refresh', asyncHandler(async (req, res) => {

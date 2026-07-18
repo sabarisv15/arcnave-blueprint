@@ -454,21 +454,37 @@ test('staff', async (t) => {
     assert.equal(resp.status, 401);
   });
 
-  await t.test('read is allowed for staff, not just principal', async () => {
+  // visibilityService.assertCanViewStaff: a plain 'staff' actor may
+  // only view their OWN staff profile row (staff.user_id === actorId),
+  // never a colleague's — only principal/hod may view someone else's,
+  // scoped to college/department. Self-view is what this test actually
+  // exercises now.
+  await t.test('read is allowed for staff viewing their own profile, not just principal', async () => {
     const principalToken = await login(collegeA, 'principaluser');
-    const passwordHash = await security.hashPassword(PASSWORD);
-    const u = await adminPool.query(
-      `INSERT INTO users (college_id, username, email, password_hash, role, is_active)
-       VALUES ($1, 'readbystaff', 'readbystaff@example.com', $2, 'staff', true) RETURNING id`,
-      [collegeA.collegeId, passwordHash],
-    );
     const created = await post(baseUrl, '/api/v1/staff', headersFor(collegeA, principalToken), {
-      user_id: u.rows[0].id, full_name: 'Readable By Staff',
+      user_id: collegeA.userIds.staffuser, full_name: 'Readable By Staff',
     });
 
     const staffToken = await login(collegeA, 'staffuser');
     const resp = await get(baseUrl, `/api/v1/staff/${created.body.id}`, headersFor(collegeA, staffToken));
     assert.equal(resp.status, 200);
+  });
+
+  await t.test('read is forbidden for staff viewing a colleague\'s profile', async () => {
+    const principalToken = await login(collegeA, 'principaluser');
+    const passwordHash = await security.hashPassword(PASSWORD);
+    const u = await adminPool.query(
+      `INSERT INTO users (college_id, username, email, password_hash, role, is_active)
+       VALUES ($1, 'colleagueuser', 'colleagueuser@example.com', $2, 'staff', true) RETURNING id`,
+      [collegeA.collegeId, passwordHash],
+    );
+    const created = await post(baseUrl, '/api/v1/staff', headersFor(collegeA, principalToken), {
+      user_id: u.rows[0].id, full_name: 'Colleague Profile',
+    });
+
+    const staffToken = await login(collegeA, 'staffuser');
+    const resp = await get(baseUrl, `/api/v1/staff/${created.body.id}`, headersFor(collegeA, staffToken));
+    assert.equal(resp.status, 403);
   });
 
   await t.test('read requires authentication', async () => {

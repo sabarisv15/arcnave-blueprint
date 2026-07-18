@@ -27,12 +27,19 @@ const COLUMNS = [
   ['approverChain', 'approver_chain'],
   ['currentStep', 'current_step'],
   ['status', 'status'],
+  ['actionManifest', 'action_manifest'],
 ];
 
+// Both JSONB columns need stringifying going in (node-pg serializes a
+// raw JS array/object as its own driver-specific format, not JSON, for
+// a jsonb parameter — see attendanceRepository.js's own comment on the
+// identical fix for absent_student_ids) — read back already-parsed by
+// pg either way.
 function toRow(fields) {
-  return fields.approverChain === undefined
-    ? fields
-    : { ...fields, approverChain: JSON.stringify(fields.approverChain) };
+  const row = { ...fields };
+  if (fields.approverChain !== undefined) row.approverChain = JSON.stringify(fields.approverChain);
+  if (fields.actionManifest !== undefined) row.actionManifest = fields.actionManifest === null ? null : JSON.stringify(fields.actionManifest);
+  return row;
 }
 
 async function create(client, fields) {

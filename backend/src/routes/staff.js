@@ -2,9 +2,10 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const staffService = require('../services/staffService');
 const workflowService = require('../services/workflowService');
+const visibilityService = require('../services/visibilityService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -89,6 +90,22 @@ function mapStaffServiceError(err, res) {
     res.status(404).json({ detail: err.message });
     return true;
   }
+  if (err instanceof staffService.StaffDeactivationNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.StaffDeactivationHasActiveDutiesError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.HodInChargeValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.HodInChargeAlreadyActiveError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
   // submitStaffRegistration's own error surface, per its own comment:
   // resolves the department's real HOD and the college's real Principal
   // (each throws if none exists yet), then calls
@@ -116,26 +133,30 @@ function mapStaffServiceError(err, res) {
     res.status(400).json({ detail: err.message });
     return true;
   }
+  if (err instanceof visibilityService.VisibilityForbiddenError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
 function createStaffRouter() {
   const router = express.Router();
 
-  // RBAC here is the same deliberately conservative placeholder
+  // RBAC here is the same deliberately conservative default
   // students.js uses, not a final decision. BusinessRules.md's real
   // Staff registration chain (Faculty submits -> HOD approves ->
-  // Principal approves -> WorkflowService) can't be enforced today:
-  // no WorkflowService (Module 8) exists, and staffService itself
-  // doesn't model a pending/approval state (see the Module 2 first
-  // slice's scope boundary). requireRole('principal') gates writes —
-  // both the Staff and HOD registration chains BusinessRules.md
-  // describes end with Principal's final approval, so Principal is
-  // the one existing role that's genuinely the final authority in
-  // every real chain; requireAuth gates reads. Must be revisited once
-  // WorkflowService exists.
+  // Principal approves) now runs through the real WorkflowService
+  // (Module 8, see submitStaffRegistration/approveStaffRegistration
+  // below), but plain create/update/delete on a staff row is still
+  // gated by requirePermission('staff.create'/'update'/'delete')
+  // (mapped to ['principal'] in middleware/permissions.js) — both the
+  // Staff and HOD registration chains BusinessRules.md describes end
+  // with Principal's final approval, so Principal is the one existing
+  // role that's genuinely the final authority in every real chain;
+  // requireAuth gates reads.
 
-  router.post('/staff', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/staff', requirePermission('staff.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const staff = await staffService.createStaff(
@@ -150,7 +171,7 @@ function createStaffRouter() {
     }
   }));
 
-  router.post('/staff/hod-accounts', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/staff/hod-accounts', requirePermission('staff.hod_accounts.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const { username, email } = req.body || {};
@@ -180,9 +201,20 @@ function createStaffRouter() {
     }
   }));
 
+  // requireAuth gates "must be logged in"; the real scope (self, hod of
+  // the target's own department, principal college-wide — this
+  // session's own task) is visibilityService.assertCanViewStaff's job.
   router.get('/staff/:id', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
-    const staff = await staffService.getStaff(req.dbClient, req.params.id);
+    let staff;
+    try {
+      staff = await visibilityService.assertCanViewStaff(req.dbClient, { staffId: req.params.id }, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role,
+      });
+    } catch (err) {
+      if (mapStaffServiceError(err, res)) return;
+      throw err;
+    }
     if (staff === null) {
       res.status(404).json({ detail: `No staff found with id ${JSON.stringify(req.params.id)}` });
       return;
@@ -192,18 +224,39 @@ function createStaffRouter() {
 
   // limit/offset are passed through as-is — staffService/
   // staffRepository already default them to 50/0, not re-implemented
-  // here.
+  // here. Scoped by role (this session's own task: this route used to
+  // return the whole college's staff directory to anyone
+  // authenticated): principal sees the whole college, hod sees their
+  // own (real, verified) department, ordinary staff see only their own
+  // profile.
   router.get('/staff', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { limit: rawLimit, offset: rawOffset } = req.query;
-    const staff = await staffService.listStaff(req.dbClient, {
-      limit: rawLimit === undefined ? undefined : Number(rawLimit),
-      offset: rawOffset === undefined ? undefined : Number(rawOffset),
-    });
-    res.json(staff);
+    const limit = rawLimit === undefined ? 50 : Number(rawLimit);
+    const offset = rawOffset === undefined ? 0 : Number(rawOffset);
+    const actorRole = req.jwtClaims.role;
+    const actorUserId = req.jwtClaims.sub;
+
+    if (actorRole === 'principal') {
+      const staff = await staffService.listStaff(req.dbClient, { limit, offset });
+      res.json(staff);
+      return;
+    }
+    if (actorRole === 'hod') {
+      const departmentId = await staffService.findHodDepartmentId(req.dbClient, req.collegeId, actorUserId);
+      if (departmentId === null) {
+        res.json([]);
+        return;
+      }
+      const all = await staffService.listStaffByDepartment(req.dbClient, departmentId);
+      res.json(all.slice(offset, offset + limit));
+      return;
+    }
+    const self = await staffService.getStaffByUserId(req.dbClient, actorUserId);
+    res.json(self === null ? [] : [self]);
   }));
 
-  router.put('/staff/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.put('/staff/:id', requirePermission('staff.update'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const staff = await staffService.updateStaff(
@@ -228,11 +281,11 @@ function createStaffRouter() {
   // created above has no way to actually enter the real
   // Faculty->HOD->Principal chain. This is that trigger point.
   //
-  // requireAuth, deliberately NOT requireRole('principal') like
-  // create/update above: BusinessRules.md names a real actor for this
-  // one action ("Faculty submits"), unlike create/update which have no
-  // named actor and so fall back to this router's conservative
-  // placeholder. Gating submission to principal-only would actively
+  // requireAuth, deliberately NOT the principal-mapped permission gate
+  // create/update above use: BusinessRules.md names a real actor for
+  // this one action ("Faculty submits"), unlike create/update which
+  // have no named actor and so fall back to this router's conservative
+  // default. Gating submission to principal-only would actively
   // break the feature for the common single-principal-per-college
   // case — requestedByUserId would equal the Principal's own user_id,
   // which is also the resolved final-step approver in every chain
@@ -257,7 +310,25 @@ function createStaffRouter() {
     }
   }));
 
-  router.delete('/staff/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  // requireAuth, not requirePermission: BusinessRules.md names real,
+  // per-row actors ("faculty deactivation is performed by HOD; HOD
+  // deactivation is performed by Principal") this router has no
+  // per-row check to enforce today (unlike sendClassAlert's own
+  // tutor_user_id comparison) — left as a conservative gap, not
+  // silently narrowed to a role-only check that would be wrong for
+  // one of the two cases. Revisit once a real per-row check exists.
+  router.post('/staff/:id/deactivate', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const result = await staffService.deactivateStaff(req.dbClient, req.params.id, { actorUserId: req.jwtClaims.sub });
+      res.json(result);
+    } catch (err) {
+      if (mapStaffServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.delete('/staff/:id', requirePermission('staff.delete'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const staff = await staffService.removeStaff(req.dbClient, req.params.id, { userId: req.jwtClaims.sub });
     if (staff === null) {

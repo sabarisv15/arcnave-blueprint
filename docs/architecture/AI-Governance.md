@@ -26,6 +26,38 @@ Notes:
 - This policy governs actions the **AI** initiates. A staff member
   marking attendance directly through the normal dashboard is not
   gated by this policy — only "AI, please mark Sunil absent" is.
+- Send Alert (`POST /api/v1/classes/:id/send-alert`, a Class Tutor
+  messaging their own class over WhatsApp) is the same kind of action:
+  a human dashboard action, not an AI one, so it is structurally
+  outside this policy — same as attendance-marking above, not a carve-
+  out from L3's "always required" line. It has no AI entry point at
+  all (no tool in the registry calls it); the moment any AI-drafted
+  content or AI-initiated trigger is involved, that request must go
+  through `notificationService.draftNotification`/`submitForApproval`
+  like every other L3 send, with no exception. See
+  BusinessRules.md's Notifications section for the exact conditions
+  the human-only exception depends on.
+- **AI attendance marking** (`mark_attendance_nl`, BusinessRules.md AI
+  Attendance Management) is the one place this carve-out DOES get an AI
+  tool entry point, unlike Send Alert — decided explicitly, not left
+  ambiguous: the tool only ever acts as the SAME faculty member's own
+  already-eligible action (attendanceService.markAttendanceByRollNumbers
+  calls straight through to markAttendance, which re-runs the identical
+  tutor/HOD/scheduled-staff/substitute check — assertCanMark — the
+  human-facing `POST /api/v1/attendance` route already enforces). It
+  can never mark a class the acting user isn't already authorized to
+  mark, and never acts on any timing/trigger other than that user's own
+  real-time message during their own class. This is the L3 table's
+  "AI, please mark Sunil absent" example only when the AI is deciding
+  or initiating on someone else's behalf — a faculty member's own "mark
+  roll 35 absent" about their own class, right now, is the human
+  action, same as Send Alert, just parsed from natural language instead
+  of a form. Registered L1, no WorkflowService step. If this tool is
+  ever extended to let one user mark attendance for a session they
+  aren't already eligible for (e.g. an admin correcting on someone
+  else's behalf), that variant loses the carve-out and must go through
+  the ordinary correction workflow (BusinessRules.md Attendance
+  correction) instead, not this tool.
 
 ## 2. Tool architecture
 

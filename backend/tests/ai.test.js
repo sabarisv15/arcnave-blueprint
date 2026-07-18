@@ -93,7 +93,6 @@ async function seedTenant(adminPool, label) {
     ['principaluser', 'principal'],
     ['staffuser', 'staff'],
     ['hoduser', 'hod'],
-    ['adminuser', 'college_admin'],
   ]) {
     // eslint-disable-next-line no-await-in-loop
     const result = await adminPool.query(
@@ -196,14 +195,10 @@ test('ai', async (t) => {
     assert.equal(profile.address, collegeA.address);
   });
 
-  await t.test('hod and college_admin can also invoke get_college_profile', async () => {
+  await t.test('hod can also invoke get_college_profile', async () => {
     const hodToken = await login(collegeA, 'hoduser');
     const hodResp = await post(baseUrl, '/api/v1/ai/tools/get_college_profile/invoke', headersFor(collegeA, hodToken), { params: {} });
     assert.equal(hodResp.status, 200);
-
-    const adminToken = await login(collegeA, 'adminuser');
-    const adminResp = await post(baseUrl, '/api/v1/ai/tools/get_college_profile/invoke', headersFor(collegeA, adminToken), { params: {} });
-    assert.equal(adminResp.status, 200);
   });
 
   await t.test('invoking an unknown tool returns 404', async () => {
@@ -578,6 +573,22 @@ test('ai', async (t) => {
       assert.equal(requestResp.status, 200);
       const submitted = JSON.parse(requestResp.body.entries[0].data);
       assert.ok(submitted.workflow_request_id, 'submitForApproval must store a real workflow_request_id');
+
+      // R0-R5 risk ladder + Action Manifest (this session's own task):
+      // request_notification_send's real invocation, through the real
+      // AI pipeline end to end, must have left a real Action Manifest
+      // on the workflow_requests row it created — not just in a unit
+      // test's mocked handler args.
+      const workflowRow = await adminPool.query(
+        'SELECT action_manifest FROM workflow_requests WHERE id = $1',
+        [submitted.workflow_request_id],
+      );
+      const manifest = workflowRow.rows[0].action_manifest;
+      assert.equal(manifest.toolName, 'request_notification_send');
+      assert.equal(manifest.actionLevel, 'L3');
+      assert.equal(manifest.dataClassification, 'Confidential');
+      assert.equal(manifest.riskLevel, 4);
+      assert.equal(manifest.params.notificationId, notificationId);
 
       // staffuser is authenticated but is neither the requester nor the
       // resolved approver — the real approver still has to be the one

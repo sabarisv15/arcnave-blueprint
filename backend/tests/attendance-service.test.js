@@ -134,10 +134,12 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
     const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => ({ id: 'period-1' }));
     const getAllocMock = t.mock.method(academicService, 'getFacultyAllocationForClassAndPeriod', async () => null);
+    const getSubMock = t.mock.method(academicService, 'getSubstituteAssignment', async () => null);
     t.after(() => {
       getClassMock.mock.restore();
       getPeriodMock.mock.restore();
       getAllocMock.mock.restore();
+      getSubMock.mock.restore();
     });
 
     await assert.rejects(
@@ -154,10 +156,12 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
     const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => ({ id: 'period-1' }));
     const getAllocMock = t.mock.method(academicService, 'getFacultyAllocationForClassAndPeriod', async () => ({ staff_user_id: 'someone-else' }));
+    const getSubMock = t.mock.method(academicService, 'getSubstituteAssignment', async () => null);
     t.after(() => {
       getClassMock.mock.restore();
       getPeriodMock.mock.restore();
       getAllocMock.mock.restore();
+      getSubMock.mock.restore();
     });
 
     await assert.rejects(

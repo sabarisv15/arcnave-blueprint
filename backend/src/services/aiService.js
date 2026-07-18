@@ -18,7 +18,7 @@
 const aiToolRegistry = require('./aiToolRegistry');
 const aiContextBuilder = require('./aiContextBuilder');
 const aiPromptSafetyLayer = require('./aiPromptSafetyLayer');
-const llmProvider = require('./llmProvider');
+const configurationService = require('./configurationService');
 const auditLogRepository = require('../repositories/auditLogRepository');
 
 // askAboutTool/askAgent given an empty/non-string question — raised
@@ -101,7 +101,8 @@ async function askAboutTool(client, toolName, params, question, { actor } = {}) 
 
   const sanitizedContext = await invokeTool(client, toolName, params, { actor });
   const { systemPrompt, userPrompt } = aiPromptSafetyLayer.renderForLlm(sanitizedContext, question);
-  const answer = await llmProvider.complete({ systemPrompt, userPrompt });
+  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, actor.collegeId);
+  const answer = await adapter.complete(aiConfig, { systemPrompt, userPrompt });
 
   return { ...sanitizedContext, question, answer };
 }
@@ -125,7 +126,8 @@ async function askAgent(client, question, { actor } = {}) {
   }
 
   const tools = aiToolRegistry.listTools();
-  const decision = await llmProvider.completeWithTools({
+  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, actor.collegeId);
+  const decision = await adapter.completeWithTools(aiConfig, {
     systemPrompt: AGENT_SYSTEM_PROMPT,
     userPrompt: question,
     tools,

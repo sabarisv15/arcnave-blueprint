@@ -6,11 +6,10 @@
 // its own in the tool entry). This file owns two real jobs:
 //
 //   1. ingestDocument — chunk + embed an already-uploaded document's
-//      text content. Deliberately NOT auto-wired into
-//      documentService.uploadDocument: every real upload in this
-//      codebase is binary (PDF/image), there is no OCR pipeline yet
-//      (see below), and — concretely — making it automatic would mean
-//      every document upload attempts a real network call to whatever
+//      text content (OCR'd first for images/PDFs — see below).
+//      Deliberately NOT auto-wired into documentService.uploadDocument:
+//      making it automatic would mean every document upload attempts a
+//      real OCR pass plus a real network call to whatever
 //      LLM provider happens to be configured in a given environment,
 //      including inside the committed test suite (documents.test.js/
 //      reports.test.js upload real files against live Postgres) —
@@ -43,19 +42,29 @@
 // still gets applied exactly once, at the one place rule 9 already
 // requires it, never twice and never skipped.
 //
-// No OCR pipeline exists yet (see the Module 6 documents migration's
-// own file comment: "OCR/AI extraction... is Module 9 territory, not
-// added here" — deferred again, not built by this slice either).
-// ingestDocument therefore only supports documents whose mime_type is
-// text-decodable (text/*) — a real, flagged gap, not a silently-faked
-// OCR step: a PDF/image upload is refused, not mis-chunked from raw
-// binary bytes decoded as if they were UTF-8 text.
+// A real OCR pipeline now exists (ocr/tesseractOcr.js, Tesseract via
+// tesseract.js) for raster images (png/jpeg/bmp/tiff) — ingestDocument
+// runs OCR-extracted text through the exact same chunk/embed/classify
+// path a text/* document already used, no separate treatment. PDF now
+// goes through ocr/pdfRasterizer.js first (poppler-utils' pdftoppm,
+// see backend/Dockerfile) — each page becomes a PNG, OCR'd individually
+// via the same tesseractOcr.extractTextFromImage, then concatenated in
+// page order before entering the exact same pipeline. The rasterized
+// page images are pure in-memory Buffers by the time they reach this
+// file — pdfRasterizer.js's own temp dir (pdftoppm has no streaming
+// API, only a file-based CLI contract) is created and removed entirely
+// inside that one call; nothing here, or there, ever writes a
+// rasterized page to DocumentService's permanent storage (CLAUDE.md
+// rule 2 — DocumentService remains the sole owner of persisted files).
 
 const documentService = require('./documentService');
 const aiClassificationAccess = require('./aiClassificationAccess');
-const llmProvider = require('./llmProvider');
+const configurationService = require('./configurationService');
+const tesseractOcr = require('../ocr/tesseractOcr');
+const pdfRasterizer = require('../ocr/pdfRasterizer');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const aiDocumentChunkRepository = require('../repositories/aiDocumentChunkRepository');
+const visibilityService = require('./visibilityService');
 
 // searchDocuments given a missing/non-string query.
 class DocumentSearchValidationError extends Error {}
@@ -71,10 +80,16 @@ class DocumentSearchNotFoundError extends Error {}
 // later at query time.
 class DocumentSearchAadhaarBlockedError extends Error {}
 
-// No OCR pipeline exists yet (see file-level comment) — a document
-// whose mime_type isn't text-decodable is refused, not mis-chunked
-// from raw binary bytes.
+// A document whose mime_type is neither text-decodable, a
+// Tesseract-supported raster image, nor application/pdf is refused,
+// not mis-chunked from raw binary bytes.
 class DocumentSearchUnsupportedContentError extends Error {}
+
+// tesseract.js recognizes these directly, no rasterization step
+// needed. application/pdf is handled separately (see ingestDocument)
+// via ocr/pdfRasterizer.js first.
+const OCR_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/bmp', 'image/tiff']);
+const PDF_MIME_TYPE = 'application/pdf';
 
 // Mirrors doc_type's own "known values documented here, not enforced
 // by the DB" convention (see the Module 6 documents migration) — this
@@ -151,18 +166,44 @@ async function ingestDocument(client, documentId, { actorUserId } = {}) {
   }
   const { document, buffer } = result;
 
-  if (typeof document.mime_type !== 'string' || !document.mime_type.startsWith('text/')) {
+  // Three ways in: a text/* document is decoded directly (unchanged
+  // from before); an OCR-supported image runs through tesseractOcr
+  // directly; a PDF is rasterized to one PNG per page first
+  // (pdfRasterizer.rasterizePdfToImages), each page OCR'd individually
+  // in page order, then joined with a blank line between pages. Either
+  // way, `text` below is untrusted, human/image-derived content
+  // (CLAUDE.md rule 9), fed into the exact same chunk/embed pipeline
+  // with no special trust granted to OCR output over typed text, and
+  // no shortcut around classifyDocType's own Aadhaar-block/
+  // classification rules below — a PDF is classified exactly like any
+  // other doc_type, never treated as a special case.
+  let text;
+  if (typeof document.mime_type === 'string' && document.mime_type.startsWith('text/')) {
+    text = buffer.toString('utf8');
+  } else if (typeof document.mime_type === 'string' && OCR_IMAGE_MIME_TYPES.has(document.mime_type)) {
+    text = await tesseractOcr.extractTextFromImage(buffer);
+  } else if (document.mime_type === PDF_MIME_TYPE) {
+    const pageImages = await pdfRasterizer.rasterizePdfToImages(buffer);
+    const pageTexts = [];
+    for (const pageImage of pageImages) {
+      // eslint-disable-next-line no-await-in-loop
+      pageTexts.push(await tesseractOcr.extractTextFromImage(pageImage));
+    }
+    text = pageTexts.join('\n\n');
+  } else {
     throw new DocumentSearchUnsupportedContentError(
       `document ${JSON.stringify(documentId)} has mime_type ${JSON.stringify(document.mime_type)}, which this `
-      + 'slice cannot extract text from (no OCR pipeline exists yet — only text/* content is supported)',
+      + 'slice cannot extract text from (only text/* content, OCR-supported images '
+      + `[${[...OCR_IMAGE_MIME_TYPES].join(', ')}], and application/pdf are supported)`,
     );
   }
 
   const classification = classifyDocType(document.doc_type);
-  const chunks = chunkText(buffer.toString('utf8'));
+  const chunks = chunkText(text);
+  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, document.college_id);
 
   for (let i = 0; i < chunks.length; i += 1) {
-    const [embedding] = await llmProvider.embed([chunks[i]], { inputType: 'passage' });
+    const [embedding] = await adapter.embed(aiConfig, [chunks[i]], { inputType: 'passage' });
     await aiDocumentChunkRepository.create(client, {
       collegeId: document.college_id,
       documentId: document.id,
@@ -200,12 +241,24 @@ async function searchDocuments(client, { query, limit } = {}, actor) {
   }
 
   const classifications = aiClassificationAccess.permittedClassifications(actor.role);
-  const [queryEmbedding] = await llmProvider.embed([query], { inputType: 'query' });
+  // Same department/class scoping the GET /documents route already
+  // enforces via visibilityService.assertCanViewStudent — without this,
+  // an hod could reach a student document outside their own
+  // department through AI search alone. null means unrestricted
+  // (principal); see aiDocumentChunkRepository.search's own comment.
+  const classIds = await visibilityService.getVisibleClassIds(client, {
+    actorUserId: actor.userId,
+    actorRole: actor.role,
+    collegeId: actor.collegeId,
+  });
+  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, actor.collegeId);
+  const [queryEmbedding] = await adapter.embed(aiConfig, [query], { inputType: 'query' });
   const rows = await aiDocumentChunkRepository.search(client, {
     collegeId: actor.collegeId,
     classifications,
     embedding: queryEmbedding,
     limit: limit || DEFAULT_SEARCH_LIMIT,
+    classIds,
   });
 
   return rows.map((row) => ({

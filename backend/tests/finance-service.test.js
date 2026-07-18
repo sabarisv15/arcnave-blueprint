@@ -631,12 +631,57 @@ test('FinanceService fee_payments validation and audit logging (no DB)', async (
     assert.equal(result.id, 'payment-9');
   });
 
-  await t.test('listFeePaymentsForStudent is a thin passthrough to findByStudentId', async () => {
+  await t.test('listFeePaymentsForStudent with no actor context (internal system call) is a thin passthrough to findByStudentId', async () => {
     const findMock = t.mock.method(feePaymentRepository, 'findByStudentId', async (client, studentId) => ([{ studentId }]));
     t.after(() => findMock.mock.restore());
 
     const result = await financeService.listFeePaymentsForStudent({}, 'student-1');
     assert.deepEqual(result, [{ studentId: 'student-1' }]);
+  });
+
+  // routes/finance.js now always supplies actorUserId/actorRole (this
+  // session's own task: this endpoint used to let any authenticated
+  // user pull any student's payment history) — scoping goes through
+  // studentService.getStudent/assertCanViewStudent, not reimplemented
+  // here.
+  await t.test('listFeePaymentsForStudent with an actor scopes via studentService.getStudent first', async () => {
+    const getStudentMock = t.mock.method(studentService, 'getStudent', async () => ({ id: 'student-1' }));
+    const findMock = t.mock.method(feePaymentRepository, 'findByStudentId', async (client, studentId) => ([{ studentId }]));
+    t.after(() => {
+      getStudentMock.mock.restore();
+      findMock.mock.restore();
+    });
+
+    const result = await financeService.listFeePaymentsForStudent({}, 'student-1', { actorUserId: 'tutor-u1', actorRole: 'staff' });
+    assert.deepEqual(result, [{ studentId: 'student-1' }]);
+    assert.equal(getStudentMock.mock.calls[0].arguments[1], 'student-1');
+  });
+
+  await t.test('listFeePaymentsForStudent throws FeePaymentStudentNotFoundError when the actor-scoped lookup finds nothing', async () => {
+    const getStudentMock = t.mock.method(studentService, 'getStudent', async () => null);
+    const findMock = t.mock.method(feePaymentRepository, 'findByStudentId');
+    t.after(() => {
+      getStudentMock.mock.restore();
+      findMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => financeService.listFeePaymentsForStudent({}, 'missing-student', { actorUserId: 'tutor-u1', actorRole: 'staff' }),
+      financeService.FeePaymentStudentNotFoundError,
+    );
+    assert.equal(findMock.mock.callCount(), 0);
+  });
+
+  await t.test('listFeePaymentsForStudent propagates StudentNotAuthorizedError for a caller outside scope', async () => {
+    const getStudentMock = t.mock.method(studentService, 'getStudent', async () => {
+      throw new studentService.StudentNotAuthorizedError('nope');
+    });
+    t.after(() => getStudentMock.mock.restore());
+
+    await assert.rejects(
+      () => financeService.listFeePaymentsForStudent({}, 'student-1', { actorUserId: 'other-u1', actorRole: 'staff' }),
+      studentService.StudentNotAuthorizedError,
+    );
   });
 
   await t.test('listFeePayments is a thin passthrough to list', async () => {

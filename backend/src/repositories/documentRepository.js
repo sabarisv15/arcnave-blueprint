@@ -24,6 +24,7 @@
 const COLUMNS = [
   ['collegeId', 'college_id'],
   ['studentId', 'student_id'],
+  ['classId', 'class_id'],
   ['docType', 'doc_type'],
   ['fileName', 'file_name'],
   ['storagePath', 'storage_path'],
@@ -91,6 +92,19 @@ async function findLatestByStudentAndType(client, studentId, docType) {
 // no explicit college_id filter is needed here since, unlike
 // findByStaffCode-style lookups elsewhere, doc_type isn't part of any
 // per-tenant uniqueness key this query needs to document.
+// The natural "every examination/announcement document for this
+// class" listing — BusinessRules.md Examination management's own
+// "generic repository for documents ... decided by the Class Tutor."
+async function findByClassId(client, classId) {
+  const result = await client.query(
+    `SELECT * FROM documents
+     WHERE class_id = $1 AND deleted_at IS NULL
+     ORDER BY created_at DESC`,
+    [classId],
+  );
+  return result.rows;
+}
+
 async function findByDocType(client, docType) {
   const result = await client.query(
     `SELECT * FROM documents
@@ -146,6 +160,7 @@ module.exports = {
   create,
   findById,
   findByStudentId,
+  findByClassId,
   findLatestByStudentAndType,
   findByDocType,
   update,

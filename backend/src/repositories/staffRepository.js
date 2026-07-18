@@ -127,6 +127,19 @@ async function list(client, { limit = 50, offset = 0 } = {}) {
   return result.rows;
 }
 
+// The "every staff row in a department" lookup visibilityService's
+// staff-list scoping needs for an hod's own read access — no role
+// filter (unlike findByCollegeDepartmentAndRole, which resolves one
+// specific hod/principal identity): every staff member in the
+// department, active or not, same as list()'s own unfiltered shape.
+async function findByDepartmentId(client, departmentId) {
+  const result = await client.query(
+    'SELECT * FROM staff WHERE department_id = $1 ORDER BY created_at',
+    [departmentId],
+  );
+  return result.rows;
+}
+
 async function findByCollegeDepartmentAndRole(client, collegeId, departmentId, role) {
   const result = await client.query(
     `SELECT staff.* FROM staff
@@ -159,6 +172,7 @@ module.exports = {
   update,
   remove,
   list,
+  findByDepartmentId,
   findByCollegeDepartmentAndRole,
   findByCollegeAndRole,
 };

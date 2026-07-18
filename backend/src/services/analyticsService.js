@@ -1,0 +1,46 @@
+'use strict';
+
+// Business logic for Module 10's first Analytics slice —
+// analyticsRepository.js returns raw sums only; the rate math
+// (division, rounding, the zero-sessions edge case) lives here,
+// same split every other service/repository pair in this codebase
+// uses (e.g. attendanceService.js owns markAttendance's rules,
+// attendanceRepository.js owns none of them).
+//
+// Postgres returns SUM()/COUNT() as strings (both are bigint-typed
+// results, and node-pg never silently narrows those to a JS number —
+// see node-pg's own bigint handling), so every raw row here is
+// parsed with Number(...) before any arithmetic.
+//
+// attendanceRatePercent is null, not 0 or NaN, for a class with zero
+// recorded students (totalMarked === 0) — a class no one has ever
+// marked attendance for has no rate to report, and 0% would falsely
+// read as "every student was absent."
+
+const analyticsRepository = require('../repositories/analyticsRepository');
+
+function round(value, decimals) {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
+async function getAttendanceRateByClass(client, { classId, startDate, endDate } = {}) {
+  const rows = await analyticsRepository.attendanceRateByClass(client, { classId, startDate, endDate });
+
+  return rows.map((row) => {
+    const totalMarked = Number(row.total_marked);
+    const totalPresent = Number(row.total_present);
+    return {
+      classId: row.class_id,
+      className: row.class_name,
+      sessionsCount: Number(row.sessions_count),
+      totalMarked,
+      totalPresent,
+      attendanceRatePercent: totalMarked === 0 ? null : round((totalPresent / totalMarked) * 100, 2),
+    };
+  });
+}
+
+module.exports = {
+  getAttendanceRateByClass,
+};

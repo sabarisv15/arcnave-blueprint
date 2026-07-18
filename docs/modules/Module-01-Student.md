@@ -34,9 +34,11 @@ named, deliberate gap.
 `StudentEditorModal.jsx` repointed to the real API (`c9b6248`).
 
 ## Known gaps / deferred
-- `annual_income` field still missing — blocks Finance's
-  scholarship-eligibility computation (BusinessRules: income-threshold
-  eligibility), flagged in Module 5's own docs, not built here.
+- ~~`annual_income` field still missing~~ — **resolved**: column added
+  (migration `1753500000000_student-annual-income.js`), threaded
+  through `studentRepository.js`/`studentService.js`, and actually
+  consumed by `financeService.js`'s real scholarship-eligibility calc
+  (~line 504-519), not just a schema column nobody reads.
 - BusinessRules' HOD-override exception on student-profile edits —
   needs WorkflowService (Module 8).
 

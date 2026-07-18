@@ -2,8 +2,11 @@
 
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/rbac');
+const { requireAuth, requirePermission } = require('../middleware/rbac');
 const studentService = require('../services/studentService');
+const phoneVerificationService = require('../services/phoneVerificationService');
+const workflowService = require('../services/workflowService');
+const staffService = require('../services/staffService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -47,6 +50,7 @@ const STUDENT_BODY_FIELDS = [
   ['license_number', 'licenseNumber'],
   ['bike_number', 'bikeNumber'],
   ['annual_income', 'annualIncome'],
+  ['class_id', 'classId'],
 ];
 
 function bodyToServiceFields(body) {
@@ -75,27 +79,122 @@ function mapStudentServiceError(err, res) {
     res.status(409).json({ detail: err.message });
     return true;
   }
+  if (err instanceof studentService.StudentNotClassTutorError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentClassMismatchError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentClassNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentNotAuthorizedError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentTransferValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentTransferStudentNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentTransferClassNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentTransferNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentTransferNoPendingRequestError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentLifecycleValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentLifecycleStudentNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentLifecycleApprovalRequiredError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentLifecycleNoPendingRequestError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof staffService.StaffPrincipalNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestConflictError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof workflowService.WorkflowRequestValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  return false;
+}
+
+function mapPhoneVerificationServiceError(err, res) {
+  if (err instanceof phoneVerificationService.PhoneVerificationValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof phoneVerificationService.PhoneVerificationStudentNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof phoneVerificationService.PhoneVerificationNoPhoneOnFileError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof phoneVerificationService.PhoneVerificationNotRequestedError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof phoneVerificationService.PhoneVerificationMaxAttemptsExceededError) {
+    res.status(429).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof phoneVerificationService.PhoneVerificationCodeMismatchError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof studentService.StudentNotAuthorizedError) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
 function createStudentsRouter() {
   const router = express.Router();
 
-  // RBAC here is a deliberately conservative placeholder, not a final
-  // decision — same situation configurations.js was already in and
-  // handled the same way. BusinessRules.md's real rule (only the
-  // assigned Class Tutor may edit; only faculty assigned via the
-  // timetable may view) can't be enforced correctly today: "Class
-  // Tutor" isn't a resolved role yet (BusinessRules.md flags this as
-  // open, to be settled in Module 2), and there's no timetable/
-  // assignment data to check against yet either (Module 3, not
-  // built). Until then: any authenticated tenant user may read,
-  // requireRole('principal') gates writes — a real, working role
-  // already used elsewhere in this codebase, not a guess at the
-  // eventual Class Tutor model. Must be revisited once Module 2
-  // resolves that question.
+  // POST/PUT/DELETE /students: requirePermission maps each to the
+  // roles that can EVER qualify (['staff'] for create; ['staff', 'hod',
+  // 'principal'] for update/delete — middleware/permissions.js). The
+  // real scope check — tutor -> own class, hod -> own department,
+  // principal -> own college — is studentService's job
+  // (createStudent/assertCanModifyStudent), resolved from real
+  // classes.tutor_user_id/staff role assignments, never trusted from
+  // the role claim alone. req.jwtClaims.role is passed through as
+  // actorRole for exactly that resolution — it is itself trustworthy
+  // (auth middleware already verified the JWT signature before this
+  // route ever runs), just not sufficient on its own. Any authenticated
+  // tenant user may still read.
 
-  router.post('/students', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.post('/students', requirePermission('students.create'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const student = await studentService.createStudent(req.dbClient, {
@@ -110,14 +209,26 @@ function createStudentsRouter() {
     }
   }));
 
+  // GET /students/:id and GET /students are now tutor(own class)/
+  // hod(own department)/principal(own college)-scoped (this session's
+  // own task) — requireAuth still gates "must be logged in"; the real
+  // scope is studentService's job (getStudent/listStudents), same
+  // split students.update/delete already established.
   router.get('/students/:id', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
-    const student = await studentService.getStudent(req.dbClient, req.params.id);
-    if (student === null) {
-      res.status(404).json({ detail: `No student found with id ${JSON.stringify(req.params.id)}` });
-      return;
+    try {
+      const student = await studentService.getStudent(req.dbClient, req.params.id, {
+        actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role,
+      });
+      if (student === null) {
+        res.status(404).json({ detail: `No student found with id ${JSON.stringify(req.params.id)}` });
+        return;
+      }
+      res.json(student);
+    } catch (err) {
+      if (mapStudentServiceError(err, res)) return;
+      throw err;
     }
-    res.json(student);
   }));
 
   // limit/offset are passed through as-is — studentService/
@@ -129,18 +240,18 @@ function createStudentsRouter() {
     const students = await studentService.listStudents(req.dbClient, {
       limit: rawLimit === undefined ? undefined : Number(rawLimit),
       offset: rawOffset === undefined ? undefined : Number(rawOffset),
-    });
+    }, { actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role, collegeId: req.collegeId });
     res.json(students);
   }));
 
-  router.put('/students/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.put('/students/:id', requirePermission('students.update'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     try {
       const student = await studentService.updateStudent(
         req.dbClient,
         req.params.id,
         bodyToServiceFields(req.body || {}),
-        { userId: req.jwtClaims.sub },
+        { userId: req.jwtClaims.sub, actorRole: req.jwtClaims.role },
       );
       if (student === null) {
         res.status(404).json({ detail: `No student found with id ${JSON.stringify(req.params.id)}` });
@@ -153,14 +264,191 @@ function createStudentsRouter() {
     }
   }));
 
-  router.delete('/students/:id', requireRole('principal'), asyncHandler(async (req, res) => {
+  router.delete('/students/:id', requirePermission('students.delete'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
-    const student = await studentService.removeStudent(req.dbClient, req.params.id, { userId: req.jwtClaims.sub });
-    if (student === null) {
-      res.status(404).json({ detail: `No student found with id ${JSON.stringify(req.params.id)}` });
-      return;
+    try {
+      const student = await studentService.removeStudent(
+        req.dbClient,
+        req.params.id,
+        { userId: req.jwtClaims.sub, actorRole: req.jwtClaims.role },
+      );
+      if (student === null) {
+        res.status(404).json({ detail: `No student found with id ${JSON.stringify(req.params.id)}` });
+        return;
+      }
+      res.status(204).end();
+    } catch (err) {
+      if (mapStudentServiceError(err, res)) return;
+      throw err;
     }
-    res.status(204).end();
+  }));
+
+  // requireAuth, not requirePermission: BusinessRules.md names no
+  // specific submitter for a transfer request — same conservative
+  // default other un-named-actor submit actions in this codebase use
+  // (staff.js's own submit-registration route). transfer_type
+  // ('internal' | 'inter_college') selects which service function
+  // actually runs; body shape differs slightly between the two (see
+  // studentService's own comment on why inter_college never touches
+  // another tenant).
+  router.post('/students/:id/transfer-requests', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const {
+      transfer_type: transferType, destination_class_id: destinationClassId, destination_college_id: destinationCollegeId, reason,
+    } = req.body || {};
+    try {
+      let result;
+      if (transferType === 'inter_college') {
+        result = await studentService.requestInterCollegeTransfer(
+          req.dbClient, req.params.id, { destinationCollegeId, reason }, { requestedByUserId: req.jwtClaims.sub },
+        );
+      } else {
+        result = await studentService.requestInternalTransfer(
+          req.dbClient, req.params.id, { destinationClassId, reason }, { requestedByUserId: req.jwtClaims.sub },
+        );
+      }
+      res.status(201).json(result);
+    } catch (err) {
+      if (mapStudentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.get('/students/:id/transfer-requests', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const requests = await studentService.listTransferRequestsForStudent(req.dbClient, req.params.id);
+    res.json(requests);
+  }));
+
+  router.post('/students/:id/transfer-requests/:transferRequestId/approve', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const result = await studentService.approveStudentTransfer(
+        req.dbClient, req.params.id, req.params.transferRequestId, { actorUserId: req.jwtClaims.sub },
+      );
+      res.json(result);
+    } catch (err) {
+      if (mapStudentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/students/:id/transfer-requests/:transferRequestId/reject', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const result = await studentService.rejectStudentTransfer(
+        req.dbClient, req.params.id, req.params.transferRequestId, { actorUserId: req.jwtClaims.sub },
+      );
+      res.json(result);
+    } catch (err) {
+      if (mapStudentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // requireAuth, not requirePermission: BusinessRules.md names Class
+  // Tutor as the actor for ordinary lifecycle changes but doesn't
+  // narrow it further at the route layer — same conservative default
+  // other un-named-scope actions in this router use. Rejects outright
+  // (409, StudentLifecycleApprovalRequiredError) for any status that
+  // actually requires approval, directing the caller to the request
+  // endpoint below instead.
+  router.post('/students/:id/lifecycle-status', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const { new_status: newStatus, reason, effective_date: effectiveDate } = req.body || {};
+    try {
+      const student = await studentService.updateStudentLifecycleStatus(
+        req.dbClient, req.params.id, { newStatus, reason, effectiveDate }, { actorUserId: req.jwtClaims.sub },
+      );
+      res.json(student);
+    } catch (err) {
+      if (mapStudentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/students/:id/lifecycle-status/request', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const { new_status: newStatus, reason, effective_date: effectiveDate } = req.body || {};
+    try {
+      const result = await studentService.requestLifecycleStatusChange(
+        req.dbClient, req.params.id, { newStatus, reason, effectiveDate }, { requestedByUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(result);
+    } catch (err) {
+      if (mapStudentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/students/:id/lifecycle-status/approve', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const { effective_date: effectiveDate } = req.body || {};
+    try {
+      const student = await studentService.approveLifecycleStatusChange(
+        req.dbClient, req.params.id, { actorUserId: req.jwtClaims.sub, effectiveDate },
+      );
+      res.json(student);
+    } catch (err) {
+      if (mapStudentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/students/:id/lifecycle-status/reject', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const student = await studentService.rejectLifecycleStatusChange(
+        req.dbClient, req.params.id, { actorUserId: req.jwtClaims.sub },
+      );
+      res.json(student);
+    } catch (err) {
+      if (mapStudentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.get('/students/:id/lifecycle-events', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const events = await studentService.listLifecycleEventsForStudent(req.dbClient, req.params.id);
+    res.json(events);
+  }));
+
+  // Phone OTP verification — requireAuth gates "must be logged in";
+  // phoneVerificationService.requestOtp/verifyOtp enforce the real
+  // tutor(own class)/hod(own department)/principal(own college) scope
+  // (this session's own task, same boundary as reads/update/delete).
+  router.post('/students/:id/phone-verification/otp', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const result = await phoneVerificationService.requestOtp(
+        req.dbClient,
+        req.params.id,
+        (req.body || {}).target,
+        { actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role },
+      );
+      res.status(201).json(result);
+    } catch (err) {
+      if (mapPhoneVerificationServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/students/:id/phone-verification/verify', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const student = await phoneVerificationService.verifyOtp(
+        req.dbClient,
+        req.params.id,
+        (req.body || {}).target,
+        (req.body || {}).code,
+        { actorUserId: req.jwtClaims.sub, actorRole: req.jwtClaims.role },
+      );
+      res.json(student);
+    } catch (err) {
+      if (mapPhoneVerificationServiceError(err, res)) return;
+      throw err;
+    }
   }));
 
   return router;

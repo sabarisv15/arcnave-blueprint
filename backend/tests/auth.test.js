@@ -106,6 +106,13 @@ async function seedTenantWithUser(adminPool) {
 }
 
 async function cleanupTenant(adminPool, college) {
+  // audit_log.user_id FKs users(id) — must go before the users delete
+  // below (task #17's login/logout audit logging, and task #19's MFA
+  // challenge/enable/disable logging, both exercised extensively by
+  // this file).
+  await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
+  // user_mfa_otps.user_id also FKs users(id) — task #19.
+  await adminPool.query('DELETE FROM user_mfa_otps WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
   // password_reset_tokens also FKs to users(id) — must go before the
   // users delete below, same reasoning refresh_tokens already needed.

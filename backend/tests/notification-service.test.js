@@ -35,11 +35,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const nodemailer = require('nodemailer');
 const config = require('../src/config');
+const cryptoUtil = require('../src/cryptoUtil');
 const notificationRepository = require('../src/repositories/notificationRepository');
+const notificationChannelRepository = require('../src/repositories/notificationChannelRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const workflowService = require('../src/services/workflowService');
 const staffService = require('../src/services/staffService');
 const notificationService = require('../src/services/notificationService');
+const msg91 = require('../src/services/notificationProviders/sms/msg91');
+const meta = require('../src/services/notificationProviders/whatsapp/meta');
 
 test('NotificationService (no live SMTP)', async (t) => {
   await t.test('sendEmail rejects a missing to/subject/body without touching nodemailer', async () => {
@@ -373,19 +377,17 @@ test('NotificationService ledger: draft/submit/approve/reject/dispatch (no DB)',
     );
   });
 
-  await t.test('dispatchApprovedNotification sends (stub path, SMTP unconfigured), records a delivery row, advances status to Dispatched, and audit-logs', async () => {
-    const originalHost = config.smtp.host;
-    config.smtp.host = null;
-
+  await t.test('dispatchApprovedNotification sends (stub path, channel not configured for this college), records a delivery row, advances status to Dispatched, and audit-logs', async () => {
     const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
-      id, college_id: 'c1', status: 'Approved', to_address: 'a@b.com', subject: 'Hi', body: 'hello', drafted_by_user_id: 'drafter-1',
+      id, college_id: 'c1', status: 'Approved', channel: 'email', to_address: 'a@b.com', subject: 'Hi', body: 'hello', drafted_by_user_id: 'drafter-1',
     }));
+    const channelMock = t.mock.method(notificationChannelRepository, 'findByCollegeAndChannel', async () => null);
     const deliveryMock = t.mock.method(notificationRepository, 'recordDeliveryAttempt', async (client, fields) => ({ id: 'delivery-1', ...fields }));
     const updateMock = t.mock.method(notificationRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
-      config.smtp.host = originalHost;
       findMock.mock.restore();
+      channelMock.mock.restore();
       deliveryMock.mock.restore();
       updateMock.mock.restore();
       auditMock.mock.restore();
@@ -400,5 +402,122 @@ test('NotificationService ledger: draft/submit/approve/reject/dispatch (no DB)',
     assert.equal(auditMock.mock.calls[0].arguments[1].action, 'notification_dispatched');
     assert.equal(auditMock.mock.calls[0].arguments[1].userId, 'drafter-1');
     assert.equal(auditMock.mock.calls[0].arguments[1].metadata.deliveryStatus, 'stubbed');
+  });
+
+  for (const channel of ['sms', 'whatsapp']) {
+    await t.test(`dispatchApprovedNotification: channel=${channel} with no college_notification_channels row dispatches as 'stubbed', same best-effort shape as email's own stub`, async () => {
+      const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
+        id, college_id: 'c1', status: 'Approved', channel, to_address: '+1555', subject: null, body: 'hello', drafted_by_user_id: 'drafter-1',
+      }));
+      const channelMock = t.mock.method(notificationChannelRepository, 'findByCollegeAndChannel', async () => null);
+      const deliveryMock = t.mock.method(notificationRepository, 'recordDeliveryAttempt', async (client, fields) => ({ id: 'delivery-1', ...fields }));
+      const updateMock = t.mock.method(notificationRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
+      const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+      t.after(() => {
+        findMock.mock.restore();
+        channelMock.mock.restore();
+        deliveryMock.mock.restore();
+        updateMock.mock.restore();
+        auditMock.mock.restore();
+      });
+
+      const { notification, delivery } = await notificationService.dispatchApprovedNotification({}, 'notif-1');
+
+      assert.equal(notification.status, 'Dispatched');
+      assert.equal(delivery.status, 'stubbed');
+      assert.equal(deliveryMock.mock.calls[0].arguments[1].notificationId, 'notif-1');
+    });
+  }
+
+  await t.test('dispatchApprovedNotification: channel=sms with an enabled msg91 row sends for real via the resolved adapter and records the provider id', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', status: 'Approved', channel: 'sms', to_address: '+15551234567', subject: null, body: 'hello sms', drafted_by_user_id: 'drafter-1',
+    }));
+    const encryptedConfig = { encrypted: cryptoUtil.encryptSecret(JSON.stringify({ authKey: 'key-1', senderId: 'ARCNAV' })) };
+    const channelMock = t.mock.method(notificationChannelRepository, 'findByCollegeAndChannel', async () => ({
+      college_id: 'c1', channel: 'sms', provider: 'msg91', enabled: true, config: encryptedConfig,
+    }));
+    const sendMock = t.mock.method(msg91, 'send', async (to, body) => ({
+      channel: 'sms', status: 'sent', to, body, providerId: 'req-999',
+    }));
+    const deliveryMock = t.mock.method(notificationRepository, 'recordDeliveryAttempt', async (client, fields) => ({ id: 'delivery-1', ...fields }));
+    const updateMock = t.mock.method(notificationRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      channelMock.mock.restore();
+      sendMock.mock.restore();
+      deliveryMock.mock.restore();
+      updateMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const { delivery } = await notificationService.dispatchApprovedNotification({}, 'notif-1');
+
+    assert.equal(delivery.status, 'sent');
+    assert.equal(sendMock.mock.calls[0].arguments[2].credentials.authKey, 'key-1');
+  });
+
+  await t.test('dispatchApprovedNotification: channel=whatsapp with an enabled meta row sends via the resolved adapter', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', status: 'Approved', channel: 'whatsapp', to_address: '919999999999', subject: null, body: 'hello whatsapp', drafted_by_user_id: 'drafter-1',
+    }));
+    const encryptedConfig = { encrypted: cryptoUtil.encryptSecret(JSON.stringify({ accessToken: 'token-1', phoneNumberId: 'pnid-1' })) };
+    const channelMock = t.mock.method(notificationChannelRepository, 'findByCollegeAndChannel', async () => ({
+      college_id: 'c1', channel: 'whatsapp', provider: 'meta', enabled: true, config: encryptedConfig,
+    }));
+    const sendMock = t.mock.method(meta, 'send', async (to, body) => ({
+      channel: 'whatsapp', status: 'sent', to, body, providerId: 'wamid.1',
+    }));
+    const deliveryMock = t.mock.method(notificationRepository, 'recordDeliveryAttempt', async (client, fields) => ({ id: 'delivery-1', ...fields }));
+    const updateMock = t.mock.method(notificationRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findMock.mock.restore();
+      channelMock.mock.restore();
+      sendMock.mock.restore();
+      deliveryMock.mock.restore();
+      updateMock.mock.restore();
+      auditMock.mock.restore();
+    });
+
+    const { delivery } = await notificationService.dispatchApprovedNotification({}, 'notif-1');
+
+    assert.equal(delivery.status, 'sent');
+    assert.equal(sendMock.mock.calls[0].arguments[2].credentials.phoneNumberId, 'pnid-1');
+  });
+
+  await t.test('dispatchApprovedNotification throws NotificationChannelNotImplementedError for an unrecognized channel, before touching college_notification_channels', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', status: 'Approved', channel: 'carrier_pigeon', to_address: 'x', subject: null, body: 'hello', drafted_by_user_id: 'drafter-1',
+    }));
+    const channelMock = t.mock.method(notificationChannelRepository, 'findByCollegeAndChannel', async () => { throw new Error('must not be called'); });
+    t.after(() => {
+      findMock.mock.restore();
+      channelMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => notificationService.dispatchApprovedNotification({}, 'notif-1'),
+      notificationService.NotificationChannelNotImplementedError,
+    );
+  });
+
+  await t.test('dispatchApprovedNotification throws NotificationChannelNotImplementedError when a college enables fcm (no adapter file yet)', async () => {
+    const findMock = t.mock.method(notificationRepository, 'findById', async (client, id) => ({
+      id, college_id: 'c1', status: 'Approved', channel: 'fcm', to_address: 'device-token', subject: null, body: 'hello', drafted_by_user_id: 'drafter-1',
+    }));
+    const channelMock = t.mock.method(notificationChannelRepository, 'findByCollegeAndChannel', async () => ({
+      college_id: 'c1', channel: 'fcm', provider: 'firebase', enabled: true, config: null,
+    }));
+    t.after(() => {
+      findMock.mock.restore();
+      channelMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => notificationService.dispatchApprovedNotification({}, 'notif-1'),
+      notificationService.NotificationChannelNotImplementedError,
+    );
   });
 });
