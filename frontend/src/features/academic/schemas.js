@@ -56,3 +56,7 @@ export const substituteAssignmentFormSchema = z.object({
   substituteStaffUserId: z.string().min(1, 'Substitute staff user ID is required'),
   reason: z.string().min(1, 'Reason is required'),
 });
+
+export const examDocumentUploadSchema = z.object({
+  docType: z.string().min(1, 'Document type is required'),
+});
