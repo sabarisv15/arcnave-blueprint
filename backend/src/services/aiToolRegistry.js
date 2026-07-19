@@ -570,8 +570,8 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      from_date: { type: 'string', description: "Optional ISO date (YYYY-MM-DD) — only events starting on or after this date." },
-      to_date: { type: 'string', description: "Optional ISO date (YYYY-MM-DD) — only events starting on or before this date." },
+      from_date: { type: 'string', description: 'Optional ISO date (YYYY-MM-DD) — only events starting on or after this date. Omit unless the user explicitly named a date/range; never invent one.' },
+      to_date: { type: 'string', description: 'Optional ISO date (YYYY-MM-DD) — only events starting on or before this date. Omit unless the user explicitly named a date/range; never invent one.' },
     },
     additionalProperties: false,
   },
@@ -637,8 +637,8 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      start_date: { type: 'string', description: 'Optional ISO date (YYYY-MM-DD) lower bound.' },
-      end_date: { type: 'string', description: 'Optional ISO date (YYYY-MM-DD) upper bound.' },
+      start_date: { type: 'string', description: 'Optional ISO date (YYYY-MM-DD) lower bound — omit unless the user explicitly named a specific date or range; never invent one to narrow an otherwise-unqualified question.' },
+      end_date: { type: 'string', description: 'Optional ISO date (YYYY-MM-DD) upper bound — omit unless the user explicitly named a specific date or range; never invent one to narrow an otherwise-unqualified question.' },
     },
     additionalProperties: false,
   },
