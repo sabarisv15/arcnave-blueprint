@@ -50,7 +50,34 @@ const AGENT_SYSTEM_PROMPT = "You are ARCNAVE's campus assistant. Each tool is fo
   + "knowledge, small talk, or anything the tools don't specifically cover, answer directly yourself and do "
   + 'NOT call any tool (example: "what is the capital of France?" has nothing to do with any available tool '
   + '— answer it directly). Never claim to have taken an action (sending a message, changing a record) that '
-  + 'no tool actually performed.';
+  + 'no tool actually performed. If the question is too vague or general to clearly identify which specific '
+  + 'entity, record, or action it is about (e.g. it names no student/staff/class, no clear action, or could '
+  + 'reasonably match several unrelated tools), do NOT guess a tool — answer directly instead, asking the '
+  + 'user a short, specific question about what they need (example: "help me with the thing" has no clear '
+  + 'subject — ask what they need help with, don\'t call a tool at random).';
+
+// Added for the summary step below (askAgent's tool_call branch only)
+// — a live UAT pass found two related gaps once a tool actually ran:
+// (1) the caller got no natural-language answer at all, only the raw
+// tool data; (2) when a tool's own scope/action differs from what the
+// question literally named (e.g. the Policy Gate always scopes a read
+// to the actor's own department, never a department they named; or no
+// delete tool exists so a lifecycle-change request was submitted
+// instead), the response gave no hint that a substitution happened.
+// This system prompt is appended to (never replaces)
+// aiPromptSafetyLayer.SAFETY_PREAMBLE — the untrusted-data boundary
+// framing itself is untouched, this is purely an additional behavioral
+// instruction the orchestrator (this file) adds on top, same
+// separation of concerns the file already keeps between "how tool
+// data is framed" (that file) and "how the agent should behave" (this
+// constant, same as AGENT_SYSTEM_PROMPT above).
+const TOOL_RESULT_ANSWER_SYSTEM_PROMPT = 'Answer the question in plain, natural language using only the '
+  + 'untrusted tool data below — never invent facts beyond it. If the data is scoped differently than the '
+  + "question literally asked for (e.g. the user named a different department, class, or college, but this "
+  + "tool always returns only the acting user's own scope), say so explicitly rather than presenting the data "
+  + 'as if it answers the literal question. If this tool represents a different action than the one the user '
+  + 'literally asked for (e.g. they asked to delete something but this tool only submits a status-change '
+  + 'request for approval), say so explicitly. Keep the answer short.';
 
 function listTools() {
   return aiToolRegistry.listTools();
@@ -107,6 +134,24 @@ async function askAboutTool(client, toolName, params, question, { actor } = {}) 
   return { ...sanitizedContext, question, answer };
 }
 
+// Generates the natural-language answer for a successful tool call —
+// askAgent's tool_call branch only (askAboutTool already has its own
+// equivalent, unchanged, driven by the caller's explicit follow-up
+// question rather than a fixed instruction). Reuses
+// aiPromptSafetyLayer.renderForLlm's own systemPrompt/userPrompt
+// exactly as askAboutTool does (the untrusted-data boundary framing is
+// never touched here); TOOL_RESULT_ANSWER_SYSTEM_PROMPT and the tool's
+// own registry description are appended to the systemPrompt only —
+// both are this codebase's own trusted, developer-authored text, never
+// retrieved/caller content, so neither needs rule 9's boundary
+// wrapping the tool DATA itself still gets.
+async function summarizeToolResult(sanitizedContext, question, tool, adapter, aiConfig) {
+  const { systemPrompt, userPrompt } = aiPromptSafetyLayer.renderForLlm(sanitizedContext, question);
+  const combinedSystemPrompt = `${systemPrompt}\n\n${TOOL_RESULT_ANSWER_SYSTEM_PROMPT}\n\n`
+    + `The tool that was called: ${tool.name} — ${tool.description}`;
+  return adapter.complete(aiConfig, { systemPrompt: combinedSystemPrompt, userPrompt });
+}
+
 // The tool-selection entry point (routes/ai.js's POST /ai/ask): the
 // caller names no tool, only a question — the LLM picks one (or none)
 // from the registry's own list. Whatever it picks is never trusted
@@ -135,7 +180,11 @@ async function askAgent(client, question, { actor } = {}) {
 
   if (decision.type === 'tool_call') {
     const sanitizedContext = await invokeTool(client, decision.toolName, decision.arguments || {}, { actor });
-    return { ...sanitizedContext, question, toolUsed: decision.toolName };
+    const tool = aiToolRegistry.getTool(decision.toolName);
+    const answer = await summarizeToolResult(sanitizedContext, question, tool, adapter, aiConfig);
+    return {
+      ...sanitizedContext, question, toolUsed: decision.toolName, answer,
+    };
   }
 
   // No tool was picked. The direct answer still passes through the

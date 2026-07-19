@@ -369,17 +369,32 @@ test('ai', async (t) => {
   // Same mocked-fetch discipline as above — no real network call/NIM
   // quota spent.
 
-  function mockToolCallFetch(toolName, args = {}) {
-    return async () => ({
-      ok: true,
-      json: async () => ({
-        choices: [{ message: { tool_calls: [{ function: { name: toolName, arguments: JSON.stringify(args) } }] } }],
-      }),
-    });
-  }
-
   function mockAnswerFetch(text) {
     return async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: text } }] }) });
+  }
+
+  // askAgent's tool_call branch (Phase 3, AI UX) now makes a SECOND
+  // LLM call (aiService.summarizeToolResult) after the tool actually
+  // runs, to generate a natural-language answer over its data — so a
+  // fetch mock standing in for "the LLM picks toolName" must answer
+  // the first call with a tool_call response and every call after
+  // that with a plain-text answer response, not the same tool_call
+  // shape twice (nim.js's adapter.complete would reject a response
+  // with no choices[0].message.content).
+  function mockToolCallFetch(toolName, args = {}, answerText = 'Mocked summary of the tool result.') {
+    let call = 0;
+    return async () => {
+      call += 1;
+      if (call === 1) {
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { tool_calls: [{ function: { name: toolName, arguments: JSON.stringify(args) } }] } }],
+          }),
+        };
+      }
+      return mockAnswerFetch(answerText)();
+    };
   }
 
   await t.test('POST /ai/ask with no auth returns 401', async () => {
@@ -482,23 +497,11 @@ test('ai', async (t) => {
   // end against a real notifications/notification_delivery row.
 
   function mockDraftNotificationFetch(args) {
-    return async () => ({
-      ok: true,
-      json: async () => ({
-        choices: [{ message: { tool_calls: [{ function: { name: 'draft_notification', arguments: JSON.stringify(args) } }] } }],
-      }),
-    });
+    return mockToolCallFetch('draft_notification', args, 'Mocked notification draft summary.');
   }
 
   function mockRequestSendFetch(notificationId) {
-    return async () => ({
-      ok: true,
-      json: async () => ({
-        choices: [{
-          message: { tool_calls: [{ function: { name: 'request_notification_send', arguments: JSON.stringify({ notificationId }) } }] },
-        }],
-      }),
-    });
+    return mockToolCallFetch('request_notification_send', { notificationId }, 'Mocked submission summary.');
   }
 
   await t.test('askAgent -> draft_notification creates a real Draft row (origin ai, drafted by the actor)', async () => {

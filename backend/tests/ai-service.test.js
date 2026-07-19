@@ -555,6 +555,21 @@ function mockAnswerResponse(text) {
   return { ok: true, json: async () => ({ choices: [{ message: { content: text } }] }) };
 }
 
+// Phase 3 (AI UX): askAgent's tool_call branch now makes a SECOND LLM
+// call (aiService.summarizeToolResult) to generate a natural-language
+// answer over the tool's own data, after the first call
+// (completeWithTools) already picked the tool — a caller expecting a
+// single fetch per askAgent call needs a fetch mock that returns a
+// different response on each successive call, not the same one twice.
+function sequentialMockFetch(responses) {
+  let call = 0;
+  return async () => {
+    const response = responses[Math.min(call, responses.length - 1)];
+    call += 1;
+    return response;
+  };
+}
+
 test('aiService.askAgent: an empty/missing question throws AiServiceValidationError before any LLM call', async () => {
   const client = fakeClient();
   const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
@@ -590,11 +605,15 @@ test('aiService.askAgent: the LLM picks the registered tool -> the same Policy G
   const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
 
   await withNimConfig('test-nim-key', async () => {
-    await withMockFetch(async () => mockToolCallResponse('get_college_profile', {}), async () => {
+    await withMockFetch(sequentialMockFetch([
+      mockToolCallResponse('get_college_profile', {}),
+      mockAnswerResponse('This is ARCNAVE Demo College.'),
+    ]), async () => {
       const result = await aiService.askAgent(client, 'What college is this?', { actor });
       assert.equal(result.toolUsed, 'get_college_profile');
       assert.equal(result.entries[0].toolName, 'get_college_profile');
       assert.equal(result.entries[0].dataClassification, 'Internal');
+      assert.equal(result.answer, 'This is ARCNAVE Demo College.');
     });
   });
 
@@ -643,6 +662,49 @@ test('aiService.askAgent: the LLM picks an unknown/hallucinated tool name -> a c
   // call (and thus before the hallucinated name is even known).
   assert.equal(client.queries.length, 1);
   assert.match(client.queries[0].text, /FROM college_ai_config/);
+});
+
+test('aiService.askAgent: the tool-selection call\'s system prompt instructs the model to ask for clarification '
+  + 'rather than guess a tool on an ambiguous question', async () => {
+  const client = fakeClient();
+  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  let capturedBody;
+
+  await withNimConfig('test-nim-key', async () => {
+    await withMockFetch(async (url, options) => {
+      capturedBody = JSON.parse(options.body);
+      return mockAnswerResponse('Could you clarify what you need help with?');
+    }, async () => {
+      await aiService.askAgent(client, 'help me with the thing', { actor });
+    });
+  });
+
+  const systemMessage = capturedBody.messages.find((m) => m.role === 'system');
+  assert.match(systemMessage.content, /do NOT guess a tool/);
+  assert.match(systemMessage.content, /ask.*a short, specific question/);
+});
+
+test('aiService.askAgent: a successful tool_call\'s follow-up answer call is instructed to explain any scope/action '
+  + 'substitution, and includes the tool\'s own description for context', async () => {
+  const client = fakeClient();
+  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const capturedBodies = [];
+
+  await withNimConfig('test-nim-key', async () => {
+    await withMockFetch(async (url, options) => {
+      capturedBodies.push(JSON.parse(options.body));
+      return capturedBodies.length === 1
+        ? mockToolCallResponse('get_college_profile', {})
+        : mockAnswerResponse('This is the college profile.');
+    }, async () => {
+      await aiService.askAgent(client, 'What college is this?', { actor });
+    });
+  });
+
+  assert.equal(capturedBodies.length, 2);
+  const answerSystemMessage = capturedBodies[1].messages.find((m) => m.role === 'system');
+  assert.match(answerSystemMessage.content, /say so explicitly/);
+  assert.match(answerSystemMessage.content, /get_college_profile/);
 });
 
 test('aiService.askAgent: the LLM picks no tool -> returns its direct answer, still wrapped in the Prompt Safety Layer\'s envelope', async () => {
@@ -805,11 +867,15 @@ test('aiService.askAgent: the LLM picks draft_notification -> a real Draft notif
 
   await withNimConfig('test-nim-key', async () => {
     await withMockFetch(
-      async () => mockToolCallResponse('draft_notification', { channel: 'email', toAddress: 'parent@example.com', body: 'Reminder text' }),
+      sequentialMockFetch([
+        mockToolCallResponse('draft_notification', { channel: 'email', toAddress: 'parent@example.com', body: 'Reminder text' }),
+        mockAnswerResponse('Drafted an email reminder to parent@example.com.'),
+      ]),
       async () => {
         const result = await aiService.askAgent(client, 'Draft a fee reminder email to the parent.', { actor });
         assert.equal(result.toolUsed, 'draft_notification');
         assert.equal(result.entries[0].toolName, 'draft_notification');
+        assert.equal(result.answer, 'Drafted an email reminder to parent@example.com.');
       },
     );
   });
