@@ -7,6 +7,15 @@ const aiToolRegistry = require('../services/aiToolRegistry');
 const aiService = require('../services/aiService');
 const aiProviders = require('../services/aiProviders');
 const notificationService = require('../services/notificationService');
+const assessmentService = require('../services/assessmentService');
+const calendarService = require('../services/calendarService');
+const financeService = require('../services/financeService');
+const staffService = require('../services/staffService');
+const studentService = require('../services/studentService');
+const academicService = require('../services/academicService');
+const workflowService = require('../services/workflowService');
+const attendanceService = require('../services/attendanceService');
+const { IdentifierResolutionError } = require('../identifierResolution');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -41,6 +50,28 @@ function mapAiToolError(err, res) {
     return true;
   }
   if (err instanceof aiService.AiServiceValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  // UAT finding: a live LLM call omitting a tool's own required
+  // parameter (or sending it as an empty/placeholder value) previously
+  // reached the Business Service unvalidated and crashed as an
+  // unhandled 500 — aiToolRegistry.invokeTool now validates against
+  // the tool's own declared JSON schema before calling the handler,
+  // same "untrusted input, validate before use" reasoning as
+  // AiServiceValidationError above.
+  if (err instanceof aiToolRegistry.AiToolInvalidParamsError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  // A tool's own resolveXId helper (studentService.resolveStudentId,
+  // staffService.resolveStaffId, academicService.resolveClassId,
+  // assessmentService.resolveAssessmentTypeId) couldn't match a
+  // caller-supplied identifier (a roll number, staff code, class
+  // name, or assessment type name) to a real row in this college —
+  // a clean 400, never a raw Postgres uuid-cast crash reaching the
+  // client as a 500 (the AI Copilot UAT finding this exists to fix).
+  if (err instanceof IdentifierResolutionError) {
     res.status(400).json({ detail: err.message });
     return true;
   }
@@ -89,6 +120,92 @@ function mapAiToolError(err, res) {
     res.status(409).json({ detail: err.message });
     return true;
   }
+
+  // Role-aware ERP Copilot tools (this slice) — each wraps an existing
+  // Business Service directly (no second error-mapping layer of its
+  // own, same reasoning as the notification tools above), so their
+  // domain errors surface here the same way. assertIsAssignedFaculty/
+  // assertCanModifyStudent failures are 403 (role-permitted but
+  // scope-denied), matching the Policy Gate's own 403s above for the
+  // same reason — an authenticated, permitted caller reaching for
+  // something outside their own scope.
+  if (
+    err instanceof assessmentService.AssessmentMarkValidationError
+    || err instanceof calendarService.CalendarEventValidationError
+    || err instanceof financeService.FeeStructureValidationError
+    || err instanceof financeService.FeePaymentValidationError
+    || err instanceof financeService.FeePaymentStatusError
+    || err instanceof staffService.StaffValidationError
+    || err instanceof studentService.StudentTransferValidationError
+    || err instanceof studentService.StudentLifecycleValidationError
+    || err instanceof academicService.ClassValidationError
+    || err instanceof workflowService.WorkflowRequestValidationError
+    // UAT finding: attendanceService's own error classes (mark_attendance_nl's
+    // Business Service) were never registered here at all — every one of
+    // its errors fell through to an unhandled 500 instead of the same
+    // clean mapping routes/attendance.js's own mapAttendanceServiceError
+    // already gives a human caller of the equivalent action. Statuses
+    // below match that existing mapper exactly, not a new convention.
+    || err instanceof attendanceService.AttendanceValidationError
+    || err instanceof attendanceService.AttendanceCorrectionValidationError
+  ) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (
+    err instanceof assessmentService.AssessmentMarkNotAssignedFacultyError
+    || err instanceof studentService.StudentNotAuthorizedError
+    || err instanceof attendanceService.AttendanceForbiddenError
+  ) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
+  if (
+    err instanceof assessmentService.AssessmentMarkClassNotFoundError
+    || err instanceof calendarService.CalendarEventNotFoundError
+    || err instanceof financeService.FeeStructureNotFoundError
+    || err instanceof financeService.FeeStructureClassNotFoundError
+    || err instanceof financeService.FeePaymentStudentNotFoundError
+    || err instanceof financeService.FeePaymentFeeStructureNotFoundError
+    || err instanceof staffService.StaffNotFoundError
+    || err instanceof staffService.StaffDepartmentNotFoundError
+    || err instanceof staffService.StaffHodNotFoundError
+    || err instanceof staffService.StaffPrincipalNotFoundError
+    || err instanceof studentService.StudentClassNotFoundError
+    || err instanceof studentService.StudentTransferStudentNotFoundError
+    || err instanceof studentService.StudentTransferClassNotFoundError
+    || err instanceof studentService.StudentLifecycleStudentNotFoundError
+    || err instanceof attendanceService.AttendanceClassNotFoundError
+    || err instanceof attendanceService.AttendanceSessionNotFoundError
+    || err instanceof attendanceService.AttendanceCorrectionNotFoundError
+  ) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (
+    err instanceof financeService.FeeStructureConflictError
+    || err instanceof financeService.FeePaymentConflictError
+    || err instanceof staffService.StaffCodeConflictError
+    || err instanceof studentService.StudentRollNoConflictError
+    || err instanceof studentService.StudentLifecycleApprovalRequiredError
+    || err instanceof workflowService.WorkflowRequestConflictError
+    || err instanceof attendanceService.AttendanceTimetableNotApprovedError
+    || err instanceof attendanceService.AttendanceLockedError
+    || err instanceof attendanceService.AttendanceSessionConflictError
+    || err instanceof attendanceService.AttendanceNotLockedError
+    || err instanceof attendanceService.AttendanceCorrectionNoPendingRequestError
+    // No active teaching session right now is the same "actor/resource
+    // isn't in a state that allows this action right now" semantics
+    // AttendanceTimetableNotApprovedError/AttendanceLockedError already
+    // use 409 for above — mark_attendance_nl-only (the human dashboard's
+    // own attendance route never resolves "current session" implicitly,
+    // so this exact class has no prior mapping anywhere to match against).
+    || err instanceof attendanceService.AttendanceNoActiveSessionError
+  ) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+
   return false;
 }
 

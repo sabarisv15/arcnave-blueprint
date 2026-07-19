@@ -53,6 +53,12 @@ function AskAgentCard() {
           <div className="rounded-md border p-3 text-sm space-y-2">
             {result.toolUsed && <Badge variant="secondary">Used tool: {result.toolUsed}</Badge>}
             {result.answer && <p className="whitespace-pre-wrap">{result.answer}</p>}
+            {result.entries && result.entries.length > 0 && (
+              <details>
+                <summary className="cursor-pointer text-muted-foreground">Underlying data</summary>
+                <pre className="whitespace-pre-wrap text-xs">{JSON.stringify(result.entries, null, 2)}</pre>
+              </details>
+            )}
           </div>
         )}
       </CardContent>

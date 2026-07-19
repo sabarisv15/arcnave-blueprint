@@ -18,15 +18,14 @@
 // read as "every student was absent."
 
 const analyticsRepository = require('../repositories/analyticsRepository');
+const visibilityService = require('./visibilityService');
 
 function round(value, decimals) {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;
 }
 
-async function getAttendanceRateByClass(client, { classId, startDate, endDate } = {}) {
-  const rows = await analyticsRepository.attendanceRateByClass(client, { classId, startDate, endDate });
-
+function mapRows(rows) {
   return rows.map((row) => {
     const totalMarked = Number(row.total_marked);
     const totalPresent = Number(row.total_present);
@@ -41,6 +40,37 @@ async function getAttendanceRateByClass(client, { classId, startDate, endDate } 
   });
 }
 
+async function getAttendanceRateByClass(client, { classId, startDate, endDate } = {}) {
+  const rows = await analyticsRepository.attendanceRateByClass(client, { classId, startDate, endDate });
+  return mapRows(rows);
+}
+
+// Scope-aware entry point for AI tools (attendance_summary/
+// students_low_attendance): resolves the actor's own visible classIds
+// via visibilityService.getVisibleClassIds — the one shared resolver
+// every scoped AI read uses (it accepts this same {actorUserId,
+// actorRole, collegeId} legacy shape directly and builds its own
+// ActorContext internally, per its own dual-input support) — never a
+// caller-supplied classId/departmentId (AI-Governance.md's "scope is
+// derived, never supplied" rule for AI tools). null from
+// getVisibleClassIds means "unrestricted" (principal) — same meaning
+// as calling getAttendanceRateByClass with no filter at all, so no
+// classIds value is passed through in that case, not an empty-array
+// filter that would wrongly return nothing.
+async function getAttendanceRateForActor(client, { actorUserId, actorRole, collegeId }, { startDate, endDate } = {}) {
+  const classIds = await visibilityService.getVisibleClassIds(client, { actorUserId, actorRole, collegeId });
+  if (classIds !== null && classIds.length === 0) {
+    return [];
+  }
+  const rows = await analyticsRepository.attendanceRateByClass(client, {
+    classIds: classIds !== null ? classIds : undefined,
+    startDate,
+    endDate,
+  });
+  return mapRows(rows);
+}
+
 module.exports = {
   getAttendanceRateByClass,
+  getAttendanceRateForActor,
 };

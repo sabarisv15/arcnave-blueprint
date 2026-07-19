@@ -30,6 +30,19 @@ async function findById(client, id) {
   return result.rows[0] || null;
 }
 
+// findByName filters on college_id explicitly in addition to RLS,
+// same reasoning studentRepository.findByRollNo/staffRepository.
+// findByStaffCode/classRepository.findByCollegeAndClassName already
+// give: (college_id, name) is the real natural key
+// (assessment_types_college_name_key), not globally unique.
+async function findByName(client, collegeId, name) {
+  const result = await client.query(
+    'SELECT * FROM assessment_types WHERE college_id = $1 AND name = $2',
+    [collegeId, name],
+  );
+  return result.rows[0] || null;
+}
+
 async function list(client, { limit = 50, offset = 0 } = {}) {
   const result = await client.query(
     'SELECT * FROM assessment_types ORDER BY created_at LIMIT $1 OFFSET $2',
@@ -57,5 +70,5 @@ async function update(client, id, fields) {
 }
 
 module.exports = {
-  create, findById, list, update,
+  create, findById, findByName, list, update,
 };

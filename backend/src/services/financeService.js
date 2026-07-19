@@ -612,6 +612,62 @@ async function listScholarshipDecisionsForStudent(client, studentId) {
   return scholarshipDecisionRepository.listForStudent(client, studentId);
 }
 
+// Same pragmatic hardcoded-limit convention reportService.js's own
+// STUDENT_EXPORT_LIMIT already uses for "no real pagination story yet"
+// reads — a college with more fee structures/payments than this gets a
+// truncated summary, a flagged gap, not silently wrong totals.
+const FEE_SUMMARY_LIMIT = 5000;
+
+// finance_status_summary (AI tool, principal-only per AI-Governance.md
+// — fee data is Restricted, and only principal's classification
+// ceiling includes Restricted). Deliberately college-wide only, no
+// class/department filter: nothing in this schema scopes a
+// fee_structures row to one department (same reasoning
+// submitFeeStructureApproval's own single-step, principal-only
+// approverChain already gives), so there is no narrower "my scope" to
+// resolve here the way attendance/marks/roster have one.
+//
+// A fee_payments row records one student's paid/not_paid outcome
+// against one fee_structures row's amount — collected/outstanding is
+// computed by joining the two in memory (financeRepository/
+// feePaymentRepository have no aggregate SQL of their own), not by
+// summing fee_structures.amount directly, since a single fee structure
+// covers many students, each with (or without) their own payment
+// record.
+async function getFeeStatusSummary(client) {
+  const [structures, payments] = await Promise.all([
+    financeRepository.list(client, { limit: FEE_SUMMARY_LIMIT }),
+    feePaymentRepository.list(client, { limit: FEE_SUMMARY_LIMIT }),
+  ]);
+  const structureById = new Map(structures.map((s) => [s.id, s]));
+
+  let collectedAmount = 0;
+  let outstandingAmount = 0;
+  let paidCount = 0;
+  let notPaidCount = 0;
+  for (const payment of payments) {
+    const structure = structureById.get(payment.fee_structure_id);
+    if (structure === undefined) continue;
+    const amount = Number(structure.amount);
+    if (payment.status === 'paid') {
+      collectedAmount += amount;
+      paidCount += 1;
+    } else {
+      outstandingAmount += amount;
+      notPaidCount += 1;
+    }
+  }
+
+  return {
+    feeStructuresCount: structures.length,
+    paymentsRecordedCount: payments.length,
+    paidCount,
+    notPaidCount,
+    collectedAmount: Math.round(collectedAmount * 100) / 100,
+    outstandingAmount: Math.round(outstandingAmount * 100) / 100,
+  };
+}
+
 module.exports = {
   FeeStructureValidationError,
   FeeStructureConflictError,
@@ -644,4 +700,5 @@ module.exports = {
   checkScholarshipEligibility,
   recordScholarshipDecision,
   listScholarshipDecisionsForStudent,
+  getFeeStatusSummary,
 };

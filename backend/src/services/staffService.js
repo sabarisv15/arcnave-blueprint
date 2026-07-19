@@ -53,6 +53,7 @@ const classRepository = require('../repositories/classRepository');
 const workflowService = require('./workflowService');
 const authService = require('./authService');
 const notificationService = require('./notificationService');
+const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
 
 // Missing userId or fullName — staff.user_id and staff.full_name are
 // both NOT NULL at the DB level. Raised before any repository call,
@@ -343,6 +344,47 @@ async function getStaffByUserId(client, userId) {
 // (CLAUDE.md rule 1).
 async function listStaffByDepartment(client, departmentId) {
   return staffRepository.findByDepartmentId(client, departmentId);
+}
+
+// Scope-aware entry point for the staff_roster AI tool (and any future
+// caller needing "staff within my own scope"): principal sees the
+// whole college directory (listStaff, unfiltered); hod sees their own,
+// real, verified department (findHodDepartmentId -> listStaffByDepartment).
+// Moved here from the tool handler itself so the tool stays a thin,
+// single-call wrapper (AI-Governance.md §2) — this function is the one
+// Business Service method it now calls, same shape
+// studentService.listStudents already established for its own
+// actor-scoped roster read.
+async function listStaffForActor(client, { actorUserId, actorRole, collegeId }) {
+  if (actorRole === 'principal') {
+    return listStaff(client, { limit: 500 });
+  }
+  const departmentId = await findHodDepartmentId(client, collegeId, actorUserId);
+  if (departmentId === null) {
+    return [];
+  }
+  return listStaffByDepartment(client, departmentId);
+}
+
+// resolveStaffId: mirrors studentService.resolveStaffId's own
+// resolveStudentId — given either a real staff id or a human-readable
+// staff_code, returns the real id, or throws IdentifierResolutionError
+// if neither resolves within this college. Same motivation: an AI
+// Copilot caller only has a staff_code to go on, never the internal
+// id, and a bad identifier must be a clean rejection, not a raw
+// Postgres uuid-cast crash out of staffRepository.update's WHERE
+// clause.
+async function resolveStaffId(client, collegeId, identifier) {
+  if (isUuid(identifier)) {
+    return identifier;
+  }
+  const staff = await staffRepository.findByStaffCode(client, collegeId, identifier);
+  if (staff === null) {
+    throw new IdentifierResolutionError(
+      `no staff member found with staff code ${JSON.stringify(identifier)} in this college`,
+    );
+  }
+  return staff.id;
 }
 
 async function updateStaff(client, id, fields, { userId }) {
@@ -785,6 +827,7 @@ module.exports = {
   provisionHodAccount,
   getStaff,
   getStaffByUserId,
+  resolveStaffId,
   updateStaff,
   removeStaff,
   deactivateStaff,
@@ -794,6 +837,7 @@ module.exports = {
   listHodInChargeHistory,
   listStaff,
   listStaffByDepartment,
+  listStaffForActor,
   findHodForDepartment,
   findPrincipal,
   findHodDepartmentId,

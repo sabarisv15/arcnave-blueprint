@@ -22,6 +22,30 @@ const assessmentMarkRepository = require('../repositories/assessmentMarkReposito
 const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
 const classRepository = require('../repositories/classRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
+const visibilityService = require('./visibilityService');
+const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
+
+// resolveAssessmentTypeId: mirrors studentService.resolveStudentId/
+// staffService.resolveStaffId/academicService.resolveClassId — given
+// either a real assessment_types id or its human-readable name (e.g.
+// "Midterm"), returns the real id, or throws IdentifierResolutionError
+// if neither resolves within this college. Same motivation: an AI
+// Copilot caller only ever has the type's name to go on, never its
+// internal id, and a guessed/invented value must be a clean
+// rejection, not a raw Postgres uuid-cast crash out of
+// assessmentMarkRepository's own WHERE clause.
+async function resolveAssessmentTypeId(client, collegeId, identifier) {
+  if (isUuid(identifier)) {
+    return identifier;
+  }
+  const assessmentType = await assessmentTypeRepository.findByName(client, collegeId, identifier);
+  if (assessmentType === null) {
+    throw new IdentifierResolutionError(
+      `no assessment type found named ${JSON.stringify(identifier)} in this college`,
+    );
+  }
+  return assessmentType.id;
+}
 
 class AssessmentTypeValidationError extends Error {}
 class AssessmentTypeNameConflictError extends Error {}
@@ -149,9 +173,9 @@ async function recordMark(client, {
 // classId if both are given, though naming both is an unusual caller
 // choice, not one this function second-guesses.
 async function listMarksForFilters(client, {
-  academicYear, departmentId, classId, subject, assessmentTypeId,
+  academicYear, departmentId, classId, classIds: callerClassIds, subject, assessmentTypeId,
 } = {}) {
-  let classIds;
+  let classIds = callerClassIds;
   if (departmentId !== undefined) {
     const classesInDept = await classRepository.findByDepartmentId(client, departmentId);
     classIds = classesInDept.map((c) => c.id);
@@ -162,6 +186,26 @@ async function listMarksForFilters(client, {
 
   return assessmentMarkRepository.findByFilters(client, {
     academicYear, classId, classIds, subject, assessmentTypeId,
+  });
+}
+
+// Scope-aware entry point for the assessment_marks_summary AI tool:
+// resolves the actor's own visible classIds via
+// visibilityService.getVisibleClassIds — the one shared resolver every
+// scoped AI read uses (accepts this same {actorUserId, actorRole,
+// collegeId} legacy shape directly) — never a caller-supplied classId/
+// departmentId. null from getVisibleClassIds means "unrestricted"
+// (principal), so no classIds filter is applied at all in that case.
+async function listMarksForActor(client, { actorUserId, actorRole, collegeId }, { academicYear, subject, assessmentTypeId } = {}) {
+  const classIds = await visibilityService.getVisibleClassIds(client, { actorUserId, actorRole, collegeId });
+  if (classIds !== null && classIds.length === 0) {
+    return [];
+  }
+  return assessmentMarkRepository.findByFilters(client, {
+    academicYear,
+    classIds: classIds !== null ? classIds : undefined,
+    subject,
+    assessmentTypeId,
   });
 }
 
@@ -184,8 +228,10 @@ module.exports = {
   AssessmentMarkNotAssignedFacultyError,
   createAssessmentType,
   listAssessmentTypes,
+  resolveAssessmentTypeId,
   updateAssessmentType,
   recordMark,
   listMarksForFilters,
+  listMarksForActor,
   removeMark,
 };
