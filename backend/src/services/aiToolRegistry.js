@@ -612,7 +612,8 @@ registerTool({
   level: 'L1',
   dataClassification: 'Internal',
   description: "Lists students within the acting user's own scope — their own taught/tutored class(es), their own "
-    + 'department (HOD), or the whole college (principal).',
+    + 'department (HOD), or the whole college (principal). Roster/profile data only — never includes attendance '
+    + 'or marks; use attendance_summary or assessment_marks_summary for those.',
   allowedRoles: ['principal', 'hod', 'staff'],
   params: { type: 'object', properties: {}, additionalProperties: false },
   handler: (client, params, actor) => studentService.listStudents(
@@ -629,7 +630,9 @@ registerTool({
   level: 'L1',
   dataClassification: 'Internal',
   description: "Attendance rate per class within the acting user's own scope (own taught/tutored classes, own "
-    + 'department, or whole college), optionally within a date range.',
+    + 'department, or whole college), optionally within a date range. Use this for ANY question about attendance '
+    + "— rates, percentages, who's attending, department/class attendance — not students_roster (which never "
+    + 'includes attendance data).',
   allowedRoles: ['principal', 'hod', 'staff'],
   params: {
     type: 'object',
@@ -690,8 +693,10 @@ registerTool({
   name: 'assessment_marks_summary',
   level: 'L1',
   dataClassification: 'Internal',
-  description: "Assessment marks within the acting user's own scope (own taught classes, own department, or whole "
-    + 'college), optionally filtered by academic year, subject, or assessment type.',
+  description: "Reads (never writes) assessment marks within the acting user's own scope (own taught classes, own "
+    + 'department, or whole college), optionally filtered by academic year, subject, or assessment type. Use this '
+    + 'for viewing/listing marks (e.g. "who failed", "show marks for..."); use assessment_record_mark instead to '
+    + 'record or update one student\'s mark.',
   allowedRoles: ['principal', 'hod', 'staff'],
   params: {
     type: 'object',
