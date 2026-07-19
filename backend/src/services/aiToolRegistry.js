@@ -85,6 +85,7 @@
 
 const auditLogRepository = require('../repositories/auditLogRepository');
 const aiClassificationAccess = require('./aiClassificationAccess');
+const { isUuid } = require('../identifierResolution');
 
 class AiToolNotFoundError extends Error {}
 class AiToolLevelNotSupportedError extends Error {}
@@ -92,6 +93,20 @@ class AiToolTenantMismatchError extends Error {}
 class AiToolRoleNotPermittedError extends Error {}
 class AiToolDataClassificationError extends Error {}
 class AiToolDepartmentScopeError extends Error {}
+
+// UAT finding (live NIM run): a required array param omitted, or an
+// optional string param sent as "" or a null-ish placeholder token
+// ("None", "null", "n/a") reached the Business Service layer
+// unvalidated and crashed as an unhandled 500 (a raw
+// `absentRollNumbers must be an array` / Postgres
+// `invalid input syntax for type date: ""` leaking straight to the
+// caller). CLAUDE.md rule 9 — "AI tool inputs... are always untrusted
+// data" — this is exactly that: the LLM's own function-calling output
+// is untrusted input needing validation at the trust boundary
+// (invokeTool below), same as a human-supplied param would get,
+// before ever reaching a handler/Business Service that assumes a
+// well-formed caller.
+class AiToolInvalidParamsError extends Error {}
 
 // A runtime backstop for the L3 discipline the file-level comment
 // above otherwise only documents: an L3 handler returned a result that
@@ -245,6 +260,83 @@ function assertPolicyAllows(tool, actor, params) {
   }
 }
 
+// Null-ish placeholder tokens a function-calling LLM sometimes emits
+// for a parameter it means to leave unset (observed live: NVIDIA
+// NIM's meta/llama-3.1-8b-instruct sending "None" for an omitted
+// optional date). Only ever stripped from OPTIONAL params (never a
+// required one — a required field left as a placeholder must still
+// fail the required-params check below, not be silently dropped).
+const NULLISH_PARAM_TOKENS = new Set(['', 'none', 'null', 'n/a', 'na', 'undefined', 'nil']);
+
+// Drops any optional param whose value is one of the placeholder
+// tokens above, so a downstream Business Service never sees "" or
+// "None" where it expects either a real value or the key absent
+// entirely (its own contract, same as a human-supplied request body
+// would be held to). Returns a new object — never mutates the
+// caller's params.
+function sanitizeParams(tool, params) {
+  const schema = tool.params || DEFAULT_PARAMS_SCHEMA;
+  const required = new Set(schema.required || []);
+  const sanitized = { ...params };
+  Object.keys(sanitized).forEach((key) => {
+    if (required.has(key)) return;
+    const value = sanitized[key];
+    if (typeof value === 'string' && NULLISH_PARAM_TOKENS.has(value.trim().toLowerCase())) {
+      delete sanitized[key];
+    }
+  });
+  return sanitized;
+}
+
+// Enforces the tool's own already-declared JSON-schema `required`
+// list (today's only real gap: it was defined for the LLM's
+// function-calling contract but never actually checked before a
+// handler ran) plus a minimal type check for `array`-typed required
+// params — the exact shape `mark_attendance_nl`'s
+// `absent_roll_numbers` needs and the exact shape a live LLM call was
+// observed omitting, previously reaching attendanceService as an
+// unhandled crash instead of a clean rejection here.
+function assertParamsValid(tool, params) {
+  const schema = tool.params || DEFAULT_PARAMS_SCHEMA;
+  const required = schema.required || [];
+  const missing = required.filter((key) => params[key] === undefined || params[key] === null || params[key] === '');
+  if (missing.length > 0) {
+    throw new AiToolInvalidParamsError(
+      `tool ${JSON.stringify(tool.name)} is missing required parameter(s): ${missing.map((k) => JSON.stringify(k)).join(', ')}`,
+    );
+  }
+  required.forEach((key) => {
+    const propSchema = schema.properties && schema.properties[key];
+    if (propSchema && propSchema.type === 'array' && !Array.isArray(params[key])) {
+      throw new AiToolInvalidParamsError(
+        `tool ${JSON.stringify(tool.name)}'s parameter ${JSON.stringify(key)} must be an array`,
+      );
+    }
+  });
+
+  // UAT finding (live NIM run against request_notification_send/
+  // finance_submit_fee_structure_change): a handful of params are
+  // deliberately pure-UUID with no natural key to resolve from (see
+  // each one's own description) — a live LLM call invented a
+  // placeholder ("12345", a description fragment) for one of these
+  // when it had no real id to supply, and that string reached a
+  // repository's `WHERE id = $1` as an unhandled Postgres uuid-cast
+  // crash. Rejecting it here, before the handler runs, turns that into
+  // the same clean 400 an unresolvable name-based identifier already
+  // gets via IdentifierResolutionError — never a fix for the missing
+  // resolver itself (deliberately out of scope, see each field's own
+  // description), only for the crash.
+  Object.keys(schema.properties || {}).forEach((key) => {
+    const propSchema = schema.properties[key];
+    if (propSchema.format === 'uuid' && params[key] !== undefined && !isUuid(params[key])) {
+      throw new AiToolInvalidParamsError(
+        `tool ${JSON.stringify(tool.name)}'s parameter ${JSON.stringify(key)} must be a real internal id, `
+        + `not ${JSON.stringify(params[key])} — there is no name to resolve it from`,
+      );
+    }
+  });
+}
+
 // Maps a Policy Gate error to a short, stable reason code for
 // ai_tool_denied's metadata — the error message itself is meant for a
 // human reading the exception, this is meant for querying/grouping
@@ -315,6 +407,14 @@ async function invokeTool(name, { client, actor, params } = {}) {
     throw err;
   }
 
+  // Untrusted-input validation (CLAUDE.md rule 9) — not a Policy Gate
+  // decision (no ai_tool_denied audit entry: this is a malformed
+  // request, not an authorization outcome), so it's a plain
+  // AiToolInvalidParamsError -> 400, same category as
+  // AiServiceValidationError elsewhere in this pipeline.
+  const safeParams = sanitizeParams(tool, params || {});
+  assertParamsValid(tool, safeParams);
+
   // Action Manifest — built only for L3 (see buildActionManifest's own
   // comment for why L1/L2 don't get one) and passed as a 4th handler
   // argument. Every existing L1/L2 handler's signature is (client,
@@ -322,8 +422,8 @@ async function invokeTool(name, { client, actor, params } = {}) {
   // doesn't declare, so this is not a breaking change to any of them;
   // only a handler that explicitly adds a 4th parameter (see
   // request_notification_send below) actually receives and forwards it.
-  const manifest = tool.level === 'L3' ? buildActionManifest(tool, actor, params || {}) : undefined;
-  const result = await tool.handler(client, params || {}, actor, manifest);
+  const manifest = tool.level === 'L3' ? buildActionManifest(tool, actor, safeParams) : undefined;
+  const result = await tool.handler(client, safeParams, actor, manifest);
 
   // The runtime backstop — see AiToolL3BypassError's own comment.
   // Only meaningful for L3 (submission-only) tools; L1/L2 handlers are
@@ -450,7 +550,9 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      notificationId: { type: 'string', description: 'The id of a previously drafted notification (from draft_notification) to submit for approval.' },
+      notificationId: {
+        type: 'string', format: 'uuid', description: 'The id of a previously drafted notification (from draft_notification) to submit for approval. Must be the exact internal id — there is no name to resolve it from, so never guess one.',
+      },
     },
     required: ['notificationId'],
     additionalProperties: false,
@@ -869,7 +971,9 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      event_id: { type: 'string', description: 'The calendar event id to update.' },
+      event_id: {
+        type: 'string', format: 'uuid', description: 'The calendar event id to update. Must be the exact internal id (from a prior list_calendar_events result) — there is no name to resolve it from, so never guess one.',
+      },
       title: { type: 'string', description: 'Optional new title.' },
       event_type: { type: 'string', description: 'Optional new event type.' },
       start_date: { type: 'string', description: 'Optional new ISO date (YYYY-MM-DD).' },
@@ -902,7 +1006,9 @@ registerTool({
     type: 'object',
     properties: {
       student_id: { type: 'string', description: 'The student id, or the student\'s roll number, resolved to an id internally.' },
-      fee_structure_id: { type: 'string', description: 'The fee structure id — must be the exact internal id from a prior tool result (e.g. finance_status_summary); there is no name to resolve it from, so never guess one.' },
+      fee_structure_id: {
+        type: 'string', format: 'uuid', description: 'The fee structure id — must be the exact internal id from a prior tool result (e.g. finance_status_summary); there is no name to resolve it from, so never guess one.',
+      },
       status: { type: 'string', description: "'paid' or 'not_paid'." },
       receipt_document_id: { type: 'string', description: 'Optional id of a previously uploaded receipt document.' },
     },
@@ -1058,7 +1164,9 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      fee_structure_id: { type: 'string', description: 'The id of a previously created fee structure to submit for approval.' },
+      fee_structure_id: {
+        type: 'string', format: 'uuid', description: 'The id of a previously created fee structure to submit for approval. Must be the exact internal id — there is no name to resolve it from, so never guess one.',
+      },
     },
     required: ['fee_structure_id'],
     additionalProperties: false,
@@ -1190,6 +1298,7 @@ module.exports = {
   AiToolDataClassificationError,
   AiToolDepartmentScopeError,
   AiToolL3BypassError,
+  AiToolInvalidParamsError,
   registerTool,
   getTool,
   listTools,

@@ -20,6 +20,13 @@ const aiContextBuilder = require('./aiContextBuilder');
 const aiPromptSafetyLayer = require('./aiPromptSafetyLayer');
 const configurationService = require('./configurationService');
 const auditLogRepository = require('../repositories/auditLogRepository');
+// AI Experience Layer (AIX) — presentation only, added after the real
+// pipeline above has already produced its final, authorized result.
+// Every field this file already returns (entries, preamble, question,
+// answer, toolUsed, ...) is untouched; `presentation` is a new,
+// additive field only. See aiExperience/index.js's own file comment
+// for the boundary this must never cross.
+const aiExperienceLayer = require('./aiExperience');
 
 // askAboutTool/askAgent given an empty/non-string question — raised
 // before any Policy Gate check or LLM call, same "guard before any
@@ -54,7 +61,15 @@ const AGENT_SYSTEM_PROMPT = "You are ARCNAVE's campus assistant. Each tool is fo
   + 'entity, record, or action it is about (e.g. it names no student/staff/class, no clear action, or could '
   + 'reasonably match several unrelated tools), do NOT guess a tool — answer directly instead, asking the '
   + 'user a short, specific question about what they need (example: "help me with the thing" has no clear '
-  + 'subject — ask what they need help with, don\'t call a tool at random).';
+  + 'subject — ask what they need help with, don\'t call a tool at random). A question ASKING what you can '
+  + 'do, or asking for help in general, is never itself a reason to call a data tool — answer that kind of '
+  + 'question directly, in your own words. '
+  + 'NEVER invent a placeholder value for a parameter the question does not actually give you (e.g. a made-up '
+  + 'roll number, a literal placeholder like "student\'s roll number" or "12345", or a guessed assessment/exam '
+  + 'name) just to satisfy a tool\'s required field — if a required identifier (which student, which staff '
+  + 'member, which class, which assessment) is not clearly named in the question, do not call that tool at '
+  + 'all; answer directly instead, asking the user to specify it (example: "update this student\'s phone '
+  + 'number" names no actual student — ask which student, by name or roll number, rather than inventing one).';
 
 // Added for the summary step below (askAgent's tool_call branch only)
 // — a live UAT pass found two related gaps once a tool actually ran:
@@ -77,7 +92,8 @@ const TOOL_RESULT_ANSWER_SYSTEM_PROMPT = 'Answer the question in plain, natural 
   + "tool always returns only the acting user's own scope), say so explicitly rather than presenting the data "
   + 'as if it answers the literal question. If this tool represents a different action than the one the user '
   + 'literally asked for (e.g. they asked to delete something but this tool only submits a status-change '
-  + 'request for approval), say so explicitly. Keep the answer short.';
+  + 'request for approval), say so explicitly. Keep the answer short. Any money figure is always in Indian '
+  + 'Rupees — write it with the ₹ symbol (e.g. ₹90,000), never $ or USD.';
 
 function listTools() {
   return aiToolRegistry.listTools();
@@ -111,7 +127,10 @@ async function invokeTool(client, toolName, params, { actor } = {}) {
     metadata: { toolName },
   });
 
-  return sanitizedContext;
+  const presentation = aiExperienceLayer.buildPresentation({
+    sanitizedContext, toolUsed: toolName, tool, actorRole: actor.role,
+  });
+  return { ...sanitizedContext, presentation };
 }
 
 // Same pipeline as invokeTool, plus the LLM step: the tool still runs
@@ -131,7 +150,12 @@ async function askAboutTool(client, toolName, params, question, { actor } = {}) 
   const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, actor.collegeId);
   const answer = await adapter.complete(aiConfig, { systemPrompt, userPrompt });
 
-  return { ...sanitizedContext, question, answer };
+  const presentation = aiExperienceLayer.buildPresentation({
+    sanitizedContext, question, answer, toolUsed: toolName, tool: aiToolRegistry.getTool(toolName), actorRole: actor.role,
+  });
+  return {
+    ...sanitizedContext, question, answer, presentation,
+  };
 }
 
 // Generates the natural-language answer for a successful tool call —
@@ -182,8 +206,11 @@ async function askAgent(client, question, { actor } = {}) {
     const sanitizedContext = await invokeTool(client, decision.toolName, decision.arguments || {}, { actor });
     const tool = aiToolRegistry.getTool(decision.toolName);
     const answer = await summarizeToolResult(sanitizedContext, question, tool, adapter, aiConfig);
+    const presentation = aiExperienceLayer.buildPresentation({
+      sanitizedContext, question, answer, toolUsed: decision.toolName, tool, actorRole: actor.role,
+    });
     return {
-      ...sanitizedContext, question, toolUsed: decision.toolName, answer,
+      ...sanitizedContext, question, toolUsed: decision.toolName, answer, presentation,
     };
   }
 
@@ -196,7 +223,12 @@ async function askAgent(client, question, { actor } = {}) {
   // wrapping that content does), but so a caller never has to branch
   // on response shape to know whether a tool ran.
   const sanitizedContext = aiPromptSafetyLayer.buildSanitizedContext([]);
-  return { ...sanitizedContext, question, toolUsed: null, answer: decision.text };
+  const presentation = aiExperienceLayer.buildPresentation({
+    sanitizedContext, question, answer: decision.text, toolUsed: null, tool: null, actorRole: actor.role,
+  });
+  return {
+    ...sanitizedContext, question, toolUsed: null, answer: decision.text, presentation,
+  };
 }
 
 module.exports = {

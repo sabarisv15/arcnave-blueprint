@@ -207,6 +207,50 @@ test('ai', async (t) => {
     assert.equal(resp.status, 404);
   });
 
+  // UAT finding: a live LLM call to mark_attendance_nl omitting its
+  // required absent_roll_numbers array previously crashed
+  // attendanceService with an unhandled 500 ("absentRollNumbers must
+  // be an array") instead of a clean rejection — aiToolRegistry.
+  // invokeTool now validates a tool's own declared `required` schema
+  // before the handler ever runs.
+  await t.test('invoking mark_attendance_nl with its required array param omitted returns a clean 400, not a 500', async () => {
+    const token = await login(collegeA, 'staffuser');
+    const resp = await post(baseUrl, '/api/v1/ai/tools/mark_attendance_nl/invoke', headersFor(collegeA, token), { params: {} });
+    assert.equal(resp.status, 400);
+    assert.match(resp.body.detail, /missing required parameter/);
+  });
+
+  // UAT finding: a live LLM call to request_notification_send with a
+  // hallucinated, non-UUID notificationId (no natural key exists to
+  // resolve this param from — see the tool's own description)
+  // previously crashed notificationRepository.findById with an
+  // unhandled Postgres uuid-cast 500 instead of a clean rejection.
+  await t.test('invoking request_notification_send with a non-UUID notificationId returns a clean 400, not a 500', async () => {
+    const token = await login(collegeA, 'principaluser');
+    const resp = await post(
+      baseUrl,
+      '/api/v1/ai/tools/request_notification_send/invoke',
+      headersFor(collegeA, token),
+      { params: { notificationId: '12345' } },
+    );
+    assert.equal(resp.status, 400);
+    assert.match(resp.body.detail, /must be a real internal id/);
+  });
+
+  // UAT finding: attendanceService's own error classes (thrown by
+  // mark_attendance_nl's Business Service call) were never registered
+  // in mapAiToolError at all — every one of them, including this
+  // common, foreseeable "no active session right now" condition,
+  // previously fell through as an unhandled 500 instead of the same
+  // clean status routes/attendance.js's own mapper already gives an
+  // equivalent human-triggered action.
+  await t.test('invoking mark_attendance_nl with no active teaching session returns a clean 409, not a 500', async () => {
+    const token = await login(collegeA, 'staffuser');
+    const resp = await post(baseUrl, '/api/v1/ai/tools/mark_attendance_nl/invoke', headersFor(collegeA, token), { params: { absent_roll_numbers: ['1'] } });
+    assert.equal(resp.status, 409);
+    assert.match(resp.body.detail, /no active teaching session/);
+  });
+
   await t.test('invoking with no auth returns 401', async () => {
     const resp = await post(baseUrl, '/api/v1/ai/tools/get_college_profile/invoke', { host: hostFor(collegeA.subdomain) }, { params: {} });
     assert.equal(resp.status, 401);
@@ -359,6 +403,11 @@ test('ai', async (t) => {
       assert.equal(resp.body.boundaryStart, aiPromptSafetyLayer.BOUNDARY_START);
       const profile = JSON.parse(resp.body.entries[0].data);
       assert.equal(profile.college_id, collegeA.collegeId);
+      // AI Experience Layer (AIX) — additive `presentation` field, never
+      // a replacement for any field above; see aiExperience/index.js.
+      assert.equal(resp.body.presentation.role, 'principal');
+      assert.equal(resp.body.presentation.toolUsed, 'get_college_profile');
+      assert.match(resp.body.presentation.markdown, /^## Get college profile/);
     } finally {
       config.nim.apiKey = originalApiKey;
       global.fetch = originalFetch;

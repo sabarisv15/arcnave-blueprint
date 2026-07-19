@@ -14,6 +14,7 @@ const staffService = require('../services/staffService');
 const studentService = require('../services/studentService');
 const academicService = require('../services/academicService');
 const workflowService = require('../services/workflowService');
+const attendanceService = require('../services/attendanceService');
 const { IdentifierResolutionError } = require('../identifierResolution');
 
 function requireResolvedTenant(req, res) {
@@ -49,6 +50,17 @@ function mapAiToolError(err, res) {
     return true;
   }
   if (err instanceof aiService.AiServiceValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  // UAT finding: a live LLM call omitting a tool's own required
+  // parameter (or sending it as an empty/placeholder value) previously
+  // reached the Business Service unvalidated and crashed as an
+  // unhandled 500 — aiToolRegistry.invokeTool now validates against
+  // the tool's own declared JSON schema before calling the handler,
+  // same "untrusted input, validate before use" reasoning as
+  // AiServiceValidationError above.
+  if (err instanceof aiToolRegistry.AiToolInvalidParamsError) {
     res.status(400).json({ detail: err.message });
     return true;
   }
@@ -128,6 +140,14 @@ function mapAiToolError(err, res) {
     || err instanceof studentService.StudentLifecycleValidationError
     || err instanceof academicService.ClassValidationError
     || err instanceof workflowService.WorkflowRequestValidationError
+    // UAT finding: attendanceService's own error classes (mark_attendance_nl's
+    // Business Service) were never registered here at all — every one of
+    // its errors fell through to an unhandled 500 instead of the same
+    // clean mapping routes/attendance.js's own mapAttendanceServiceError
+    // already gives a human caller of the equivalent action. Statuses
+    // below match that existing mapper exactly, not a new convention.
+    || err instanceof attendanceService.AttendanceValidationError
+    || err instanceof attendanceService.AttendanceCorrectionValidationError
   ) {
     res.status(400).json({ detail: err.message });
     return true;
@@ -135,6 +155,7 @@ function mapAiToolError(err, res) {
   if (
     err instanceof assessmentService.AssessmentMarkNotAssignedFacultyError
     || err instanceof studentService.StudentNotAuthorizedError
+    || err instanceof attendanceService.AttendanceForbiddenError
   ) {
     res.status(403).json({ detail: err.message });
     return true;
@@ -154,6 +175,9 @@ function mapAiToolError(err, res) {
     || err instanceof studentService.StudentTransferStudentNotFoundError
     || err instanceof studentService.StudentTransferClassNotFoundError
     || err instanceof studentService.StudentLifecycleStudentNotFoundError
+    || err instanceof attendanceService.AttendanceClassNotFoundError
+    || err instanceof attendanceService.AttendanceSessionNotFoundError
+    || err instanceof attendanceService.AttendanceCorrectionNotFoundError
   ) {
     res.status(404).json({ detail: err.message });
     return true;
@@ -165,6 +189,18 @@ function mapAiToolError(err, res) {
     || err instanceof studentService.StudentRollNoConflictError
     || err instanceof studentService.StudentLifecycleApprovalRequiredError
     || err instanceof workflowService.WorkflowRequestConflictError
+    || err instanceof attendanceService.AttendanceTimetableNotApprovedError
+    || err instanceof attendanceService.AttendanceLockedError
+    || err instanceof attendanceService.AttendanceSessionConflictError
+    || err instanceof attendanceService.AttendanceNotLockedError
+    || err instanceof attendanceService.AttendanceCorrectionNoPendingRequestError
+    // No active teaching session right now is the same "actor/resource
+    // isn't in a state that allows this action right now" semantics
+    // AttendanceTimetableNotApprovedError/AttendanceLockedError already
+    // use 409 for above — mark_attendance_nl-only (the human dashboard's
+    // own attendance route never resolves "current session" implicitly,
+    // so this exact class has no prior mapping anywhere to match against).
+    || err instanceof attendanceService.AttendanceNoActiveSessionError
   ) {
     res.status(409).json({ detail: err.message });
     return true;

@@ -146,6 +146,181 @@ test('aiToolRegistry: invoking an unknown tool throws AiToolNotFoundError and wr
   assert.deepEqual(deniedAuditRows(client), []);
 });
 
+// UAT finding (live NIM run against mark_attendance_nl/attendance_summary):
+// a required array param omitted, or an optional string param sent as ""
+// or a null-ish placeholder ("None"), previously reached the handler
+// unvalidated and crashed the Business Service with a raw, unmapped
+// Error — a 500, not a clean rejection. assertParamsValid/sanitizeParams
+// close this gap generically, for every tool's own already-declared
+// `required`/`type` schema, not just the two tools that happened to
+// surface it live.
+test('aiToolRegistry: a required param missing entirely throws AiToolInvalidParamsError, not a handler crash', async () => {
+  const handler = mock.fn(async () => ({ ok: true }));
+  aiToolRegistry.registerTool({
+    name: 'test_only_required_array_tool',
+    level: 'L1',
+    dataClassification: 'Internal',
+    description: 'test fixture',
+    allowedRoles: ['staff'],
+    params: {
+      type: 'object',
+      properties: { absent_roll_numbers: { type: 'array', items: { type: 'string' } } },
+      required: ['absent_roll_numbers'],
+      additionalProperties: false,
+    },
+    handler,
+  });
+
+  const client = fakeClient();
+  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  await assert.rejects(
+    () => aiToolRegistry.invokeTool('test_only_required_array_tool', { client, actor, params: {} }),
+    aiToolRegistry.AiToolInvalidParamsError,
+  );
+  assert.equal(handler.mock.callCount(), 0, 'the handler must never run when a required param is missing');
+  // Not a Policy Gate/authorization decision — no ai_tool_denied row.
+  assert.deepEqual(deniedAuditRows(client), []);
+});
+
+test('aiToolRegistry: a required param present but the wrong type (not an array) throws AiToolInvalidParamsError, not a handler crash', async () => {
+  const handler = mock.fn(async () => ({ ok: true }));
+  aiToolRegistry.registerTool({
+    name: 'test_only_required_array_tool_wrong_type',
+    level: 'L1',
+    dataClassification: 'Internal',
+    description: 'test fixture',
+    allowedRoles: ['staff'],
+    params: {
+      type: 'object',
+      properties: { absent_roll_numbers: { type: 'array', items: { type: 'string' } } },
+      required: ['absent_roll_numbers'],
+      additionalProperties: false,
+    },
+    handler,
+  });
+
+  const client = fakeClient();
+  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  await assert.rejects(
+    () => aiToolRegistry.invokeTool('test_only_required_array_tool_wrong_type', {
+      client, actor, params: { absent_roll_numbers: '35' },
+    }),
+    aiToolRegistry.AiToolInvalidParamsError,
+  );
+  assert.equal(handler.mock.callCount(), 0);
+});
+
+test('aiToolRegistry: an optional string param sent as "" or a null-ish placeholder is sanitized away before the handler runs, not passed through literally', async () => {
+  const handler = mock.fn(async () => ({ ok: true }));
+  aiToolRegistry.registerTool({
+    name: 'test_only_optional_date_tool',
+    level: 'L1',
+    dataClassification: 'Internal',
+    description: 'test fixture',
+    allowedRoles: ['staff'],
+    params: {
+      type: 'object',
+      properties: { start_date: { type: 'string' }, end_date: { type: 'string' } },
+      additionalProperties: false,
+    },
+    handler,
+  });
+
+  const client = fakeClient();
+  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  await aiToolRegistry.invokeTool('test_only_optional_date_tool', {
+    client, actor, params: { start_date: '', end_date: 'None' },
+  });
+  const [, receivedParams] = handler.mock.calls[0].arguments;
+  assert.deepEqual(receivedParams, {}, 'both placeholder values must be stripped, not forwarded as literal strings');
+});
+
+test('aiToolRegistry: a required param left as an empty string is still rejected, never silently sanitized away', async () => {
+  const handler = mock.fn(async () => ({ ok: true }));
+  aiToolRegistry.registerTool({
+    name: 'test_only_required_string_tool',
+    level: 'L1',
+    dataClassification: 'Internal',
+    description: 'test fixture',
+    allowedRoles: ['staff'],
+    params: {
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    handler,
+  });
+
+  const client = fakeClient();
+  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  await assert.rejects(
+    () => aiToolRegistry.invokeTool('test_only_required_string_tool', { client, actor, params: { query: '' } }),
+    aiToolRegistry.AiToolInvalidParamsError,
+  );
+  assert.equal(handler.mock.callCount(), 0);
+});
+
+// UAT finding (live NIM run against request_notification_send/
+// finance_submit_fee_structure_change): a pure-UUID param with no
+// natural key to resolve from (notificationId, event_id,
+// fee_structure_id — see each field's own description) reached a
+// repository's `WHERE id = $1` as a raw, unhandled Postgres uuid-cast
+// crash when the LLM invented a placeholder value. `format: 'uuid'`
+// on a param schema now rejects a non-UUID value here, before the
+// handler runs — the missing resolver itself remains deliberately out
+// of scope (documented on each field), only the crash is fixed.
+test('aiToolRegistry: a `format: "uuid"` param sent as a non-UUID placeholder throws AiToolInvalidParamsError, not a handler crash', async () => {
+  const handler = mock.fn(async () => ({ ok: true }));
+  aiToolRegistry.registerTool({
+    name: 'test_only_uuid_format_tool',
+    level: 'L1',
+    dataClassification: 'Internal',
+    description: 'test fixture',
+    allowedRoles: ['staff'],
+    params: {
+      type: 'object',
+      properties: { target_id: { type: 'string', format: 'uuid' } },
+      required: ['target_id'],
+      additionalProperties: false,
+    },
+    handler,
+  });
+
+  const client = fakeClient();
+  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  await assert.rejects(
+    () => aiToolRegistry.invokeTool('test_only_uuid_format_tool', { client, actor, params: { target_id: '12345' } }),
+    aiToolRegistry.AiToolInvalidParamsError,
+  );
+  assert.equal(handler.mock.callCount(), 0);
+});
+
+test('aiToolRegistry: a `format: "uuid"` param sent as a real UUID passes through to the handler unchanged', async () => {
+  const handler = mock.fn(async () => ({ ok: true }));
+  aiToolRegistry.registerTool({
+    name: 'test_only_uuid_format_tool_valid',
+    level: 'L1',
+    dataClassification: 'Internal',
+    description: 'test fixture',
+    allowedRoles: ['staff'],
+    params: {
+      type: 'object',
+      properties: { target_id: { type: 'string', format: 'uuid' } },
+      required: ['target_id'],
+      additionalProperties: false,
+    },
+    handler,
+  });
+
+  const client = fakeClient();
+  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const realUuid = '11111111-1111-4111-8111-111111111111';
+  await aiToolRegistry.invokeTool('test_only_uuid_format_tool_valid', { client, actor, params: { target_id: realUuid } });
+  const [, receivedParams] = handler.mock.calls[0].arguments;
+  assert.equal(receivedParams.target_id, realUuid);
+});
+
 test('Policy Gate: rejects wrong tenant distinctly (AiToolTenantMismatchError) and audit-logs the denial with reason "tenant"', async () => {
   const client = fakeClient();
   const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
@@ -813,7 +988,7 @@ test('request_notification_send: staff (not in allowedRoles) is rejected by the 
   const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   await assert.rejects(
     () => aiToolRegistry.invokeTool('request_notification_send', {
-      client: fakeClient(), actor, params: { notificationId: 'notif-1' },
+      client: fakeClient(), actor, params: { notificationId: '11111111-1111-4111-8111-111111111111' },
     }),
     aiToolRegistry.AiToolRoleNotPermittedError,
   );
@@ -839,7 +1014,7 @@ test('request_notification_send: a permitted role runs the real notificationServ
   const actor = { userId: 'requester-1', role: 'principal', collegeId: 'college-a' };
 
   const result = await aiToolRegistry.invokeTool('request_notification_send', {
-    client, actor, params: { notificationId: 'notif-1' },
+    client, actor, params: { notificationId: '11111111-1111-4111-8111-111111111111' },
   });
 
   assert.equal(result.workflow_request_id, 'wf-1');
