@@ -23,6 +23,29 @@ const facultyAllocationRepository = require('../repositories/facultyAllocationRe
 const classRepository = require('../repositories/classRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const visibilityService = require('./visibilityService');
+const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
+
+// resolveAssessmentTypeId: mirrors studentService.resolveStudentId/
+// staffService.resolveStaffId/academicService.resolveClassId — given
+// either a real assessment_types id or its human-readable name (e.g.
+// "Midterm"), returns the real id, or throws IdentifierResolutionError
+// if neither resolves within this college. Same motivation: an AI
+// Copilot caller only ever has the type's name to go on, never its
+// internal id, and a guessed/invented value must be a clean
+// rejection, not a raw Postgres uuid-cast crash out of
+// assessmentMarkRepository's own WHERE clause.
+async function resolveAssessmentTypeId(client, collegeId, identifier) {
+  if (isUuid(identifier)) {
+    return identifier;
+  }
+  const assessmentType = await assessmentTypeRepository.findByName(client, collegeId, identifier);
+  if (assessmentType === null) {
+    throw new IdentifierResolutionError(
+      `no assessment type found named ${JSON.stringify(identifier)} in this college`,
+    );
+  }
+  return assessmentType.id;
+}
 
 class AssessmentTypeValidationError extends Error {}
 class AssessmentTypeNameConflictError extends Error {}
@@ -205,6 +228,7 @@ module.exports = {
   AssessmentMarkNotAssignedFacultyError,
   createAssessmentType,
   listAssessmentTypes,
+  resolveAssessmentTypeId,
   updateAssessmentType,
   recordMark,
   listMarksForFilters,

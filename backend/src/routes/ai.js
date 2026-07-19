@@ -14,6 +14,7 @@ const staffService = require('../services/staffService');
 const studentService = require('../services/studentService');
 const academicService = require('../services/academicService');
 const workflowService = require('../services/workflowService');
+const { IdentifierResolutionError } = require('../identifierResolution');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -48,6 +49,17 @@ function mapAiToolError(err, res) {
     return true;
   }
   if (err instanceof aiService.AiServiceValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  // A tool's own resolveXId helper (studentService.resolveStudentId,
+  // staffService.resolveStaffId, academicService.resolveClassId,
+  // assessmentService.resolveAssessmentTypeId) couldn't match a
+  // caller-supplied identifier (a roll number, staff code, class
+  // name, or assessment type name) to a real row in this college —
+  // a clean 400, never a raw Postgres uuid-cast crash reaching the
+  // client as a 500 (the AI Copilot UAT finding this exists to fix).
+  if (err instanceof IdentifierResolutionError) {
     res.status(400).json({ detail: err.message });
     return true;
   }

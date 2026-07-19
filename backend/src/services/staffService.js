@@ -53,6 +53,7 @@ const classRepository = require('../repositories/classRepository');
 const workflowService = require('./workflowService');
 const authService = require('./authService');
 const notificationService = require('./notificationService');
+const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
 
 // Missing userId or fullName — staff.user_id and staff.full_name are
 // both NOT NULL at the DB level. Raised before any repository call,
@@ -363,6 +364,27 @@ async function listStaffForActor(client, { actorUserId, actorRole, collegeId }) 
     return [];
   }
   return listStaffByDepartment(client, departmentId);
+}
+
+// resolveStaffId: mirrors studentService.resolveStaffId's own
+// resolveStudentId — given either a real staff id or a human-readable
+// staff_code, returns the real id, or throws IdentifierResolutionError
+// if neither resolves within this college. Same motivation: an AI
+// Copilot caller only has a staff_code to go on, never the internal
+// id, and a bad identifier must be a clean rejection, not a raw
+// Postgres uuid-cast crash out of staffRepository.update's WHERE
+// clause.
+async function resolveStaffId(client, collegeId, identifier) {
+  if (isUuid(identifier)) {
+    return identifier;
+  }
+  const staff = await staffRepository.findByStaffCode(client, collegeId, identifier);
+  if (staff === null) {
+    throw new IdentifierResolutionError(
+      `no staff member found with staff code ${JSON.stringify(identifier)} in this college`,
+    );
+  }
+  return staff.id;
 }
 
 async function updateStaff(client, id, fields, { userId }) {
@@ -805,6 +827,7 @@ module.exports = {
   provisionHodAccount,
   getStaff,
   getStaffByUserId,
+  resolveStaffId,
   updateStaff,
   removeStaff,
   deactivateStaff,

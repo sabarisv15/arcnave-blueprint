@@ -74,6 +74,26 @@ const workflowChainService = require('./workflowChainService');
 const importService = require('./importService');
 const staffService = require('./staffService');
 const notificationService = require('./notificationService');
+const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
+
+// resolveClassId: mirrors studentService.resolveStudentId/
+// staffService.resolveStaffId — given either a real class id or a
+// human-readable class_name, returns the real id, or throws
+// IdentifierResolutionError if neither resolves within this college.
+// Same motivation: an AI Copilot caller only has a class name to go
+// on (e.g. "CSE-A"), never the internal id.
+async function resolveClassId(client, collegeId, identifier) {
+  if (isUuid(identifier)) {
+    return identifier;
+  }
+  const cls = await classRepository.findByCollegeAndClassName(client, collegeId, identifier);
+  if (cls === null) {
+    throw new IdentifierResolutionError(
+      `no class found named ${JSON.stringify(identifier)} in this college`,
+    );
+  }
+  return cls.id;
+}
 
 // Missing className — classes.class_name is NOT NULL at the DB level.
 // Raised before any repository call, same as staffService's pre-query
@@ -1253,6 +1273,7 @@ module.exports = {
   sendClassAlert,
   createClass,
   getClass,
+  resolveClassId,
   updateClass,
   removeClass,
   listClasses,

@@ -24,6 +24,7 @@ const visibilityService = require('./visibilityService');
 const workflowService = require('./workflowService');
 const configurationService = require('./configurationService');
 const studentLifecycleEventRepository = require('../repositories/studentLifecycleEventRepository');
+const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
 
 // Missing roll_no or full_name — StudentEditorModal.jsx marks both
 // required and blocks its own "Next" step without them. Raised before
@@ -423,6 +424,31 @@ async function assertCanViewStudent(client, student, { actorUserId, actorRole })
     }
     throw err;
   }
+}
+
+// resolveStudentId: given either a real student id or a human-
+// readable roll_no, returns the real id — or throws
+// IdentifierResolutionError if neither resolves to a real student in
+// this college. Exists so a caller that only has a natural-language
+// identifier (the AI Copilot's own case: a user names a student by
+// roll number, not by internal id) gets a clean, catchable rejection
+// instead of a raw Postgres "invalid input syntax for type uuid"
+// crash the moment a non-uuid string reaches studentRepository.
+// findById's WHERE id = $1. Deliberately returns only the id, never
+// the row — callers that need the row already call findById/
+// findByRollNo themselves; this is purely the "what id do I actually
+// look up" step.
+async function resolveStudentId(client, collegeId, identifier) {
+  if (isUuid(identifier)) {
+    return identifier;
+  }
+  const student = await studentRepository.findByRollNo(client, collegeId, identifier);
+  if (student === null) {
+    throw new IdentifierResolutionError(
+      `no student found with roll number ${JSON.stringify(identifier)} in this college`,
+    );
+  }
+  return student.id;
 }
 
 async function updateStudent(client, id, fields, { userId, actorRole }) {
@@ -984,6 +1010,7 @@ module.exports = {
   listTransferRequestsForStudent,
   createStudent,
   getStudent,
+  resolveStudentId,
   updateStudent,
   removeStudent,
   listStudents,

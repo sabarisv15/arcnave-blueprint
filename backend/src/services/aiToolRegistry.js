@@ -698,15 +698,20 @@ registerTool({
     properties: {
       academic_year: { type: 'string', description: "Optional academic year filter, e.g. '2025-2026'." },
       subject: { type: 'string', description: 'Optional subject filter.' },
-      assessment_type_id: { type: 'string', description: 'Optional assessment type id filter.' },
+      assessment_type_id: { type: 'string', description: 'Optional assessment type filter — either the exact internal id (if already known from a prior tool result) or the assessment type\'s real name (e.g. "Midterm"), resolved to an id internally. Omit if unsure of the exact name rather than guessing one.' },
     },
     additionalProperties: false,
   },
-  handler: (client, params, actor) => assessmentService.listMarksForActor(
-    client,
-    { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
-    { academicYear: params.academic_year, subject: params.subject, assessmentTypeId: params.assessment_type_id },
-  ),
+  handler: async (client, params, actor) => {
+    const assessmentTypeId = params.assessment_type_id
+      ? await assessmentService.resolveAssessmentTypeId(client, actor.collegeId, params.assessment_type_id)
+      : undefined;
+    return assessmentService.listMarksForActor(
+      client,
+      { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+      { academicYear: params.academic_year, subject: params.subject, assessmentTypeId },
+    );
+  },
 });
 
 const academicService = require('./academicService');
@@ -786,27 +791,34 @@ registerTool({
     type: 'object',
     properties: {
       academic_year: { type: 'string', description: "Academic year, e.g. '2025-2026'." },
-      class_id: { type: 'string', description: 'The class id.' },
+      class_id: { type: 'string', description: 'The class id, or the class name (e.g. "3rd Sem · CSE-A"), resolved to an id internally.' },
       subject: { type: 'string', description: 'The subject.' },
-      assessment_type_id: { type: 'string', description: 'The assessment type id.' },
-      student_id: { type: 'string', description: 'The student id.' },
+      assessment_type_id: { type: 'string', description: 'The assessment type id, or its real name (e.g. "Midterm"), resolved to an id internally.' },
+      student_id: { type: 'string', description: 'The student id, or the student\'s roll number, resolved to an id internally.' },
       marks_obtained: { type: 'number', description: 'The mark, stored exactly as given — no grading/weighting is applied.' },
     },
     required: ['academic_year', 'class_id', 'subject', 'assessment_type_id', 'student_id', 'marks_obtained'],
     additionalProperties: false,
   },
-  handler: (client, params, actor) => assessmentService.recordMark(
-    client,
-    {
-      academicYear: params.academic_year,
-      classId: params.class_id,
-      subject: params.subject,
-      assessmentTypeId: params.assessment_type_id,
-      studentId: params.student_id,
-      marksObtained: params.marks_obtained,
-    },
-    { actorUserId: actor.userId },
-  ),
+  handler: async (client, params, actor) => {
+    const [classId, assessmentTypeId, studentId] = await Promise.all([
+      academicService.resolveClassId(client, actor.collegeId, params.class_id),
+      assessmentService.resolveAssessmentTypeId(client, actor.collegeId, params.assessment_type_id),
+      studentService.resolveStudentId(client, actor.collegeId, params.student_id),
+    ]);
+    return assessmentService.recordMark(
+      client,
+      {
+        academicYear: params.academic_year,
+        classId,
+        subject: params.subject,
+        assessmentTypeId,
+        studentId,
+        marksObtained: params.marks_obtained,
+      },
+      { actorUserId: actor.userId },
+    );
+  },
 });
 
 // calendar_create_event / calendar_update_event: two tools, not one
@@ -884,21 +896,24 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      student_id: { type: 'string', description: 'The student id.' },
-      fee_structure_id: { type: 'string', description: 'The fee structure id.' },
+      student_id: { type: 'string', description: 'The student id, or the student\'s roll number, resolved to an id internally.' },
+      fee_structure_id: { type: 'string', description: 'The fee structure id — must be the exact internal id from a prior tool result (e.g. finance_status_summary); there is no name to resolve it from, so never guess one.' },
       status: { type: 'string', description: "'paid' or 'not_paid'." },
       receipt_document_id: { type: 'string', description: 'Optional id of a previously uploaded receipt document.' },
     },
     required: ['student_id', 'fee_structure_id', 'status'],
     additionalProperties: false,
   },
-  handler: (client, params, actor) => financeService.markFeePayment(
-    client,
-    {
-      collegeId: actor.collegeId, studentId: params.student_id, feeStructureId: params.fee_structure_id, status: params.status, receiptDocumentId: params.receipt_document_id,
-    },
-    { actorUserId: actor.userId },
-  ),
+  handler: async (client, params, actor) => {
+    const studentId = await studentService.resolveStudentId(client, actor.collegeId, params.student_id);
+    return financeService.markFeePayment(
+      client,
+      {
+        collegeId: actor.collegeId, studentId, feeStructureId: params.fee_structure_id, status: params.status, receiptDocumentId: params.receipt_document_id,
+      },
+      { actorUserId: actor.userId },
+    );
+  },
 });
 
 // students_update_profile: updateStudent itself re-verifies
@@ -919,7 +934,7 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      student_id: { type: 'string', description: 'The student id.' },
+      student_id: { type: 'string', description: 'The student id, or the student\'s roll number, resolved to an id internally.' },
       phone: { type: 'string', description: "Optional new phone number." },
       address: { type: 'string', description: 'Optional new address.' },
       parent_phone: { type: 'string', description: "Optional new parent phone number." },
@@ -928,14 +943,17 @@ registerTool({
     required: ['student_id'],
     additionalProperties: false,
   },
-  handler: (client, params, actor) => studentService.updateStudent(
-    client,
-    params.student_id,
-    {
-      phone: params.phone, address: params.address, parentPhone: params.parent_phone, notes: params.notes,
-    },
-    { userId: actor.userId, actorRole: actor.role },
-  ),
+  handler: async (client, params, actor) => {
+    const studentId = await studentService.resolveStudentId(client, actor.collegeId, params.student_id);
+    return studentService.updateStudent(
+      client,
+      studentId,
+      {
+        phone: params.phone, address: params.address, parentPhone: params.parent_phone, notes: params.notes,
+      },
+      { userId: actor.userId, actorRole: actor.role },
+    );
+  },
 });
 
 // staff_update_profile: updateStaff has no internal per-row scoping
@@ -951,7 +969,7 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      staff_id: { type: 'string', description: 'The staff id.' },
+      staff_id: { type: 'string', description: 'The staff id, or the staff member\'s staff code, resolved to an id internally.' },
       phone: { type: 'string', description: 'Optional new phone number.' },
       designation: { type: 'string', description: 'Optional new designation.' },
       qualification: { type: 'string', description: 'Optional new qualification.' },
@@ -960,14 +978,17 @@ registerTool({
     required: ['staff_id'],
     additionalProperties: false,
   },
-  handler: (client, params, actor) => staffService.updateStaff(
-    client,
-    params.staff_id,
-    {
-      phone: params.phone, designation: params.designation, qualification: params.qualification, departmentId: params.department_id,
-    },
-    { userId: actor.userId },
-  ),
+  handler: async (client, params, actor) => {
+    const staffId = await staffService.resolveStaffId(client, actor.collegeId, params.staff_id);
+    return staffService.updateStaff(
+      client,
+      staffId,
+      {
+        phone: params.phone, designation: params.designation, qualification: params.qualification, departmentId: params.department_id,
+      },
+      { userId: actor.userId },
+    );
+  },
 });
 
 // Workflow-submitting tools (L3 — create the same request a human
@@ -1003,20 +1024,23 @@ registerTool({
     type: 'object',
     properties: {
       academic_year: { type: 'string', description: "Academic year, e.g. '2025-2026'." },
-      class_id: { type: 'string', description: 'The class id.' },
+      class_id: { type: 'string', description: 'The class id, or the class name (e.g. "3rd Sem · CSE-A"), resolved to an id internally.' },
       fee_category: { type: 'string', description: 'The fee category.' },
       amount: { type: 'number', description: 'The fee amount.' },
     },
     required: ['academic_year', 'class_id', 'fee_category', 'amount'],
     additionalProperties: false,
   },
-  handler: (client, params, actor) => financeService.createFeeStructure(
-    client,
-    {
-      collegeId: actor.collegeId, academicYear: params.academic_year, classId: params.class_id, feeCategory: params.fee_category, amount: params.amount,
-    },
-    { actorUserId: actor.userId },
-  ),
+  handler: async (client, params, actor) => {
+    const classId = await academicService.resolveClassId(client, actor.collegeId, params.class_id);
+    return financeService.createFeeStructure(
+      client,
+      {
+        collegeId: actor.collegeId, academicYear: params.academic_year, classId, feeCategory: params.fee_category, amount: params.amount,
+      },
+      { actorUserId: actor.userId },
+    );
+  },
 });
 
 registerTool({
@@ -1053,14 +1077,15 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      staff_id: { type: 'string', description: 'The id of the pending staff registration to submit for approval.' },
+      staff_id: { type: 'string', description: 'The id of the pending staff registration to submit for approval, or that staff member\'s staff code, resolved to an id internally.' },
     },
     required: ['staff_id'],
     additionalProperties: false,
   },
   handler: async (client, params, actor) => {
+    const staffId = await staffService.resolveStaffId(client, actor.collegeId, params.staff_id);
     const workflowRequest = await staffService.submitStaffRegistration(
-      client, params.staff_id, { requestedByUserId: actor.userId, origin: 'ai' },
+      client, staffId, { requestedByUserId: actor.userId, origin: 'ai' },
     );
     return withWorkflowRequestId(workflowRequest, workflowRequest);
   },
@@ -1076,7 +1101,7 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      student_id: { type: 'string', description: 'The student id.' },
+      student_id: { type: 'string', description: 'The student id, or the student\'s roll number, resolved to an id internally.' },
       new_status: { type: 'string', description: 'One of Discontinued, Debarred, Dismissed, Graduated.' },
       reason: { type: 'string', description: 'Reason for the change.' },
       effective_date: { type: 'string', description: 'Optional ISO date (YYYY-MM-DD) the change should take effect.' },
@@ -1085,9 +1110,10 @@ registerTool({
     additionalProperties: false,
   },
   handler: async (client, params, actor) => {
+    const studentId = await studentService.resolveStudentId(client, actor.collegeId, params.student_id);
     const result = await studentService.requestLifecycleStatusChange(
       client,
-      params.student_id,
+      studentId,
       { newStatus: params.new_status, reason: params.reason, effectiveDate: params.effective_date },
       { requestedByUserId: actor.userId, origin: 'ai' },
     );
@@ -1105,18 +1131,22 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      student_id: { type: 'string', description: 'The student id.' },
-      destination_class_id: { type: 'string', description: 'The class id to transfer to.' },
+      student_id: { type: 'string', description: 'The student id, or the student\'s roll number, resolved to an id internally.' },
+      destination_class_id: { type: 'string', description: 'The class id to transfer to, or its class name, resolved to an id internally.' },
       reason: { type: 'string', description: 'Reason for the transfer.' },
     },
     required: ['student_id', 'destination_class_id', 'reason'],
     additionalProperties: false,
   },
   handler: async (client, params, actor) => {
+    const [studentId, destinationClassId] = await Promise.all([
+      studentService.resolveStudentId(client, actor.collegeId, params.student_id),
+      academicService.resolveClassId(client, actor.collegeId, params.destination_class_id),
+    ]);
     const result = await studentService.requestInternalTransfer(
       client,
-      params.student_id,
-      { destinationClassId: params.destination_class_id, reason: params.reason },
+      studentId,
+      { destinationClassId, reason: params.reason },
       { requestedByUserId: actor.userId, origin: 'ai' },
     );
     return withWorkflowRequestId(result, result.workflowRequest);
@@ -1133,14 +1163,15 @@ registerTool({
   params: {
     type: 'object',
     properties: {
-      class_id: { type: 'string', description: 'The class id whose timetable should be submitted for approval.' },
+      class_id: { type: 'string', description: 'The class id whose timetable should be submitted for approval, or its class name, resolved to an id internally.' },
     },
     required: ['class_id'],
     additionalProperties: false,
   },
   handler: async (client, params, actor) => {
+    const classId = await academicService.resolveClassId(client, actor.collegeId, params.class_id);
     const workflowRequest = await academicService.submitTimetableForApproval(
-      client, params.class_id, { requestedByUserId: actor.userId, origin: 'ai' },
+      client, classId, { requestedByUserId: actor.userId, origin: 'ai' },
     );
     return withWorkflowRequestId(workflowRequest, workflowRequest);
   },
