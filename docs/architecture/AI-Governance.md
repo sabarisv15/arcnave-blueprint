@@ -131,3 +131,106 @@ Gemini). Provider identity is not architecturally load-bearing — the
 Tool Registry, Context Builder, and Prompt Safety Layer are provider-
 agnostic. Provider selection lives in ConfigurationService, per
 tenant if ever needed.
+
+## 7. Same-Actor Direct-Action Carve-Out
+
+Section 1's `mark_attendance_nl` note described one specific carve-out
+ad hoc. This section generalizes it into a standing rule, so a future
+tool is checked against a written test instead of precedent-copying:
+
+A new tool may skip WorkflowService (i.e. be registered L1/L2 instead
+of L3) **only if all of the following hold**, verified against the
+real route + service code, never assumed from naming:
+
+1. **Same actor, same scope.** The tool can only ever act on the exact
+   resource(s) the acting user is already independently authorized for
+   — their own taught/tutored class(es) (staff), their own real,
+   verified department (HOD), or the whole college (principal, RLS-
+   scoped to their own tenant). Scope is always derived from `actor`
+   inside the Business Service (`actorContextService.buildActorContext`
+   → `visibilityService.getVisibleClassIds`/`staffService.
+   findHodDepartmentId`, or the service's own internal check like
+   `assertCanModifyStudent`/`assertIsAssignedFaculty`) — never a
+   caller-supplied `classId`/`departmentId` parameter.
+2. **Already direct for a human.** The identical action, performed by
+   the identical role, through the normal dashboard, is *already* a
+   direct write with no approval step today. If a human in that role
+   needs approval, the AI tool must create the identical workflow
+   request (same `entityType`, same `approverChain`) instead — never a
+   shortcut past it.
+3. **Never delete.** Regardless of 1–2, a delete/soft-delete action is
+   never registered as a direct tool. This is an absolute exception,
+   not a case-by-case judgment call.
+
+Naming and scope-resolution conventions (apply to every tool, direct
+or workflow-submitting alike):
+- **Domain-prefixed names**, one Business Service call each —
+  `students_*`, `attendance_*`, `assessment_*`, `academic_*`,
+  `staff_*`, `finance_*`, `workflow_*`. An `intent`-branching
+  "dispatcher" tool (one tool name, many unrelated behaviors behind a
+  parameter) is not used: it would put dispatch/business logic inside
+  the tool wrapper (§2) and a single tool can only carry one
+  `dataClassification`/`allowedRoles` pair, which a dispatcher spanning
+  multiple classifications can't honor. If the registry someday grows
+  large enough that this becomes a real tool-selection problem, a
+  domain-dispatcher redesign is its own future work, paired with a
+  Policy Gate change to support per-intent classification — not a
+  half-measure bolted on here.
+- `actorContextService.buildActorContext()` (or a Business Service
+  function that already calls it/an equivalent legacy-shape resolver
+  internally, e.g. `studentService.listStudents`) is the one shared
+  scope-resolution path every tool's handler uses — never a bespoke
+  per-tool lookup.
+
+## 8. Role-aware ERP Copilot tool registry (this slice)
+
+Every tool below follows §7. All are Internal classification unless
+noted; `allowedRoles` is the tool's ceiling, further narrowed at
+runtime by whatever scope the actor actually has.
+
+**Read (L1):**
+
+| Tool | Classification | Roles | Notes |
+|---|---|---|---|
+| `students_roster` | Internal | principal, hod, staff | wraps `studentService.listStudents` (already scope-aware) |
+| `attendance_summary` | Internal | principal, hod, staff | |
+| `students_low_attendance` | Internal | principal, hod, staff | same data as `attendance_summary`, threshold-filtered |
+| `assessment_marks_summary` | Internal | principal, hod, staff | deliberately Internal, not the §4 Confidential default — the same tutor already has full read/write access to these exact marks on the dashboard |
+| `academic_class_timetable` | Internal | principal, hod, staff | |
+| `staff_roster` | Internal | principal, hod | wraps `staffService.listStaffForActor` (already scope-aware); not staff — no dashboard reason for a tutor to browse the staff directory |
+| `finance_status_summary` | Restricted | principal | college-wide only; nothing in the schema scopes a fee structure to one department |
+| `workflow_pending_summary` | Internal | principal, hod | wraps `workflowService.listPendingForApprover` — requests awaiting the actor's own approval, not a department/college-wide audit |
+
+**Direct-write (L1 — §7 carve-out; human path already direct for these roles):**
+
+| Tool | Classification | Roles | Mirrors |
+|---|---|---|---|
+| `assessment_record_mark` | Internal | principal, hod, staff | `recordMark`, gated by `assertIsAssignedFaculty` |
+| `calendar_create_event` / `calendar_update_event` | Internal | principal | `createEvent`/`updateEvent` — no workflow step exists for calendar |
+| `finance_record_payment` | Restricted | principal | `markFeePayment` — "a simple write, not a fee change" |
+| `finance_draft_fee_structure` | Restricted | principal | `createFeeStructure` — lands Pending Approval, not live until submitted+approved |
+| `students_update_profile` | Internal | principal, hod, staff | `updateStudent`, gated by `assertCanModifyStudent`; excludes lifecycle status |
+| `staff_update_profile` | Internal | principal | `updateStaff` — principal-only on the dashboard too, not HOD |
+
+**Workflow-submitting (L3 — never mutate directly, only submit the identical request a human submission already uses):**
+
+| Tool | entityType | Roles |
+|---|---|---|
+| `finance_submit_fee_structure_change` | `fee_structure` | principal |
+| `staff_submit_registration` | `staff_registration` | principal, hod |
+| `students_submit_lifecycle_change` | `student_lifecycle_change` | principal, hod, staff |
+| `students_submit_transfer` | `student_transfer` | principal, hod, staff |
+| `academic_submit_timetable_for_approval` | `timetable_approval` | principal, hod |
+
+Not built in this slice (flagged, not silently omitted):
+- **Staff deactivation** — the human action itself has a real,
+  pre-existing authorization gap (no per-row scope check); an AI tool
+  here would inherit and amplify it. Needs a human-side fix first.
+- **Document upload/review for tutor/HOD** — current permission is
+  principal-only and explicitly provisional in that module's own code
+  comments, pending a real BusinessRules.md decision.
+- **Any hard-delete tool** — permanently excluded, not deferred.
+- **Multi-tool orchestration** (e.g. "students below 75% attendance
+  who also haven't paid fees") — `askAgent` picks exactly one tool per
+  question today; supporting compound questions changes the LLM
+  interaction loop itself and needs its own scoped review.

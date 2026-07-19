@@ -41,13 +41,23 @@
 // total_students recorded) and rounding are business-logic judgment
 // calls that belong in AnalyticsService, not baked into the query.
 async function attendanceRateByClass(client, {
-  classId, startDate, endDate,
+  classId, classIds, startDate, endDate,
 } = {}) {
   const conditions = ['a.deleted_at IS NULL'];
   const values = [];
   if (classId !== undefined) {
     values.push(classId);
     conditions.push(`a.class_id = $${values.length}`);
+  }
+  // classIds (plural) is the scoped-actor filter — a tutor's own
+  // assigned classes, or every class in a HOD's own department —
+  // same "array of ids, ANY()" shape assessmentMarkRepository.findByFilters
+  // already established for its own classIds param. Mutually exclusive
+  // with the single classId filter above in practice (callers pass one
+  // or the other), never combined.
+  if (classIds !== undefined) {
+    values.push(classIds);
+    conditions.push(`a.class_id = ANY($${values.length})`);
   }
   if (startDate !== undefined) {
     values.push(startDate);

@@ -345,6 +345,26 @@ async function listStaffByDepartment(client, departmentId) {
   return staffRepository.findByDepartmentId(client, departmentId);
 }
 
+// Scope-aware entry point for the staff_roster AI tool (and any future
+// caller needing "staff within my own scope"): principal sees the
+// whole college directory (listStaff, unfiltered); hod sees their own,
+// real, verified department (findHodDepartmentId -> listStaffByDepartment).
+// Moved here from the tool handler itself so the tool stays a thin,
+// single-call wrapper (AI-Governance.md §2) — this function is the one
+// Business Service method it now calls, same shape
+// studentService.listStudents already established for its own
+// actor-scoped roster read.
+async function listStaffForActor(client, { actorUserId, actorRole, collegeId }) {
+  if (actorRole === 'principal') {
+    return listStaff(client, { limit: 500 });
+  }
+  const departmentId = await findHodDepartmentId(client, collegeId, actorUserId);
+  if (departmentId === null) {
+    return [];
+  }
+  return listStaffByDepartment(client, departmentId);
+}
+
 async function updateStaff(client, id, fields, { userId }) {
   const patch = pickStaffFields(fields);
   const hasChanges = Object.keys(patch).length > 0;
@@ -794,6 +814,7 @@ module.exports = {
   listHodInChargeHistory,
   listStaff,
   listStaffByDepartment,
+  listStaffForActor,
   findHodForDepartment,
   findPrincipal,
   findHodDepartmentId,

@@ -580,6 +580,572 @@ registerTool({
   }),
 });
 
+// --- Role-aware ERP Copilot tools (this slice) -------------------------
+// Every tool below follows three standing rules recorded in
+// AI-Governance.md's own "Same-Actor Direct-Action Carve-Out" section:
+//   1. Domain-prefixed name (students_*/attendance_*/assessment_*/
+//      academic_*/staff_*/finance_*/workflow_*), one Business Service
+//      call each — never an intent-branching dispatcher (a single
+//      tool can only have one dataClassification/allowedRoles pair,
+//      and AI-Governance.md §2 forbids business logic inside a tool
+//      wrapper, so a dispatcher can't exist here without breaking
+//      both).
+//   2. Scope (own class(es)/department/college) is always resolved
+//      from `actor` alone, inside the relevant Business Service
+//      (visibilityService.getVisibleClassIds/staffService.
+//      findHodDepartmentId — the same "context builder" every other
+//      scoped read/write in this codebase already shares), never from
+//      a caller-supplied classId/departmentId.
+//   3. A tool may skip WorkflowService only where the human dashboard
+//      action it mirrors is ALREADY a direct write for that exact
+//      role today (verified against the real route+service code, not
+//      assumed) — everywhere a human already needs approval, the tool
+//      creates the identical workflow request instead and never
+//      mutates directly. Delete is never a direct tool, full stop.
+
+// Read tools (L1) ------------------------------------------------------
+
+const studentService = require('./studentService');
+
+registerTool({
+  name: 'students_roster',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: "Lists students within the acting user's own scope — their own taught/tutored class(es), their own "
+    + 'department (HOD), or the whole college (principal).',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: { type: 'object', properties: {}, additionalProperties: false },
+  handler: (client, params, actor) => studentService.listStudents(
+    client,
+    { limit: 500 },
+    { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+  ),
+});
+
+const analyticsService = require('./analyticsService');
+
+registerTool({
+  name: 'attendance_summary',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: "Attendance rate per class within the acting user's own scope (own taught/tutored classes, own "
+    + 'department, or whole college), optionally within a date range.',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      start_date: { type: 'string', description: 'Optional ISO date (YYYY-MM-DD) lower bound.' },
+      end_date: { type: 'string', description: 'Optional ISO date (YYYY-MM-DD) upper bound.' },
+    },
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => analyticsService.getAttendanceRateForActor(
+    client,
+    { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+    { startDate: params.start_date, endDate: params.end_date },
+  ),
+});
+
+// Same underlying read as attendance_summary, filtered/sorted to
+// below-threshold classes — kept as its own tool rather than an
+// `intent`/`mode` flag on attendance_summary, per this section's own
+// naming rule. The filter itself is a trivial array predicate, not
+// query construction, so it stays in this thin handler rather than
+// becoming a second analyticsService function.
+registerTool({
+  name: 'students_low_attendance',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: "Lists classes within the acting user's own scope whose attendance rate is at or below a threshold "
+    + 'percent (default 75) — the same data as attendance_summary, filtered to the classes that need attention.',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      threshold_percent: { type: 'number', description: 'Attendance rate percent at or below which a class is included. Defaults to 75.' },
+    },
+    additionalProperties: false,
+  },
+  handler: async (client, params, actor) => {
+    const rows = await analyticsService.getAttendanceRateForActor(
+      client,
+      { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+    );
+    const threshold = typeof params.threshold_percent === 'number' ? params.threshold_percent : 75;
+    return rows.filter((row) => row.attendanceRatePercent !== null && row.attendanceRatePercent <= threshold);
+  },
+});
+
+const assessmentService = require('./assessmentService');
+
+// Classified Internal here, not the Confidential default
+// AI-Governance.md §4's data table gives marks generally — a
+// deliberate, documented call (see AI-Governance.md's own new note):
+// the same tutor already has full read+write access to these exact
+// marks on the human dashboard (recordMark has no extra gate beyond
+// assertIsAssignedFaculty), so reading what you can already edit is
+// not a new exposure. Kept college-wide unrestricted for principal via
+// the same actor-derived scoping every other tool here uses.
+registerTool({
+  name: 'assessment_marks_summary',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: "Assessment marks within the acting user's own scope (own taught classes, own department, or whole "
+    + 'college), optionally filtered by academic year, subject, or assessment type.',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      academic_year: { type: 'string', description: "Optional academic year filter, e.g. '2025-2026'." },
+      subject: { type: 'string', description: 'Optional subject filter.' },
+      assessment_type_id: { type: 'string', description: 'Optional assessment type id filter.' },
+    },
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => assessmentService.listMarksForActor(
+    client,
+    { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+    { academicYear: params.academic_year, subject: params.subject, assessmentTypeId: params.assessment_type_id },
+  ),
+});
+
+const academicService = require('./academicService');
+
+registerTool({
+  name: 'academic_class_timetable',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: "Faculty allocation / timetable for classes within the acting user's own scope (own taught/tutored "
+    + 'classes, own department, or whole college).',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: { type: 'object', properties: {}, additionalProperties: false },
+  handler: (client, params, actor) => academicService.getClassTimetableForActor(
+    client,
+    { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+  ),
+});
+
+const staffService = require('./staffService');
+
+registerTool({
+  name: 'staff_roster',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: "Lists staff in the acting user's own department (HOD) or the whole college (principal). Not "
+    + 'available to plain staff — a tutor has no dashboard reason to browse the staff directory.',
+  allowedRoles: ['principal', 'hod'],
+  params: { type: 'object', properties: {}, additionalProperties: false },
+  handler: (client, params, actor) => staffService.listStaffForActor(
+    client,
+    { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+  ),
+});
+
+const financeService = require('./financeService');
+
+registerTool({
+  name: 'finance_status_summary',
+  level: 'L1',
+  dataClassification: 'Restricted',
+  description: 'College-wide fee collection status (fee structures, amounts collected/outstanding). Principal '
+    + 'only — fee data is Restricted, and only the principal role has AI access to Restricted data.',
+  allowedRoles: ['principal'],
+  params: { type: 'object', properties: {}, additionalProperties: false },
+  handler: (client) => financeService.getFeeStatusSummary(client),
+});
+
+const workflowService = require('./workflowService');
+
+registerTool({
+  name: 'workflow_pending_summary',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: "Workflow requests currently awaiting the acting user's own approval — the same list the Approvals "
+    + 'screen shows, not an exhaustive history of every request ever submitted in their department/college.',
+  allowedRoles: ['principal', 'hod'],
+  params: { type: 'object', properties: {}, additionalProperties: false },
+  handler: (client, params, actor) => workflowService.listPendingForApprover(client, actor.userId),
+});
+
+// Direct-write tools (L1 — skip WorkflowService; verified the human
+// dashboard path is already direct for these exact roles) -------------
+
+// assessment_record_mark: mirrors mark_attendance_nl's own carve-out
+// exactly. recordMark itself re-verifies assertIsAssignedFaculty(classId,
+// subject, actorUserId) — the tool grants no authority the acting
+// faculty member didn't already have via POST /assessments/marks.
+registerTool({
+  name: 'assessment_record_mark',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: "Records (or updates) one student's mark for the acting user's own class/subject — the same "
+    + 'recordMark action available on the dashboard. Fails if the acting user is not the assigned Subject Faculty '
+    + 'for that class/subject.',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      academic_year: { type: 'string', description: "Academic year, e.g. '2025-2026'." },
+      class_id: { type: 'string', description: 'The class id.' },
+      subject: { type: 'string', description: 'The subject.' },
+      assessment_type_id: { type: 'string', description: 'The assessment type id.' },
+      student_id: { type: 'string', description: 'The student id.' },
+      marks_obtained: { type: 'number', description: 'The mark, stored exactly as given — no grading/weighting is applied.' },
+    },
+    required: ['academic_year', 'class_id', 'subject', 'assessment_type_id', 'student_id', 'marks_obtained'],
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => assessmentService.recordMark(
+    client,
+    {
+      academicYear: params.academic_year,
+      classId: params.class_id,
+      subject: params.subject,
+      assessmentTypeId: params.assessment_type_id,
+      studentId: params.student_id,
+      marksObtained: params.marks_obtained,
+    },
+    { actorUserId: actor.userId },
+  ),
+});
+
+// calendar_create_event / calendar_update_event: two tools, not one
+// "manage" tool with a mode flag — createEvent/updateEvent are two
+// distinct Business Service methods, per this section's own naming
+// rule (governing principle 0/1), even though they share a domain.
+// Both direct — calendarService has no workflow step at all, and both
+// are principal-only, matching the human dashboard's own calendar.write
+// permission.
+registerTool({
+  name: 'calendar_create_event',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: 'Creates a college calendar event (semester date, holiday, exam window, etc). Principal only.',
+  allowedRoles: ['principal'],
+  params: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: 'Event title.' },
+      event_type: { type: 'string', description: "Event type, e.g. 'holiday', 'exam'." },
+      start_date: { type: 'string', description: 'ISO date (YYYY-MM-DD).' },
+      end_date: { type: 'string', description: 'Optional ISO date (YYYY-MM-DD).' },
+      description: { type: 'string', description: 'Optional description.' },
+    },
+    required: ['title', 'event_type', 'start_date'],
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => calendarService.createEvent(
+    client,
+    {
+      collegeId: actor.collegeId, title: params.title, eventType: params.event_type, startDate: params.start_date, endDate: params.end_date, description: params.description,
+    },
+    { actorUserId: actor.userId },
+  ),
+});
+
+registerTool({
+  name: 'calendar_update_event',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: 'Updates an existing college calendar event. Principal only.',
+  allowedRoles: ['principal'],
+  params: {
+    type: 'object',
+    properties: {
+      event_id: { type: 'string', description: 'The calendar event id to update.' },
+      title: { type: 'string', description: 'Optional new title.' },
+      event_type: { type: 'string', description: 'Optional new event type.' },
+      start_date: { type: 'string', description: 'Optional new ISO date (YYYY-MM-DD).' },
+      end_date: { type: 'string', description: 'Optional new ISO date (YYYY-MM-DD).' },
+      description: { type: 'string', description: 'Optional new description.' },
+    },
+    required: ['event_id'],
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => calendarService.updateEvent(
+    client,
+    params.event_id,
+    {
+      title: params.title, eventType: params.event_type, startDate: params.start_date, endDate: params.end_date, description: params.description,
+    },
+    { actorUserId: actor.userId, collegeId: actor.collegeId },
+  ),
+});
+
+// finance_record_payment: markFeePayment has no approval gate at all
+// today, by the same design financeService.js's own file comment
+// documents for a human caller — "a simple write... not a fee change."
+registerTool({
+  name: 'finance_record_payment',
+  level: 'L1',
+  dataClassification: 'Restricted',
+  description: "Marks a student's fee payment status (paid/not_paid) for a given fee structure. Principal only.",
+  allowedRoles: ['principal'],
+  params: {
+    type: 'object',
+    properties: {
+      student_id: { type: 'string', description: 'The student id.' },
+      fee_structure_id: { type: 'string', description: 'The fee structure id.' },
+      status: { type: 'string', description: "'paid' or 'not_paid'." },
+      receipt_document_id: { type: 'string', description: 'Optional id of a previously uploaded receipt document.' },
+    },
+    required: ['student_id', 'fee_structure_id', 'status'],
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => financeService.markFeePayment(
+    client,
+    {
+      collegeId: actor.collegeId, studentId: params.student_id, feeStructureId: params.fee_structure_id, status: params.status, receiptDocumentId: params.receipt_document_id,
+    },
+    { actorUserId: actor.userId },
+  ),
+});
+
+// students_update_profile: updateStudent itself re-verifies
+// assertCanModifyStudent (own class/department/college) — same
+// carve-out shape as assessment_record_mark. Lifecycle status is
+// deliberately NOT a param here — that always goes through
+// students_submit_lifecycle_change (Phase 3) instead, since 4 of its
+// values are workflow-gated even for a human and the rest already have
+// their own direct route (updateStudentLifecycleStatus) this tool does
+// not wrap.
+registerTool({
+  name: 'students_update_profile',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: "Updates routine profile fields (phone, address, parent contact, notes — never lifecycle status) "
+    + "for a student within the acting user's own scope. Fails if the student is not in the acting user's scope.",
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      student_id: { type: 'string', description: 'The student id.' },
+      phone: { type: 'string', description: "Optional new phone number." },
+      address: { type: 'string', description: 'Optional new address.' },
+      parent_phone: { type: 'string', description: "Optional new parent phone number." },
+      notes: { type: 'string', description: 'Optional new notes.' },
+    },
+    required: ['student_id'],
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => studentService.updateStudent(
+    client,
+    params.student_id,
+    {
+      phone: params.phone, address: params.address, parentPhone: params.parent_phone, notes: params.notes,
+    },
+    { userId: actor.userId, actorRole: actor.role },
+  ),
+});
+
+// staff_update_profile: updateStaff has no internal per-row scoping
+// (routes/staff.js's own `staff.update` permission is already
+// principal-only) — same authority as the human dashboard, no more.
+registerTool({
+  name: 'staff_update_profile',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: 'Updates routine profile fields for any staff member. Principal only — staff.update is a '
+    + "principal-only action on the dashboard too, not HOD's.",
+  allowedRoles: ['principal'],
+  params: {
+    type: 'object',
+    properties: {
+      staff_id: { type: 'string', description: 'The staff id.' },
+      phone: { type: 'string', description: 'Optional new phone number.' },
+      designation: { type: 'string', description: 'Optional new designation.' },
+      qualification: { type: 'string', description: 'Optional new qualification.' },
+      department_id: { type: 'string', description: 'Optional new department id.' },
+    },
+    required: ['staff_id'],
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => staffService.updateStaff(
+    client,
+    params.staff_id,
+    {
+      phone: params.phone, designation: params.designation, qualification: params.qualification, departmentId: params.department_id,
+    },
+    { userId: actor.userId },
+  ),
+});
+
+// Workflow-submitting tools (L3 — create the same request a human
+// submission already uses; never mutate the underlying record
+// directly) --------------------------------------------------------
+
+// The service functions these wrap each return their OWN shape (a raw
+// workflow_requests row, or an object nesting one under
+// `workflowRequest`) — never the notification-row shape
+// assertL3ResultNotBypassed's `result.workflow_request_id` check
+// happens to already match. This tags the real workflow request's
+// id/status onto whatever the service returned, satisfying that same
+// generic post-check without changing the check itself or any
+// existing service function's own return contract.
+function withWorkflowRequestId(result, workflowRequest) {
+  return { ...result, workflow_request_id: workflowRequest.id, status: workflowRequest.status };
+}
+
+// finance_draft_fee_structure: L1, direct write — createFeeStructure
+// itself has no approval gate (a row always lands 'Pending Approval'
+// by DB default); the gate is entirely in the separate submit step
+// below, same two-tool shape draft_notification/request_notification_send
+// already established. Without this tool, finance_submit_fee_structure_change
+// would have nothing to submit.
+registerTool({
+  name: 'finance_draft_fee_structure',
+  level: 'L1',
+  dataClassification: 'Restricted',
+  description: 'Creates a fee structure (academic year, class, category, amount) — lands as Pending Approval, '
+    + 'never live until finance_submit_fee_structure_change is submitted and a principal approves it. Principal only.',
+  allowedRoles: ['principal'],
+  params: {
+    type: 'object',
+    properties: {
+      academic_year: { type: 'string', description: "Academic year, e.g. '2025-2026'." },
+      class_id: { type: 'string', description: 'The class id.' },
+      fee_category: { type: 'string', description: 'The fee category.' },
+      amount: { type: 'number', description: 'The fee amount.' },
+    },
+    required: ['academic_year', 'class_id', 'fee_category', 'amount'],
+    additionalProperties: false,
+  },
+  handler: (client, params, actor) => financeService.createFeeStructure(
+    client,
+    {
+      collegeId: actor.collegeId, academicYear: params.academic_year, classId: params.class_id, feeCategory: params.fee_category, amount: params.amount,
+    },
+    { actorUserId: actor.userId },
+  ),
+});
+
+registerTool({
+  name: 'finance_submit_fee_structure_change',
+  level: 'L3',
+  dataClassification: 'Restricted',
+  description: 'Submits a previously created fee structure (from finance_draft_fee_structure) for principal '
+    + 'approval. Does NOT make it live — a principal must approve via the workflow approvals screen first.',
+  allowedRoles: ['principal'],
+  params: {
+    type: 'object',
+    properties: {
+      fee_structure_id: { type: 'string', description: 'The id of a previously created fee structure to submit for approval.' },
+    },
+    required: ['fee_structure_id'],
+    additionalProperties: false,
+  },
+  handler: async (client, params, actor) => {
+    const workflowRequest = await financeService.submitFeeStructureApproval(
+      client, params.fee_structure_id, { requestedByUserId: actor.userId, origin: 'ai' },
+    );
+    return withWorkflowRequestId(workflowRequest, workflowRequest);
+  },
+});
+
+registerTool({
+  name: 'staff_submit_registration',
+  level: 'L3',
+  dataClassification: 'Internal',
+  description: 'Submits a pending staff registration for HOD then principal approval. Does NOT activate the '
+    + 'staff member — approval must happen via the workflow approvals screen first. HOD (of that staff member\'s '
+    + 'own department) or principal.',
+  allowedRoles: ['principal', 'hod'],
+  params: {
+    type: 'object',
+    properties: {
+      staff_id: { type: 'string', description: 'The id of the pending staff registration to submit for approval.' },
+    },
+    required: ['staff_id'],
+    additionalProperties: false,
+  },
+  handler: async (client, params, actor) => {
+    const workflowRequest = await staffService.submitStaffRegistration(
+      client, params.staff_id, { requestedByUserId: actor.userId, origin: 'ai' },
+    );
+    return withWorkflowRequestId(workflowRequest, workflowRequest);
+  },
+});
+
+registerTool({
+  name: 'students_submit_lifecycle_change',
+  level: 'L3',
+  dataClassification: 'Internal',
+  description: "Submits a student lifecycle status change (Discontinued/Debarred/Dismissed/Graduated) for "
+    + 'principal approval. Does NOT change the status — approval must happen via the workflow approvals screen first.',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      student_id: { type: 'string', description: 'The student id.' },
+      new_status: { type: 'string', description: 'One of Discontinued, Debarred, Dismissed, Graduated.' },
+      reason: { type: 'string', description: 'Reason for the change.' },
+      effective_date: { type: 'string', description: 'Optional ISO date (YYYY-MM-DD) the change should take effect.' },
+    },
+    required: ['student_id', 'new_status', 'reason'],
+    additionalProperties: false,
+  },
+  handler: async (client, params, actor) => {
+    const result = await studentService.requestLifecycleStatusChange(
+      client,
+      params.student_id,
+      { newStatus: params.new_status, reason: params.reason, effectiveDate: params.effective_date },
+      { requestedByUserId: actor.userId, origin: 'ai' },
+    );
+    return withWorkflowRequestId(result, result.workflowRequest);
+  },
+});
+
+registerTool({
+  name: 'students_submit_transfer',
+  level: 'L3',
+  dataClassification: 'Internal',
+  description: 'Submits an internal (same-college) student transfer request for principal approval. Does NOT '
+    + 'move the student — approval must happen via the workflow approvals screen first.',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      student_id: { type: 'string', description: 'The student id.' },
+      destination_class_id: { type: 'string', description: 'The class id to transfer to.' },
+      reason: { type: 'string', description: 'Reason for the transfer.' },
+    },
+    required: ['student_id', 'destination_class_id', 'reason'],
+    additionalProperties: false,
+  },
+  handler: async (client, params, actor) => {
+    const result = await studentService.requestInternalTransfer(
+      client,
+      params.student_id,
+      { destinationClassId: params.destination_class_id, reason: params.reason },
+      { requestedByUserId: actor.userId, origin: 'ai' },
+    );
+    return withWorkflowRequestId(result, result.workflowRequest);
+  },
+});
+
+registerTool({
+  name: 'academic_submit_timetable_for_approval',
+  level: 'L3',
+  dataClassification: 'Internal',
+  description: "Submits a class's draft timetable for HOD then principal approval. Does NOT approve it — "
+    + 'attendance marking for that class stays locked until a human approves via the workflow approvals screen.',
+  allowedRoles: ['principal', 'hod'],
+  params: {
+    type: 'object',
+    properties: {
+      class_id: { type: 'string', description: 'The class id whose timetable should be submitted for approval.' },
+    },
+    required: ['class_id'],
+    additionalProperties: false,
+  },
+  handler: async (client, params, actor) => {
+    const workflowRequest = await academicService.submitTimetableForApproval(
+      client, params.class_id, { requestedByUserId: actor.userId, origin: 'ai' },
+    );
+    return withWorkflowRequestId(workflowRequest, workflowRequest);
+  },
+});
+
 module.exports = {
   AiToolNotFoundError,
   AiToolLevelNotSupportedError,

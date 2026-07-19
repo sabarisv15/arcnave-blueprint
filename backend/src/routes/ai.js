@@ -7,6 +7,13 @@ const aiToolRegistry = require('../services/aiToolRegistry');
 const aiService = require('../services/aiService');
 const aiProviders = require('../services/aiProviders');
 const notificationService = require('../services/notificationService');
+const assessmentService = require('../services/assessmentService');
+const calendarService = require('../services/calendarService');
+const financeService = require('../services/financeService');
+const staffService = require('../services/staffService');
+const studentService = require('../services/studentService');
+const academicService = require('../services/academicService');
+const workflowService = require('../services/workflowService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -89,6 +96,68 @@ function mapAiToolError(err, res) {
     res.status(409).json({ detail: err.message });
     return true;
   }
+
+  // Role-aware ERP Copilot tools (this slice) — each wraps an existing
+  // Business Service directly (no second error-mapping layer of its
+  // own, same reasoning as the notification tools above), so their
+  // domain errors surface here the same way. assertIsAssignedFaculty/
+  // assertCanModifyStudent failures are 403 (role-permitted but
+  // scope-denied), matching the Policy Gate's own 403s above for the
+  // same reason — an authenticated, permitted caller reaching for
+  // something outside their own scope.
+  if (
+    err instanceof assessmentService.AssessmentMarkValidationError
+    || err instanceof calendarService.CalendarEventValidationError
+    || err instanceof financeService.FeeStructureValidationError
+    || err instanceof financeService.FeePaymentValidationError
+    || err instanceof financeService.FeePaymentStatusError
+    || err instanceof staffService.StaffValidationError
+    || err instanceof studentService.StudentTransferValidationError
+    || err instanceof studentService.StudentLifecycleValidationError
+    || err instanceof academicService.ClassValidationError
+    || err instanceof workflowService.WorkflowRequestValidationError
+  ) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (
+    err instanceof assessmentService.AssessmentMarkNotAssignedFacultyError
+    || err instanceof studentService.StudentNotAuthorizedError
+  ) {
+    res.status(403).json({ detail: err.message });
+    return true;
+  }
+  if (
+    err instanceof assessmentService.AssessmentMarkClassNotFoundError
+    || err instanceof calendarService.CalendarEventNotFoundError
+    || err instanceof financeService.FeeStructureNotFoundError
+    || err instanceof financeService.FeeStructureClassNotFoundError
+    || err instanceof financeService.FeePaymentStudentNotFoundError
+    || err instanceof financeService.FeePaymentFeeStructureNotFoundError
+    || err instanceof staffService.StaffNotFoundError
+    || err instanceof staffService.StaffDepartmentNotFoundError
+    || err instanceof staffService.StaffHodNotFoundError
+    || err instanceof staffService.StaffPrincipalNotFoundError
+    || err instanceof studentService.StudentClassNotFoundError
+    || err instanceof studentService.StudentTransferStudentNotFoundError
+    || err instanceof studentService.StudentTransferClassNotFoundError
+    || err instanceof studentService.StudentLifecycleStudentNotFoundError
+  ) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (
+    err instanceof financeService.FeeStructureConflictError
+    || err instanceof financeService.FeePaymentConflictError
+    || err instanceof staffService.StaffCodeConflictError
+    || err instanceof studentService.StudentRollNoConflictError
+    || err instanceof studentService.StudentLifecycleApprovalRequiredError
+    || err instanceof workflowService.WorkflowRequestConflictError
+  ) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+
   return false;
 }
 
