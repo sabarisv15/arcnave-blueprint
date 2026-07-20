@@ -20,7 +20,7 @@ export function PlatformLoginPage() {
 
   const loginMutation = useMutation({
     mutationFn: (values) => login(values.username, values.password),
-    onSuccess: () => navigate('/platform/colleges'),
+    onSuccess: () => navigate('/platform/dashboard'),
     onError: (err) => toast.error(err instanceof ApiError ? err.detail : 'Invalid username or password'),
   });
 
