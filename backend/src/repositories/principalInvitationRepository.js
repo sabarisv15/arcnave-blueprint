@@ -83,6 +83,56 @@ async function revokeInvitation(pool, invitationId) {
   return result.rows[0] || null;
 }
 
+// Platform Admin module build, Phase C (plans/tingly-marinating-
+// whistle.md) — the Invitations screen's list/search/status-filter
+// read path. `status` is derived, not a stored column: pending/
+// accepted/expired/revoked all fall out of accepted_at/revoked_at/
+// expires_at, the same three columns every other function in this
+// file already reads — no new column, no denormalized status to keep
+// in sync.
+async function listInvitations(pool, {
+  limit = 20, offset = 0, status, search,
+} = {}) {
+  const conditions = [];
+  const params = [limit, offset];
+
+  if (status === 'pending') {
+    conditions.push('accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now()');
+  } else if (status === 'accepted') {
+    conditions.push('accepted_at IS NOT NULL');
+  } else if (status === 'expired') {
+    conditions.push('accepted_at IS NULL AND revoked_at IS NULL AND expires_at <= now()');
+  } else if (status === 'revoked') {
+    conditions.push('revoked_at IS NOT NULL');
+  }
+
+  if (search) {
+    params.push(`%${search}%`);
+    conditions.push(`(email ILIKE $${params.length} OR college_id ILIKE $${params.length})`);
+  }
+
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const result = await pool.query(
+    `SELECT id, college_id, email, expires_at, accepted_at, revoked_at, created_at
+     FROM principal_invitations
+     ${where}
+     ORDER BY created_at DESC
+     LIMIT $1 OFFSET $2`,
+    params,
+  );
+  return result.rows;
+}
+
+// Dashboard summary building block (Phase C) — same pending definition
+// listInvitations' status filter above already uses.
+async function countPending(pool) {
+  const result = await pool.query(
+    'SELECT count(*)::int AS count FROM principal_invitations WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now()',
+  );
+  return result.rows[0].count;
+}
+
 module.exports = {
   createInvitation,
   getInvitationByTokenHash,
@@ -90,4 +140,6 @@ module.exports = {
   markInvitationAccepted,
   resendInvitation,
   revokeInvitation,
+  listInvitations,
+  countPending,
 };

@@ -60,6 +60,7 @@ function createPlatformRouter() {
         name,
         subdomain,
         createdBy: req.platformClaims.sub,
+        ipAddress: req.ip,
       });
       res.status(201).json({
         college_id: college.college_id,
@@ -76,6 +77,18 @@ function createPlatformRouter() {
     }
   }));
 
+  // Organizations screen — UI copy says "Organizations", the
+  // underlying model/route stays `colleges` (no rename).
+  router.get('/colleges', requirePlatformAdmin, asyncHandler(async (req, res) => {
+    const { limit, offset, search } = req.query;
+    const colleges = await platformService.listColleges(platformPool, {
+      limit: limit !== undefined ? Number(limit) : undefined,
+      offset: offset !== undefined ? Number(offset) : undefined,
+      search,
+    });
+    res.json(colleges);
+  }));
+
   // No `token` field in the response — this session's own task
   // instruction: an invitation token is delivered only via email
   // (notificationService.sendPrincipalInvitationEmail), never returned
@@ -87,6 +100,7 @@ function createPlatformRouter() {
         collegeId: req.params.college_id,
         email,
         createdBy: req.platformClaims.sub,
+        ipAddress: req.ip,
       });
       res.json({
         invitation_id: invitation.invitationId,
@@ -119,7 +133,10 @@ function createPlatformRouter() {
   // resend rotates the token and emails it, it never echoes it back.
   router.post('/invitations/:invitation_id/resend', requirePlatformAdmin, asyncHandler(async (req, res) => {
     try {
-      const invitation = await platformService.resendPrincipalInvitation(platformPool, req.params.invitation_id);
+      const invitation = await platformService.resendPrincipalInvitation(platformPool, req.params.invitation_id, {
+        actorAdminId: req.platformClaims.sub,
+        ipAddress: req.ip,
+      });
       res.json({
         invitation_id: invitation.invitationId,
         college_id: invitation.collegeId,
@@ -134,7 +151,10 @@ function createPlatformRouter() {
 
   router.post('/invitations/:invitation_id/revoke', requirePlatformAdmin, asyncHandler(async (req, res) => {
     try {
-      const invitation = await platformService.revokePrincipalInvitation(platformPool, req.params.invitation_id);
+      const invitation = await platformService.revokePrincipalInvitation(platformPool, req.params.invitation_id, {
+        actorAdminId: req.platformClaims.sub,
+        ipAddress: req.ip,
+      });
       res.json({
         invitation_id: invitation.invitationId,
         college_id: invitation.collegeId,
@@ -145,6 +165,69 @@ function createPlatformRouter() {
       if (mapInvitationError(err, res)) return;
       throw err;
     }
+  }));
+
+  router.get('/invitations', requirePlatformAdmin, asyncHandler(async (req, res) => {
+    const {
+      limit, offset, status, search,
+    } = req.query;
+    const invitations = await platformService.listInvitations(platformPool, {
+      limit: limit !== undefined ? Number(limit) : undefined,
+      offset: offset !== undefined ? Number(offset) : undefined,
+      status,
+      search,
+    });
+    res.json(invitations);
+  }));
+
+  router.get('/audit-logs', requirePlatformAdmin, asyncHandler(async (req, res) => {
+    const {
+      limit, offset, action, actor_admin_id: actorAdminId, from_date: fromDate, to_date: toDate,
+    } = req.query;
+    const entries = await platformService.listAuditLogs(platformPool, {
+      limit: limit !== undefined ? Number(limit) : undefined,
+      offset: offset !== undefined ? Number(offset) : undefined,
+      action,
+      actorAdminId,
+      fromDate,
+      toDate,
+    });
+    res.json(entries);
+  }));
+
+  router.get('/settings', requirePlatformAdmin, asyncHandler(async (req, res) => {
+    const settings = await platformService.getSettings(platformPool);
+    res.json(settings);
+  }));
+
+  router.put('/settings', requirePlatformAdmin, asyncHandler(async (req, res) => {
+    const {
+      platform_name: platformName, support_email: supportEmail, default_timezone: defaultTimezone,
+      date_format: dateFormat, items_per_page: itemsPerPage,
+    } = req.body || {};
+    try {
+      const settings = await platformService.updateSettings(platformPool, {
+        platformName,
+        supportEmail,
+        defaultTimezone,
+        dateFormat,
+        itemsPerPage,
+        actorAdminId: req.platformClaims.sub,
+        ipAddress: req.ip,
+      });
+      res.json(settings);
+    } catch (err) {
+      if (err instanceof platformService.PlatformAdminValidationError) {
+        res.status(400).json({ detail: err.message });
+        return;
+      }
+      throw err;
+    }
+  }));
+
+  router.get('/dashboard-summary', requirePlatformAdmin, asyncHandler(async (req, res) => {
+    const summary = await platformService.getDashboardSummary(platformPool);
+    res.json(summary);
   }));
 
   return router;
