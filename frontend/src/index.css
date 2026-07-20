@@ -62,6 +62,38 @@
   body {
     @apply bg-background text-foreground;
   }
+
+  /* ARCNAVE AI workspace theme — a dark surface scoped to the AI
+     Copilot route only (toggled on <html> by AiWorkspace while mounted,
+     removed on unmount) so the rest of the app keeps its light gold/
+     cream theme untouched. Reuses the same --gold/--primary hue as the
+     light theme (not a new brand color) so it still reads as ARCNAVE,
+     not a generic dark-mode invert. --dark/--dark-foreground flip
+     meaning here — they've always meant "the high-contrast emphasis
+     surface," which on a dark background is a light gold-cream chip,
+     not literal black. */
+  :root.arcnave-ai-theme {
+    --background: oklch(0.17 0.014 264);
+    --foreground: oklch(0.93 0.01 90);
+    --card: oklch(0.21 0.016 264);
+    --card-foreground: oklch(0.93 0.01 90);
+    --popover: oklch(0.22 0.016 264);
+    --popover-foreground: oklch(0.93 0.01 90);
+    --secondary: oklch(0.25 0.016 264);
+    --secondary-foreground: oklch(0.93 0.01 90);
+    --muted: oklch(0.25 0.016 264);
+    --muted-foreground: oklch(0.68 0.02 90);
+    --accent: oklch(0.28 0.02 88);
+    --accent-foreground: oklch(0.95 0.01 90);
+    --border: oklch(0.32 0.018 264);
+    --input: oklch(0.34 0.018 264);
+
+    --dark: oklch(0.93 0.01 90);
+    --dark-foreground: oklch(0.19 0.015 264);
+
+    --page-gradient: linear-gradient(180deg, oklch(0.18 0.016 264), oklch(0.15 0.014 264) 60%, oklch(0.17 0.03 85) 100%);
+    --panel-gradient: linear-gradient(120deg, oklch(0.21 0.016 264) 0%, oklch(0.2 0.02 88) 45%, oklch(0.19 0.03 87) 100%);
+  }
 }
 
 @layer utilities {
@@ -73,5 +105,50 @@
   }
   .shadow-panel {
     box-shadow: var(--shadow-panel);
+  }
+
+  /* Hand-rolled markdown document styling for ARCNAVE AI answers —
+     no @tailwindcss/typography dependency, reuses existing tokens only. */
+  .ai-markdown {
+    @apply text-sm leading-relaxed text-foreground;
+  }
+  .ai-markdown > * + * {
+    @apply mt-3;
+  }
+  .ai-markdown h1, .ai-markdown h2, .ai-markdown h3 {
+    @apply font-semibold text-foreground;
+  }
+  .ai-markdown h1 { @apply text-lg; }
+  .ai-markdown h2 { @apply text-base; }
+  .ai-markdown h3 { @apply text-sm; }
+  .ai-markdown p { @apply text-sm text-foreground; }
+  .ai-markdown ul { @apply list-disc space-y-1 pl-5 text-sm; }
+  .ai-markdown ol { @apply list-decimal space-y-1 pl-5 text-sm; }
+  .ai-markdown li > p { @apply mt-0; }
+  .ai-markdown a { @apply text-primary underline underline-offset-2; }
+  .ai-markdown strong { @apply font-semibold; }
+  .ai-markdown code {
+    @apply rounded bg-muted px-1 py-0.5 font-mono text-[0.8em] text-foreground;
+  }
+  .ai-markdown pre {
+    @apply overflow-x-auto rounded-lg border border-border bg-muted p-3 text-xs;
+  }
+  .ai-markdown pre code {
+    @apply bg-transparent p-0;
+  }
+  .ai-markdown blockquote {
+    @apply border-l-2 border-border pl-3 text-muted-foreground;
+  }
+  .ai-markdown table {
+    @apply w-full border-collapse text-xs;
+  }
+  .ai-markdown th, .ai-markdown td {
+    @apply border border-border px-2 py-1 text-left;
+  }
+  .ai-markdown th {
+    @apply bg-muted font-medium text-muted-foreground;
+  }
+  .ai-markdown hr {
+    @apply border-border;
   }
 }
