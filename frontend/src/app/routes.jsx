@@ -32,9 +32,13 @@ import { AiConfigPage } from '@/features/settings/pages/AiConfigPage';
 import { BackgroundJobsPage } from '@/features/settings/pages/BackgroundJobsPage';
 import { ProfilePage } from '@/features/settings/pages/ProfilePage';
 
+import { PlatformAppShell } from '@/components/layout/PlatformAppShell';
 import { PlatformLoginPage } from '@/features/platform-admin/pages/PlatformLoginPage';
-import { CollegesPage } from '@/features/platform-admin/pages/CollegesPage';
+import { PlatformDashboardPage } from '@/features/platform-admin/pages/PlatformDashboardPage';
+import { OrganizationsPage } from '@/features/platform-admin/pages/OrganizationsPage';
 import { InvitationsPage } from '@/features/platform-admin/pages/InvitationsPage';
+import { AuditLogsPage } from '@/features/platform-admin/pages/AuditLogsPage';
+import { PlatformSettingsPage } from '@/features/platform-admin/pages/PlatformSettingsPage';
 
 export const router = createBrowserRouter([
   // Public — tenant app
@@ -83,8 +87,16 @@ export const router = createBrowserRouter([
   {
     element: <PlatformProtectedRoute />,
     children: [
-      { path: '/platform/colleges', element: <CollegesPage /> },
-      { path: '/platform/invitations', element: <InvitationsPage /> },
+      {
+        element: <PlatformAppShell />,
+        children: [
+          { path: '/platform/dashboard', element: <PlatformDashboardPage /> },
+          { path: '/platform/organizations', element: <OrganizationsPage /> },
+          { path: '/platform/invitations', element: <InvitationsPage /> },
+          { path: '/platform/audit-logs', element: <AuditLogsPage /> },
+          { path: '/platform/settings', element: <PlatformSettingsPage /> },
+        ],
+      },
     ],
   },
 ]);

@@ -15,6 +15,10 @@ export const invitePrincipalFormSchema = z.object({
   email: z.string().email('A valid email is required'),
 });
 
-export const invitationActionFormSchema = z.object({
-  invitationId: z.string().min(1, 'Invitation ID is required'),
+export const platformSettingsFormSchema = z.object({
+  platformName: z.string().min(1, 'Platform name is required'),
+  supportEmail: z.union([z.string().email('Enter a valid email'), z.literal('')]).optional(),
+  defaultTimezone: z.string().min(1, 'Default timezone is required'),
+  dateFormat: z.string().min(1, 'Date format is required'),
+  itemsPerPage: z.coerce.number().int().min(5, 'Must be at least 5').max(200, 'Must be at most 200'),
 });

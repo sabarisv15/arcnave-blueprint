@@ -32,6 +32,11 @@ const config = require('../config');
 const security = require('../security');
 const platformRepository = require('../repositories/platformRepository');
 const principalInvitationRepository = require('../repositories/principalInvitationRepository');
+const platformCollegeRepository = require('../repositories/platformCollegeRepository');
+const platformStatsRepository = require('../repositories/platformStatsRepository');
+const platformAuditLogRepository = require('../repositories/platformAuditLogRepository');
+const platformSettingsRepository = require('../repositories/platformSettingsRepository');
+const platformAuditService = require('./platformAuditService');
 const notificationService = require('./notificationService');
 
 // Generic platform-admin authentication failure — same single-
@@ -121,9 +126,12 @@ async function login(pool, { username, password }) {
   return { accessToken, tokenType: 'bearer' };
 }
 
-async function createCollege(pool, { collegeId, name, subdomain, createdBy }) {
+async function createCollege(pool, {
+  collegeId, name, subdomain, createdBy, ipAddress,
+}) {
+  let college;
   try {
-    return await platformRepository.createCollege(pool, { collegeId, name, subdomain, createdBy });
+    college = await platformRepository.createCollege(pool, { collegeId, name, subdomain, createdBy });
   } catch (err) {
     // 23505 = unique_violation (Postgres SQLSTATE) — colleges has two
     // UNIQUE constraints (college_id, subdomain), either one failing
@@ -135,6 +143,17 @@ async function createCollege(pool, { collegeId, name, subdomain, createdBy }) {
     }
     throw err;
   }
+
+  await platformAuditService.record(pool, {
+    actorAdminId: createdBy,
+    action: 'college.created',
+    entity: 'college',
+    entityId: college.college_id,
+    ipAddress,
+    metadata: { name, subdomain },
+  });
+
+  return college;
 }
 
 // Records an invitation and emails the raw token to the invitee
@@ -147,7 +166,9 @@ async function createCollege(pool, { collegeId, name, subdomain, createdBy }) {
 // duplicated: an invitation token has the same threat-model shape as a
 // refresh token (server-generated high-entropy randomness), so the
 // same reasoning for SHA-256 over argon2 applies unchanged.
-async function invitePrincipal(pool, { collegeId, email, createdBy }) {
+async function invitePrincipal(pool, {
+  collegeId, email, createdBy, ipAddress,
+}) {
   const rawToken = security.generateRefreshToken();
   const expiresAt = new Date(Date.now() + config.principalInvitationExpireHours * 60 * 60 * 1000);
   let invitation;
@@ -172,6 +193,15 @@ async function invitePrincipal(pool, { collegeId, email, createdBy }) {
     collegeId: invitation.college_id,
     token: rawToken,
     expiresAt: invitation.expires_at,
+  });
+
+  await platformAuditService.record(pool, {
+    actorAdminId: createdBy,
+    action: 'invitation.created',
+    entity: 'principal_invitation',
+    entityId: invitation.id,
+    ipAddress,
+    metadata: { collegeId: invitation.college_id, email: invitation.email },
   });
 
   return {
@@ -202,7 +232,7 @@ async function loadPendingInvitation(pool, invitationId) {
 // the same row, not a new invitation, so accepting the OLD token (if
 // it leaked, e.g. from a mis-delivered email) stops being possible the
 // moment a fresh one is issued.
-async function resendPrincipalInvitation(pool, invitationId) {
+async function resendPrincipalInvitation(pool, invitationId, { actorAdminId, ipAddress } = {}) {
   const existing = await loadPendingInvitation(pool, invitationId);
 
   const rawToken = security.generateRefreshToken();
@@ -224,6 +254,15 @@ async function resendPrincipalInvitation(pool, invitationId) {
     expiresAt: invitation.expires_at,
   });
 
+  await platformAuditService.record(pool, {
+    actorAdminId,
+    action: 'invitation.resent',
+    entity: 'principal_invitation',
+    entityId: invitation.id,
+    ipAddress,
+    metadata: { collegeId: invitation.college_id, email: invitation.email },
+  });
+
   return {
     invitationId: invitation.id,
     collegeId: invitation.college_id,
@@ -234,7 +273,7 @@ async function resendPrincipalInvitation(pool, invitationId) {
 
 // No email on revoke — nothing to tell the invitee that isn't already
 // implied by the token simply no longer working.
-async function revokePrincipalInvitation(pool, invitationId) {
+async function revokePrincipalInvitation(pool, invitationId, { actorAdminId, ipAddress } = {}) {
   await loadPendingInvitation(pool, invitationId);
 
   const invitation = await principalInvitationRepository.revokeInvitation(pool, invitationId);
@@ -242,11 +281,100 @@ async function revokePrincipalInvitation(pool, invitationId) {
     throw new PrincipalInvitationNotPendingError(`invitation ${JSON.stringify(invitationId)} is no longer pending`);
   }
 
+  await platformAuditService.record(pool, {
+    actorAdminId,
+    action: 'invitation.revoked',
+    entity: 'principal_invitation',
+    entityId: invitation.id,
+    ipAddress,
+    metadata: { collegeId: invitation.college_id, email: invitation.email },
+  });
+
   return {
     invitationId: invitation.id,
     collegeId: invitation.college_id,
     email: invitation.email,
     revokedAt: invitation.revoked_at,
+  };
+}
+
+// Platform Admin module build, Phase C — Organizations screen list.
+async function listColleges(pool, { limit, offset, search } = {}) {
+  return platformCollegeRepository.listColleges(pool, { limit, offset, search });
+}
+
+// Invitations screen list — principal-only, matching what this
+// backend actually provisions from the platform level (see the plan's
+// "Invitations: Principal-only" scoping decision).
+async function listInvitations(pool, {
+  limit, offset, status, search,
+} = {}) {
+  return principalInvitationRepository.listInvitations(pool, {
+    limit, offset, status, search,
+  });
+}
+
+async function listAuditLogs(pool, {
+  limit, offset, action, actorAdminId, fromDate, toDate,
+} = {}) {
+  return platformAuditLogRepository.listEntries(pool, {
+    limit, offset, action, actorAdminId, fromDate, toDate,
+  });
+}
+
+async function getSettings(pool) {
+  return platformSettingsRepository.getSettings(pool);
+}
+
+async function updateSettings(pool, {
+  platformName, supportEmail, defaultTimezone, dateFormat, itemsPerPage, actorAdminId, ipAddress,
+}) {
+  if (!platformName) {
+    throw new PlatformAdminValidationError('platformName is required');
+  }
+
+  const settings = await platformSettingsRepository.updateSettings(pool, {
+    platformName, supportEmail, defaultTimezone, dateFormat, itemsPerPage,
+  });
+
+  await platformAuditService.record(pool, {
+    actorAdminId,
+    action: 'settings.updated',
+    entity: 'platform_settings',
+    entityId: null,
+    ipAddress,
+    metadata: { platformName, defaultTimezone, dateFormat, itemsPerPage },
+  });
+
+  return settings;
+}
+
+// Dashboard summary — composed from several small, focused queries
+// (per-source repositories) rather than one large join, so each piece
+// stays readable and independently testable, per the plan's own
+// guidance for this endpoint.
+async function getDashboardSummary(pool) {
+  const [
+    organizationsCount, pendingInvitationsCount, trialCollegesCount,
+    activeUsersCount, recentColleges, recentActivity, systemHealth,
+  ] = [
+    await platformCollegeRepository.countColleges(pool),
+    await principalInvitationRepository.countPending(pool),
+    await platformCollegeRepository.countTrialColleges(pool),
+    await platformStatsRepository.sumActiveUsers(pool),
+    await platformCollegeRepository.recentColleges(pool, { limit: 5 }),
+    await platformAuditLogRepository.listEntries(pool, { limit: 5 }),
+    await platformStatsRepository.systemHealthSummary(pool),
+  ];
+
+  return {
+    organizationsCount,
+    pendingInvitationsCount,
+    trialCollegesCount,
+    activeUsersCount,
+    recentColleges,
+    recentActivity,
+    systemHealth,
   };
 }
 
@@ -264,4 +392,10 @@ module.exports = {
   invitePrincipal,
   resendPrincipalInvitation,
   revokePrincipalInvitation,
+  listColleges,
+  listInvitations,
+  listAuditLogs,
+  getSettings,
+  updateSettings,
+  getDashboardSummary,
 };

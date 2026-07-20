@@ -47,4 +47,16 @@ async function createCollege(client, { collegeId, name, subdomain, createdBy }) 
   return result.rows[0];
 }
 
-module.exports = { getPlatformAdminByUsername, bootstrapPlatformAdmin, createCollege };
+// Platform Admin module build, Phase B (plans/tingly-marinating-
+// whistle.md) — the scheduler (jobs/platformStatsSync.js) needs the
+// full set of college_ids to iterate for the tenant stats rollup.
+// Plain id list, no pagination: colleges are platform-admin-created
+// one at a time, nowhere near the row count that would need it.
+async function listCollegeIds(client) {
+  const result = await client.query('SELECT college_id FROM colleges ORDER BY college_id');
+  return result.rows.map((row) => row.college_id);
+}
+
+module.exports = {
+  getPlatformAdminByUsername, bootstrapPlatformAdmin, createCollege, listCollegeIds,
+};

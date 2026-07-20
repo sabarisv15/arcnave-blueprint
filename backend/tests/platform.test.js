@@ -165,6 +165,11 @@ test('platform API', async (t) => {
       await adminPool.query('DELETE FROM colleges WHERE college_id = $1', [cid]);
     }
     await adminPool.query('DELETE FROM colleges WHERE created_by = $1', [adminId]);
+    // platform_audit_log.actor_admin_id FKs platform_admins(id) — same
+    // "clean up the dependent audit row before the actor" discipline
+    // as audit_log.user_id below, just for the platform-side table
+    // (Platform Admin module build, Phase C).
+    await adminPool.query('DELETE FROM platform_audit_log WHERE actor_admin_id = $1', [adminId]);
     await adminPool.query('DELETE FROM platform_admins WHERE id = $1', [adminId]);
     // audit_log.user_id FKs users(id) — must go before the users
     // delete below (task #17's login audit logging writes a row here

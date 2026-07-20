@@ -30,4 +30,5 @@ async function request(path, { method = 'GET', body } = {}) {
 export const platformApi = {
   get: (path) => request(path, { method: 'GET' }),
   post: (path, body) => request(path, { method: 'POST', body }),
+  put: (path, body) => request(path, { method: 'PUT', body }),
 };
