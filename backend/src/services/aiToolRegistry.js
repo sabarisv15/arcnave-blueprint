@@ -660,7 +660,12 @@ registerTool({
   description: 'Looks up whether a category, department, and/or academic year name the user mentioned (e.g. '
     + '"ECE", "Circulars", "2026-2027") match real Institutional Documents data for this college. Read-only — '
     + 'never uploads or moves anything. Always call this BEFORE telling the user their document was saved '
-    + 'somewhere, and relay any "not found" field back to the user as a clarifying question rather than guessing.',
+    + 'somewhere, and relay any "not found" field back to the user as a clarifying question rather than guessing. '
+    + 'Call this when the user names an actual document destination — a category, department, or year — while '
+    + 'talking about saving/uploading/filing a document (e.g. "save this under Circulars", "put it in the ECE '
+    + 'folder", "file this for 2026-2027"). Only pass the fields the user actually named; never invent a category, '
+    + 'department, or year to fill a param the user did not mention. If the user is only asking to upload a file '
+    + 'with no destination named yet, do NOT call this tool — ask them which category it belongs to first.',
   allowedRoles: ['principal', 'hod', 'staff'],
   params: {
     type: 'object',

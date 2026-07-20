@@ -264,18 +264,18 @@ test('auth', async (t) => {
     assert.ok(capturedToken, 'expected sendPasswordResetEmail to have been called with a real token');
 
     const confirmResp = await post(baseUrl, '/api/v1/auth/password-reset/confirm', tenantHeaders, {
-      token: capturedToken, new_password: 'a-brand-new-password-456',
+      token: capturedToken, new_password: 'ABrandNewPassword-456',
     });
     assert.equal(confirmResp.status, 204);
 
     const oldPasswordLogin = await login(VALID_PASSWORD);
     assert.equal(oldPasswordLogin.status, 401);
 
-    const newPasswordLogin = await login('a-brand-new-password-456');
+    const newPasswordLogin = await login('ABrandNewPassword-456');
     assert.equal(newPasswordLogin.status, 200);
 
     const reuseResp = await post(baseUrl, '/api/v1/auth/password-reset/confirm', tenantHeaders, {
-      token: capturedToken, new_password: 'yet-another-password-789',
+      token: capturedToken, new_password: 'YetAnotherPassword-789',
     });
     assert.equal(reuseResp.status, 401);
   });

@@ -149,7 +149,7 @@ test('AuthService.requestPasswordReset / resetPassword (no DB)', async (t) => {
     t.after(() => lookupMock.mock.restore());
 
     await assert.rejects(
-      () => authService.resetPassword({}, { token: 'unknown', newPassword: 'new-password-123' }),
+      () => authService.resetPassword({}, { token: 'unknown', newPassword: 'NewPassword-123' }),
       authService.PasswordResetTokenError,
     );
   });
@@ -161,7 +161,7 @@ test('AuthService.requestPasswordReset / resetPassword (no DB)', async (t) => {
     t.after(() => lookupMock.mock.restore());
 
     await assert.rejects(
-      () => authService.resetPassword({}, { token: 'used-token', newPassword: 'new-password-123' }),
+      () => authService.resetPassword({}, { token: 'used-token', newPassword: 'NewPassword-123' }),
       authService.PasswordResetTokenError,
     );
   });
@@ -173,7 +173,7 @@ test('AuthService.requestPasswordReset / resetPassword (no DB)', async (t) => {
     t.after(() => lookupMock.mock.restore());
 
     await assert.rejects(
-      () => authService.resetPassword({}, { token: 'expired-token', newPassword: 'new-password-123' }),
+      () => authService.resetPassword({}, { token: 'expired-token', newPassword: 'NewPassword-123' }),
       authService.PasswordResetTokenError,
     );
   });
@@ -190,10 +190,10 @@ test('AuthService.requestPasswordReset / resetPassword (no DB)', async (t) => {
       markUsedMock.mock.restore();
     });
 
-    await authService.resetPassword({}, { token: 'valid-token', newPassword: 'new-password-123' });
+    await authService.resetPassword({}, { token: 'valid-token', newPassword: 'NewPassword-123' });
 
     assert.equal(updateMock.mock.calls[0].arguments[1], 'user-1');
-    assert.ok(await security.verifyPassword('new-password-123', updateMock.mock.calls[0].arguments[2]));
+    assert.ok(await security.verifyPassword('NewPassword-123', updateMock.mock.calls[0].arguments[2]));
     assert.equal(markUsedMock.mock.calls[0].arguments[1], 'prt-1');
   });
 });
