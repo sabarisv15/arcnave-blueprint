@@ -1,73 +1,144 @@
+import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import {
-  LayoutDashboard, Users, GraduationCap, BookOpen, CalendarCheck, Wallet,
-  FileText, BarChart3, ClipboardCheck, Bell, Sparkles, Archive, CalendarDays,
-  Settings, LogOut,
+  Settings, Bell, MoreHorizontal, LogOut, User,
 } from 'lucide-react';
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu';
 import { useAuth } from '@/hooks/useAuth';
 import { RoleGate } from './RoleGate';
 import { cn } from '@/lib/utils';
+import { notificationsApi } from '@/api/notifications';
 
-const NAV_ITEMS = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/students', label: 'Students', icon: Users },
-  { to: '/staff', label: 'Staff', icon: GraduationCap },
-  { to: '/academic', label: 'Academic', icon: BookOpen },
-  { to: '/attendance', label: 'Attendance', icon: CalendarCheck },
-  { to: '/finance', label: 'Finance', icon: Wallet },
-  { to: '/documents', label: 'Documents', icon: FileText },
-  { to: '/reports', label: 'Reports', icon: BarChart3, permission: 'reports.generate' },
-  { to: '/workflow/pending', label: 'Approvals', icon: ClipboardCheck },
-  { to: '/notifications', label: 'Notifications', icon: Bell, permission: 'notifications.read' },
-  { to: '/ai/copilot', label: 'AI Copilot', icon: Sparkles },
-  { to: '/analytics', label: 'Analytics', icon: BarChart3, permission: 'analytics.attendance_rate.read' },
-  { to: '/archival', label: 'Archival', icon: Archive },
-  { to: '/calendar', label: 'Calendar', icon: CalendarDays },
-  { to: '/settings/college-profile', label: 'Settings', icon: Settings, permission: 'college_profile.read' },
+const PRIMARY_NAV_ITEMS = [
+  { to: '/', label: 'Dashboard' },
+  { to: '/students', label: 'Students' },
+  { to: '/staff', label: 'Staff' },
+  { to: '/academic', label: 'Academic' },
+  { to: '/finance', label: 'Finance' },
+  { to: '/documents', label: 'Documents' },
+  { to: '/calendar', label: 'Calendar' },
+  { to: '/workflow/pending', label: 'Approvals' },
 ];
 
+const MORE_NAV_ITEMS = [
+  { to: '/attendance', label: 'Attendance' },
+  { to: '/reports', label: 'Reports', permission: 'reports.generate' },
+  { to: '/notifications', label: 'Notifications', permission: 'notifications.read' },
+  { to: '/ai/copilot', label: 'AI Copilot' },
+  { to: '/analytics', label: 'Analytics', permission: 'analytics.attendance_rate.read' },
+  { to: '/archival', label: 'Archival' },
+];
+
+function navLinkClass({ isActive }) {
+  return cn(
+    'rounded-full px-3.5 py-2 text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground',
+    isActive && 'bg-dark text-dark-foreground hover:text-dark-foreground',
+  );
+}
+
+function initials(value) {
+  if (!value) return '?';
+  return value.slice(0, 2).toUpperCase();
+}
+
 export function AppShell() {
-  const { user, logout } = useAuth();
+  const { user, logout, can } = useAuth();
+  const [moreOpen, setMoreOpen] = useState(false);
+
+  const { data: notifications } = useQuery({
+    queryKey: ['notifications'],
+    queryFn: notificationsApi.list,
+    enabled: can('notifications.read'),
+  });
+  const unreadCount = notifications?.length ?? 0;
 
   return (
-    <div className="flex min-h-screen bg-background text-foreground">
-      <aside className="hidden w-64 shrink-0 border-r border-border p-4 md:block">
-        <div className="mb-6 px-2 text-lg font-semibold">ARCNAVE</div>
-        <nav className="space-y-1">
-          {NAV_ITEMS.map(({ to, label, icon: Icon, permission }) => (
-            <RoleGate key={to} permission={permission}>
-              <NavLink
-                to={to}
-                className={({ isActive }) =>
-                  cn(
-                    'flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground',
-                    isActive && 'bg-accent text-accent-foreground',
-                  )
-                }
-              >
-                <Icon className="h-4 w-4" />
+    <div className="min-h-screen bg-page-gradient">
+      <div className="mx-auto flex max-w-[1600px] flex-col gap-4 p-3 sm:p-4">
+        <header className="flex flex-wrap items-center gap-3 px-2 py-1">
+          <div className="rounded-full border-[1.5px] border-foreground/70 px-4 py-2 text-[17px] font-bold tracking-tight">
+            ARCNAVE
+          </div>
+
+          <nav className="flex flex-1 flex-wrap items-center justify-center gap-1">
+            {PRIMARY_NAV_ITEMS.map(({ to, label }) => (
+              <NavLink key={to} to={to} end={to === '/'} className={navLinkClass}>
                 {label}
               </NavLink>
-            </RoleGate>
-          ))}
-        </nav>
-      </aside>
+            ))}
+            <DropdownMenu open={moreOpen} onOpenChange={setMoreOpen}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="flex items-center gap-1 rounded-full px-3.5 py-2 text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                  More
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="center">
+                {MORE_NAV_ITEMS.map(({ to, label, permission }) => (
+                  <RoleGate key={to} permission={permission}>
+                    <DropdownMenuItem asChild>
+                      <NavLink to={to} className="cursor-pointer">{label}</NavLink>
+                    </DropdownMenuItem>
+                  </RoleGate>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </nav>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 items-center justify-between border-b border-border px-4">
-          <div className="text-sm text-muted-foreground">
-            Signed in as <span className="font-medium text-foreground">{user?.role}</span>
+          <div className="flex shrink-0 items-center gap-2">
+            <RoleGate permission="college_profile.read">
+              <NavLink
+                to="/settings/college-profile"
+                className="flex items-center gap-1.5 rounded-full border-[1.5px] border-foreground/20 px-3.5 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent"
+              >
+                <Settings className="h-4 w-4" />
+                Setting
+              </NavLink>
+            </RoleGate>
+
+            <RoleGate permission="notifications.read">
+              <NavLink
+                to="/notifications"
+                className="relative flex h-10 w-10 items-center justify-center rounded-full bg-card shadow-sm transition-colors hover:bg-accent"
+              >
+                <Bell className="h-4 w-4" />
+                {unreadCount > 0 && (
+                  <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-gold-deep" />
+                )}
+              </NavLink>
+            </RoleGate>
+
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="flex h-10 w-10 items-center justify-center rounded-full bg-dark text-xs font-bold text-dark-foreground"
+                >
+                  {initials(user?.role)}
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem disabled className="opacity-100">
+                  <User className="h-4 w-4" />
+                  <span className="font-medium text-foreground">{user?.role}</span>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={logout} className="cursor-pointer text-destructive focus:text-destructive">
+                  <LogOut className="h-4 w-4" />
+                  Logout
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
-          <button
-            type="button"
-            onClick={logout}
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-          >
-            <LogOut className="h-4 w-4" />
-            Logout
-          </button>
         </header>
-        <main className="flex-1 overflow-auto p-6">
+
+        <main className="flex-1">
           <Outlet />
         </main>
       </div>
