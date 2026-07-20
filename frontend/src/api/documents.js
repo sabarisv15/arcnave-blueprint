@@ -22,4 +22,23 @@ export const documentsApi = {
   // filename handling but for a POST-with-body call.
   mergeTemplate: (id, fields, fallbackFileName) =>
     postForFile(`/documents/${id}/merge`, { fields }, fallbackFileName),
+
+  listInstitutional: ({
+    categoryId, academicYearId, departmentId, classId, search,
+  } = {}) => {
+    const params = new URLSearchParams();
+    if (categoryId) params.set('category_id', categoryId);
+    if (academicYearId) params.set('academic_year_id', academicYearId);
+    if (departmentId) params.set('department_id', departmentId);
+    if (classId) params.set('class_id', classId);
+    if (search) params.set('search', search);
+    const qs = params.toString();
+    return api.get(`/documents/institutional${qs ? `?${qs}` : ''}`);
+  },
+  uploadInstitutional: ({
+    title, categoryId, academicYearId, departmentId, classId, fileName, mimeType, fileBase64,
+  }) => api.post('/documents/institutional', {
+    title, category_id: categoryId, academic_year_id: academicYearId, department_id: departmentId, class_id: classId, file_name: fileName, mime_type: mimeType, file_base64: fileBase64,
+  }),
+  listInstitutionalDepartments: () => api.get('/documents/institutional/departments'),
 };

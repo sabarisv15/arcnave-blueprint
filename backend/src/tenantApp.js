@@ -19,6 +19,7 @@ const createTimetablePeriodsRouter = require('./routes/timetablePeriods');
 const createAttendanceRouter = require('./routes/attendance');
 const createFinanceRouter = require('./routes/finance');
 const createDocumentsRouter = require('./routes/documents');
+const createDocumentCategoriesRouter = require('./routes/documentCategories');
 const createReportsRouter = require('./routes/reports');
 const createBackgroundJobsRouter = require('./routes/backgroundJobs');
 const createWorkflowRequestsRouter = require('./routes/workflowRequests');
@@ -123,6 +124,7 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   app.use(createAttendanceRouter());
   app.use(createFinanceRouter());
   app.use(createDocumentsRouter());
+  app.use(createDocumentCategoriesRouter());
   app.use(createReportsRouter());
   app.use(createBackgroundJobsRouter());
   app.use(createWorkflowRequestsRouter());

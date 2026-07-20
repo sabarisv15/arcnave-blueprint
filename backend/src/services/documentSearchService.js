@@ -109,6 +109,23 @@ const PDF_MIME_TYPE = 'application/pdf';
 // college, not a student, so Internal.
 const DOC_TYPE_CLASSIFICATION = {
   [documentService.TEMPLATE_DOC_TYPE]: 'Internal',
+  // Institutional Documents Phase 1 default categories (see migration
+  // 1756400000000) — institution-wide, not personal/financial, so
+  // 'Internal' (visible to staff-role AI search too, not just hod/
+  // principal) rather than the DEFAULT_CLASSIFICATION fallback below,
+  // which would otherwise silently make e.g. a public circular
+  // invisible to staff-role AI search. A principal-created custom
+  // category not listed here still falls to DEFAULT_CLASSIFICATION
+  // until this map is extended for it — flagged, not solved, same
+  // "known values documented here, not enforced by the DB" restraint
+  // this file's own header comment already takes.
+  curriculum: 'Internal',
+  circular: 'Internal',
+  academic_calendar: 'Internal',
+  examination: 'Internal',
+  policies: 'Internal',
+  forms: 'Internal',
+  notices: 'Internal',
   scholarship_cert: 'Restricted',
   income_cert: 'Restricted',
   community_cert: 'Restricted',

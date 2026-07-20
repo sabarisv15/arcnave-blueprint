@@ -30,6 +30,8 @@ const auditLogRepository = require('../repositories/auditLogRepository');
 const fileStorage = require('../storage/fileStorage');
 const templateMerger = require('../generators/templateMerger');
 const visibilityService = require('./visibilityService');
+const documentCategoryService = require('./documentCategoryService');
+const academicYearService = require('./academicYearService');
 
 // Missing studentId, docType, fileName, mimeType, fileBuffer, or
 // actorUserId — documents' own NOT NULL columns, plus the actor
@@ -60,6 +62,12 @@ const VALID_REVIEW_STATUSES = ['verified', 'rejected'];
 // to the college, not to any one student -- documents.student_id has
 // been nullable since 1752800000000).
 const TEMPLATE_DOC_TYPE = 'template';
+
+// uploadInstitutionalDocument was asked for a categoryId that doesn't
+// resolve to a real document_categories row (bogus id, or a real id
+// from a different tenant — RLS already prevents that read from
+// returning a row at all, so this covers both cases identically).
+class DocumentCategoryNotFoundError extends Error {}
 
 // The one doc_type value CLAUDE.md rule 8 singles out — never used for
 // identity, dedup, import, search, AI reasoning, or reporting.
@@ -112,8 +120,17 @@ function assertValidReviewStatus(status) {
 // classId isn't given its own domain error here — no caller in this
 // codebase passes a classId yet outside examinationService, which
 // already resolves and validates the class itself before calling this.
+// title/academicYearId/departmentId/categoryId (Institutional
+// Documents Phase 1): all optional here — every existing caller
+// (per-student uploads, templates, merged reports) simply never sets
+// them and documentRepository.create's own COLUMNS-filter already
+// omits any key that's undefined, so this is purely additive. Callers
+// that DO want them required for their own use case (institutional
+// uploads) enforce that themselves before calling this — the same
+// "role check/shape check happens at the specific wrapper, the shared
+// write path stays permissive" split uploadTemplate already uses.
 async function uploadDocument(client, {
-  collegeId, studentId, classId, docType, fileName, mimeType, fileBuffer,
+  collegeId, studentId, classId, docType, title, academicYearId, departmentId, categoryId, fileName, mimeType, fileBuffer,
 }, { actorUserId } = {}) {
   if (!docType || !fileName || !mimeType || !fileBuffer || !actorUserId) {
     throw new DocumentValidationError('docType, fileName, mimeType, fileBuffer, and actorUserId are required');
@@ -129,6 +146,10 @@ async function uploadDocument(client, {
       studentId,
       classId,
       docType,
+      title,
+      academicYearId,
+      departmentId,
+      categoryId,
       fileName,
       storagePath,
       mimeType,
@@ -203,6 +224,76 @@ async function listDocumentsForStudent(client, studentId) {
 
 async function listDocumentsForClass(client, classId) {
   return documentRepository.findByClassId(client, classId);
+}
+
+// Thin wrapper over uploadDocument fixing studentId=null — same
+// "delegates to the one real write path, narrows what a caller here
+// can forge" shape uploadTemplate already establishes for its own
+// doc_type. Institutional Documents Phase 1: title and categoryId are
+// required (a real, per-college document_categories row this college
+// actually owns — RLS means a categoryId from another tenant simply
+// resolves to null here, same as any other cross-tenant id lookup in
+// this codebase); doc_type is derived from the resolved category's own
+// slug, never caller-supplied directly, so the existing doc_type-keyed
+// AI classification map keeps working without a caller needing to know
+// that convention exists. academicYearId defaults to the college's
+// current Active academic year when omitted (matches the product
+// decision that Academic Year should default, not be forced) — left
+// null if no year is Active yet, rather than erroring; departmentId/
+// classId stay optional (nullable = college-wide / not class-specific).
+async function uploadInstitutionalDocument(client, {
+  collegeId, title, categoryId, academicYearId, departmentId, classId, fileName, mimeType, fileBuffer,
+}, { actorUserId } = {}) {
+  if (!title || !String(title).trim()) {
+    throw new DocumentValidationError('title is required');
+  }
+  if (!categoryId) {
+    throw new DocumentValidationError('categoryId is required');
+  }
+
+  const category = await documentCategoryService.getCategory(client, categoryId);
+  if (category === null) {
+    throw new DocumentCategoryNotFoundError(`no document category found with id ${JSON.stringify(categoryId)}`);
+  }
+
+  let resolvedAcademicYearId = academicYearId;
+  if (resolvedAcademicYearId === undefined || resolvedAcademicYearId === null) {
+    const activeYear = await academicYearService.getActiveAcademicYear(client, collegeId);
+    resolvedAcademicYearId = activeYear ? activeYear.id : null;
+  }
+
+  return uploadDocument(
+    client,
+    {
+      collegeId,
+      studentId: null,
+      classId,
+      docType: category.slug,
+      title: title.trim(),
+      academicYearId: resolvedAcademicYearId,
+      departmentId,
+      categoryId,
+      fileName,
+      mimeType,
+      fileBuffer,
+    },
+    { actorUserId },
+  );
+}
+
+// requireAuth-level read (see routes/documents.js) — same "browsing a
+// pre-narrowed institutional catalog is open to any authenticated
+// tenant user" reasoning listTemplates already applies. Institutional
+// Documents Phase 1's own faceted browse: any combination of
+// categoryId/academicYearId/departmentId/classId/search, all optional
+// — a pure passthrough to the repository, no business logic of its
+// own to add here (unlike upload, a read has no invariant to protect).
+async function listInstitutionalDocuments(client, {
+  docType, classId, categoryId, academicYearId, departmentId, search,
+} = {}) {
+  return documentRepository.findInstitutional(client, {
+    docType, classId, categoryId, academicYearId, departmentId, search,
+  });
 }
 
 async function getLatestDocumentForStudentAndType(client, studentId, docType) {
@@ -389,13 +480,16 @@ module.exports = {
   DocumentNotATemplateError,
   DocumentInvalidTemplateError,
   DocumentNotAuthorizedError,
+  DocumentCategoryNotFoundError,
   TEMPLATE_DOC_TYPE,
   AADHAAR_DOC_TYPE,
   uploadDocument,
   uploadTemplate,
+  uploadInstitutionalDocument,
   mergeTemplate: templateMerger.mergeTemplate,
   mergeDocumentTemplate,
   listTemplates,
+  listInstitutionalDocuments,
   getDocument,
   downloadDocument,
   listDocumentsForStudent,

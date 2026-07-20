@@ -32,6 +32,7 @@
 
 const academicYearRepository = require('../repositories/academicYearRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
+const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
 
 // Missing collegeId or yearLabel — academic_years' own NOT NULL
 // columns (aside from college_id, which always comes from tenant-
@@ -105,6 +106,24 @@ async function getActiveAcademicYear(client, collegeId) {
 
 async function listAcademicYears(client, { limit, offset } = {}) {
   return academicYearRepository.list(client, { limit, offset });
+}
+
+// resolveAcademicYearId: mirrors academicService.resolveClassId —
+// given either a real academic year id or a human-readable
+// year_label (e.g. "2026-2027"), returns the real id, or throws
+// IdentifierResolutionError. ARCNAVE AI's own document-upload tools
+// are the first caller.
+async function resolveAcademicYearId(client, collegeId, identifier) {
+  if (isUuid(identifier)) {
+    return identifier;
+  }
+  const academicYear = await academicYearRepository.findByCollegeAndYearLabel(client, collegeId, identifier);
+  if (academicYear === null) {
+    throw new IdentifierResolutionError(
+      `no academic year found named ${JSON.stringify(identifier)} in this college`,
+    );
+  }
+  return academicYear.id;
 }
 
 async function loadAcademicYearOrThrow(client, id) {
@@ -201,6 +220,7 @@ module.exports = {
   getAcademicYear,
   getActiveAcademicYear,
   listAcademicYears,
+  resolveAcademicYearId,
   activateAcademicYear,
   closeAcademicYear,
   archiveAcademicYear,

@@ -194,7 +194,15 @@ async function askAgent(client, question, { actor } = {}) {
     throw new AiServiceValidationError('question is required and must be a non-empty string');
   }
 
-  const tools = aiToolRegistry.listTools();
+  // excludeHumanOnly: true — upload_institutional_document is
+  // deliberately never in this list (see its own registry comment):
+  // the LLM may propose+resolve a destination (resolve_document_
+  // destination, a normal L1 tool, stays in this list) but must never
+  // autonomously execute the actual write in the same turn. The human
+  // confirms via an explicit POST /ai/tools/upload_institutional_document/invoke
+  // call the frontend makes only after a user click — a real gate, not
+  // just registry metadata a handler could ignore.
+  const tools = aiToolRegistry.listTools({ excludeHumanOnly: true });
   const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, actor.collegeId);
   const decision = await adapter.completeWithTools(aiConfig, {
     systemPrompt: AGENT_SYSTEM_PROMPT,

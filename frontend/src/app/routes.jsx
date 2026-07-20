@@ -21,6 +21,7 @@ import { CalendarPage } from '@/features/academic/pages/CalendarPage';
 import { AttendancePage } from '@/features/attendance/pages/AttendancePage';
 import { FinancePage } from '@/features/finance/pages/FinancePage';
 import { DocumentsPage } from '@/features/documents/pages/DocumentsPage';
+import { InstitutionalDocumentsPage } from '@/features/institutionalDocuments/pages/InstitutionalDocumentsPage';
 import { ReportsPage } from '@/features/reports/pages/ReportsPage';
 import { PendingApprovalsPage } from '@/features/workflow/pages/PendingApprovalsPage';
 import { NotificationsPage } from '@/features/workflow/pages/NotificationsPage';
@@ -66,10 +67,10 @@ export const router = createBrowserRouter([
           { path: '/attendance', element: <AttendancePage /> },
           { path: '/finance', element: <FinancePage /> },
           { path: '/documents', element: <DocumentsPage /> },
+          { path: '/institutional-documents', element: <InstitutionalDocumentsPage /> },
           { path: '/reports', element: <ReportsPage /> },
           { path: '/workflow/pending', element: <PendingApprovalsPage /> },
           { path: '/notifications', element: <NotificationsPage /> },
-          { path: '/ai/copilot', element: <CopilotPage /> },
           { path: '/analytics', element: <AnalyticsPage /> },
           { path: '/archival', element: <ArchivalPage /> },
           { path: '/calendar', element: <CalendarPage /> },
@@ -79,6 +80,16 @@ export const router = createBrowserRouter([
           { path: '/settings/background-jobs', element: <BackgroundJobsPage /> },
         ],
       },
+    ],
+  },
+
+  // ARCNAVE AI — its own full-bleed workspace shell (sidebar +
+  // composer), not nested inside AppShell's top-nav chrome, same
+  // pattern as the Platform Admin app group below.
+  {
+    element: <ProtectedRoute />,
+    children: [
+      { path: '/ai/copilot', element: <CopilotPage /> },
     ],
   },
 
