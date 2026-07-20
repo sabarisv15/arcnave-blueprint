@@ -86,6 +86,27 @@ function mapDocumentServiceError(err, res) {
     res.status(403).json({ detail: err.message });
     return true;
   }
+  // Institutional Documents Phase 3
+  if (err instanceof documentService.DocumentDuplicateDetectedError) {
+    res.status(409).json({ detail: err.message, duplicates: err.duplicates });
+    return true;
+  }
+  if (err instanceof documentService.DocumentVersionNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof documentService.DocumentLineageError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof documentService.DocumentPublicationStateError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof documentService.DocumentNoPendingRequestError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -195,6 +216,14 @@ function createDocumentsRouter() {
   // rows (never a caller-supplied doc_type directly), same "the route
   // can't forge more than the service allows" shape
   // /documents/templates already establishes for its own doc_type.
+  // document_group_id (Phase 3, task #1): when the caller passes it,
+  // this upload becomes a new version of that existing logical
+  // document instead of a brand-new one — same
+  // requirePermission('documents.institutional.upload') gate, no new
+  // permission needed since it's still the same "upload into the
+  // repository" action. confirm_upload (task #3) lets a caller push
+  // past a detected duplicate after the user has seen the warning
+  // (the 409 DocumentDuplicateDetectedError response below).
   router.post('/documents/institutional', requirePermission('documents.institutional.upload'), express.json({ limit: '15mb' }), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const {
@@ -206,6 +235,8 @@ function createDocumentsRouter() {
       class_id: classId,
       file_name: fileName,
       mime_type: mimeType,
+      document_group_id: documentGroupId,
+      confirm_upload: confirmUpload,
     } = req.body || {};
     if (typeof fileBase64 !== 'string' || fileBase64.length === 0) {
       res.status(400).json({ detail: 'file_base64 is required' });
@@ -225,6 +256,8 @@ function createDocumentsRouter() {
           fileName,
           mimeType,
           fileBuffer: Buffer.from(fileBase64, 'base64'),
+          documentGroupId,
+          confirmUpload: Boolean(confirmUpload),
         },
         { actorUserId: req.jwtClaims.sub },
       );
@@ -247,10 +280,139 @@ function createDocumentsRouter() {
     const {
       doc_type: docType, class_id: classId, category_id: categoryId, academic_year_id: academicYearId, department_id: departmentId, search,
     } = req.query;
-    const documents = await documentService.listInstitutionalDocuments(req.dbClient, {
-      docType, classId, categoryId, academicYearId, departmentId, search,
-    });
+    const documents = await documentService.listInstitutionalDocuments(
+      req.dbClient,
+      {
+        docType, classId, categoryId, academicYearId, departmentId, search,
+      },
+      { actorRole: req.jwtClaims.role },
+    );
     res.json(documents);
+  }));
+
+  // Compare two versions' metadata (and content, where feasible) —
+  // task #1's own "compare/diff" requirement. Query params, not a
+  // path, since this is a read comparing two arbitrary ids, not
+  // resolving one resource. Registered BEFORE the /versions/:groupId
+  // route below: Express matches routes in registration order, and
+  // '/versions/compare' would otherwise be swallowed by ':groupId'
+  // (with groupId literally 'compare') if that route came first.
+  router.get('/documents/institutional/versions/compare', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const { a, b } = req.query;
+    if (!a || !b) {
+      res.status(400).json({ detail: 'query parameters a and b (document ids) are required' });
+      return;
+    }
+    try {
+      const comparison = await documentService.compareDocumentVersions(req.dbClient, a, b);
+      res.json(comparison);
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // Version history (task #1) — every version sharing this
+  // document_group_id, newest first. requireAuth: a version-history
+  // read carries the same reach as browsing the repository itself
+  // (GET /documents/institutional above); assertCanViewDocument's own
+  // publication_status gate is not re-applied per-row here because
+  // version history is a staff-tier-only feature in the frontend (see
+  // the UI's own RoleGate) — no route in this codebase yet lets a
+  // non-staff-tier actor reach this path, and doing so would still
+  // only ever surface Draft/Superseded rows, never a write.
+  router.get('/documents/institutional/versions/:groupId', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const versions = await documentService.getVersionHistory(req.dbClient, req.params.groupId);
+    res.json(versions);
+  }));
+
+  // Cross-year lineage (task #2). POST links documentId (this year's
+  // document) to previous_year_document_id (the prior year's
+  // equivalent) — same permission as uploading into the repository,
+  // since this is a metadata edit on an institutional document, not a
+  // new write path with its own risk profile.
+  router.post('/documents/institutional/:id/lineage', requirePermission('documents.institutional.upload'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const document = await documentService.linkDocumentLineage(
+        req.dbClient,
+        { documentId: req.params.id, previousYearDocumentId: (req.body || {}).previous_year_document_id },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.json(document);
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.get('/documents/institutional/:id/lineage', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const lineage = await documentService.getDocumentLineage(req.dbClient, req.params.id);
+      res.json(lineage);
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // Publish / supersede lifecycle (task #4) — both submit a
+  // WorkflowService approval request; the actual state transition only
+  // ever happens via workflowService.approveRequest resolving through
+  // routes/workflowRequests.js's own dispatch (entity_type
+  // 'institutional_document_publish'/'institutional_document_supersede'
+  // — see that file's own updated dispatch table), never directly from
+  // this route. Same permission as uploading: submitting FOR approval
+  // is not itself the privileged action, approving is (gated by
+  // WorkflowService's own approver_chain, principal-only here).
+  router.post('/documents/institutional/:id/publish', requirePermission('documents.institutional.upload'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const request = await documentService.submitPublishRequest(
+        req.dbClient,
+        req.params.id,
+        { requestedByUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(request);
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.post('/documents/institutional/:id/supersede', requirePermission('documents.institutional.upload'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const request = await documentService.submitSupersedeRequest(
+        req.dbClient,
+        req.params.id,
+        { requestedByUserId: req.jwtClaims.sub, reason: (req.body || {}).reason },
+      );
+      res.status(201).json(request);
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // Archive: a direct action, no WorkflowService submission — see
+  // documentService.archiveInstitutionalDocument's own header comment.
+  router.post('/documents/institutional/:id/archive', requirePermission('documents.institutional.upload'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const document = await documentService.archiveInstitutionalDocument(
+        req.dbClient,
+        req.params.id,
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.json(document);
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
   }));
 
   // requireAuth, not gated by departments.read (principal-only —

@@ -39,6 +39,15 @@ const COLUMNS = [
   ['verifiedByUserId', 'verified_by_user_id'],
   ['verifiedAt', 'verified_at'],
   ['remarks', 'remarks'],
+  // Institutional Documents Phase 3 — see the migration's own file
+  // comment for what each of these means.
+  ['publicationStatus', 'publication_status'],
+  ['documentGroupId', 'document_group_id'],
+  ['versionNumber', 'version_number'],
+  ['lineageParentId', 'lineage_parent_id'],
+  ['contentHash', 'content_hash'],
+  ['supersededAt', 'superseded_at'],
+  ['archivedAt', 'archived_at'],
 ];
 
 async function create(client, fields) {
@@ -118,8 +127,15 @@ async function findByClassId(client, classId) {
 // kept for the AI-search classification path (documentSearchService.js
 // still keys off it), not exposed as a separate UI facet now that
 // categoryId supersedes it for browsing.
+// publicationStatuses (Institutional Documents Phase 3, task #5 —
+// student-facing publishing): an optional allow-list of
+// documents.publication_status values, e.g. ['Published'] for a
+// student-tier caller vs. undefined (no filter, every status) for a
+// staff-tier one. `= ANY($n)` against a plain array param, same
+// pattern absent_student_ids-style array filters already use
+// elsewhere in this codebase — never string-built into the query.
 async function findInstitutional(client, {
-  docType, classId, categoryId, academicYearId, departmentId, search,
+  docType, classId, categoryId, academicYearId, departmentId, search, publicationStatuses,
 } = {}) {
   const conditions = ['student_id IS NULL', 'deleted_at IS NULL'];
   const values = [];
@@ -147,12 +163,119 @@ async function findInstitutional(client, {
     values.push(`%${search}%`);
     conditions.push(`(title ILIKE $${values.length} OR file_name ILIKE $${values.length})`);
   }
+  if (publicationStatuses !== undefined) {
+    values.push(publicationStatuses);
+    conditions.push(`publication_status = ANY($${values.length})`);
+  }
 
   const result = await client.query(
     `SELECT * FROM documents
      WHERE ${conditions.join(' AND ')}
      ORDER BY created_at DESC`,
     values,
+  );
+  return result.rows;
+}
+
+// Version history (task #1): every non-deleted row sharing a
+// document_group_id, newest version first — the natural "what
+// versions exist for this logical document" listing.
+async function findByGroupId(client, documentGroupId) {
+  const result = await client.query(
+    `SELECT * FROM documents
+     WHERE document_group_id = $1 AND deleted_at IS NULL
+     ORDER BY version_number DESC`,
+    [documentGroupId],
+  );
+  return result.rows;
+}
+
+// "The current version" of a logical document — highest version_number
+// still live in the group. Used to resolve where a new upload's
+// version_number/predecessor metadata should chain from, and as the
+// default target when a caller says "publish this document" without
+// naming a specific version row.
+async function findLatestInGroup(client, documentGroupId) {
+  const result = await client.query(
+    `SELECT * FROM documents
+     WHERE document_group_id = $1 AND deleted_at IS NULL
+     ORDER BY version_number DESC
+     LIMIT 1`,
+    [documentGroupId],
+  );
+  return result.rows[0] || null;
+}
+
+// Exact-duplicate detection (task #3): same tenant, same file bytes
+// (content_hash), any institutional document not already soft-deleted.
+// excludeGroupId lets a caller uploading a NEW VERSION of an existing
+// logical document skip flagging its own group as a "duplicate" of
+// itself (re-uploading byte-identical content as an intentional new
+// version, e.g. a metadata-only correction, is not the same situation
+// as an accidental duplicate upload).
+async function findByContentHash(client, { collegeId, contentHash, excludeGroupId }) {
+  const conditions = [
+    'college_id = $1', 'student_id IS NULL', 'deleted_at IS NULL', 'content_hash = $2',
+  ];
+  const values = [collegeId, contentHash];
+  if (excludeGroupId !== undefined) {
+    values.push(excludeGroupId);
+    conditions.push(`document_group_id <> $${values.length}`);
+  }
+  const result = await client.query(
+    `SELECT * FROM documents WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC`,
+    values,
+  );
+  return result.rows;
+}
+
+// Probable-duplicate detection (task #3's "title+category+year
+// similarity" leg) — same college, same category, same academic year
+// (or both NULL), a case-insensitive title match, not already deleted,
+// excluding the caller's own group. Deliberately narrower than a fuzzy
+// text-similarity search (no pg_trgm dependency introduced for this
+// slice) — an exact-title-ignoring-case match within the same
+// category/year is already a strong, low-noise signal for "this is
+// probably the same document," without the false-positive risk a
+// broad free-text match would add.
+async function findSimilarInstitutional(client, {
+  collegeId, title, categoryId, academicYearId, excludeGroupId,
+}) {
+  const conditions = [
+    'college_id = $1', 'student_id IS NULL', 'deleted_at IS NULL', 'lower(title) = lower($2)',
+  ];
+  const values = [collegeId, title];
+  if (categoryId !== undefined && categoryId !== null) {
+    values.push(categoryId);
+    conditions.push(`category_id = $${values.length}`);
+  }
+  if (academicYearId !== undefined && academicYearId !== null) {
+    values.push(academicYearId);
+    conditions.push(`academic_year_id = $${values.length}`);
+  } else {
+    conditions.push('academic_year_id IS NULL');
+  }
+  if (excludeGroupId !== undefined) {
+    values.push(excludeGroupId);
+    conditions.push(`document_group_id <> $${values.length}`);
+  }
+  const result = await client.query(
+    `SELECT * FROM documents WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC`,
+    values,
+  );
+  return result.rows;
+}
+
+// Cross-year lineage (task #2), forward direction — "what document(s)
+// name THIS one as their prior-year predecessor." The reverse
+// direction (ancestor) is just documentRepository.findById on the
+// row's own lineage_parent_id — no separate query needed for that leg.
+async function findByLineageParentId(client, documentId) {
+  const result = await client.query(
+    `SELECT * FROM documents
+     WHERE lineage_parent_id = $1 AND deleted_at IS NULL
+     ORDER BY created_at DESC`,
+    [documentId],
   );
   return result.rows;
 }
@@ -216,6 +339,11 @@ module.exports = {
   findInstitutional,
   findLatestByStudentAndType,
   findByDocType,
+  findByGroupId,
+  findLatestInGroup,
+  findByContentHash,
+  findSimilarInstitutional,
+  findByLineageParentId,
   update,
   softDelete,
   list,
