@@ -84,8 +84,12 @@ class InvitationInvalidError extends Error {}
 // this username is already taken in the invitation's own college.
 class InvitationUsernameConflictError extends Error {}
 
-async function issueTokenPair(client, { collegeId, userId, role }) {
-  const accessToken = security.createAccessToken({ userId, collegeId, role });
+async function issueTokenPair(client, {
+  collegeId, userId, role, tokenVersion,
+}) {
+  const accessToken = security.createAccessToken({
+    userId, collegeId, role, tokenVersion,
+  });
   const refreshToken = security.generateRefreshToken();
   const expiresAt = new Date(Date.now() + config.refreshTokenExpireDays * 24 * 60 * 60 * 1000);
   await authRepository.createRefreshToken(client, {
@@ -238,7 +242,9 @@ async function verifyMfaLogin(client, { challengeId, code }) {
     metadata: { result: 'success', mfa: true },
   });
 
-  return issueTokenPair(client, { collegeId: user.college_id, userId: user.id, role: user.role });
+  return issueTokenPair(client, {
+    collegeId: user.college_id, userId: user.id, role: user.role, tokenVersion: user.token_version,
+  });
 }
 
 // Business rule task #19's self-opt-in half: meaningful only under
@@ -339,7 +345,9 @@ async function login(client, { collegeId, username, password }) {
     metadata: { result: 'success' },
   });
 
-  return issueTokenPair(client, { collegeId: user.college_id, userId: user.id, role: user.role });
+  return issueTokenPair(client, {
+    collegeId: user.college_id, userId: user.id, role: user.role, tokenVersion: user.token_version,
+  });
 }
 
 async function refresh(client, rawRefreshToken) {
@@ -390,7 +398,9 @@ async function refresh(client, rawRefreshToken) {
   }
 
   await authRepository.revokeRefreshToken(client, stored.id);
-  return issueTokenPair(client, { collegeId: user.college_id, userId: user.id, role: user.role });
+  return issueTokenPair(client, {
+    collegeId: user.college_id, userId: user.id, role: user.role, tokenVersion: user.token_version,
+  });
 }
 
 // Logout. Idempotent and deliberately silent either way (no error for
@@ -476,6 +486,31 @@ async function resetPassword(client, { token, newPassword }) {
 
   await authRepository.updatePasswordHash(client, stored.user_id, await security.hashPassword(newPassword));
   await authRepository.markPasswordResetTokenUsed(client, stored.id);
+
+  // ADR-024: a password reset must revoke every session already
+  // issued for this account, not just change what a future login
+  // would hash-compare against — an already-issued access JWT stays
+  // valid on its own until natural expiry, and a stolen refresh token
+  // would otherwise still mint fresh ones. Bumping token_version
+  // invalidates every live access token the next time
+  // sessionRevocationMiddleware checks it (once
+  // SESSION_REVOCATION_ENFORCED=true); revoking every refresh token
+  // closes the other half — a reset with only one of these two would
+  // leave a real gap (see ADR-021's "best-effort multi-step process"
+  // alternative, rejected for exactly this reason).
+  await authRepository.incrementTokenVersion(client, stored.user_id);
+  await authRepository.revokeAllRefreshTokensForUser(client, stored.user_id);
+}
+
+// middleware/sessionRevocation.js's one dependency on this service —
+// kept here rather than a direct repository call from the middleware,
+// same "middleware calls a service, not a repository" shape
+// middleware/actorContext.js already establishes for buildActorContext.
+// Returns null for an unknown userId (see
+// authRepository.getTokenVersion) so a forged/stale sub claim fails
+// the middleware's comparison rather than throwing.
+async function getCurrentTokenVersion(client, userId) {
+  return authRepository.getTokenVersion(client, userId);
 }
 
 // Module 8: the "login is enabled only once credentials exist" moment
@@ -599,6 +634,7 @@ module.exports = {
   revoke,
   requestPasswordReset,
   resetPassword,
+  getCurrentTokenVersion,
   activateUser,
   deactivateUser,
   lookupPendingInvitation,

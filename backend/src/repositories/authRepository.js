@@ -24,7 +24,7 @@ async function createUser(client, { collegeId, username, email, passwordHash, ro
 
 async function getUserByUsername(client, collegeId, username) {
   const result = await client.query(
-    `SELECT id, college_id, username, email, password_hash, role, is_active, mfa_enabled
+    `SELECT id, college_id, username, email, password_hash, role, is_active, mfa_enabled, token_version
      FROM users WHERE college_id = $1 AND username = $2`,
     [collegeId, username],
   );
@@ -33,11 +33,50 @@ async function getUserByUsername(client, collegeId, username) {
 
 async function getUserById(client, userId) {
   const result = await client.query(
-    `SELECT id, college_id, username, email, password_hash, role, is_active, mfa_enabled
+    `SELECT id, college_id, username, email, password_hash, role, is_active, mfa_enabled, token_version
      FROM users WHERE id = $1`,
     [userId],
   );
   return result.rows[0] || null;
+}
+
+// ADR-024 (Session revocation): the one thing
+// middleware/sessionRevocation.js needs per request — just the current
+// counter, not the whole row. Returns null for an unknown userId (a
+// stale/forged sub claim) so the middleware's comparison against
+// claims.token_version fails closed rather than throwing.
+async function getTokenVersion(client, userId) {
+  const result = await client.query('SELECT token_version FROM users WHERE id = $1', [userId]);
+  return result.rows[0] ? result.rows[0].token_version : null;
+}
+
+// Bumps token_version by exactly one (never a blind SET to a caller-
+// supplied number) — this is what actually revokes every access token
+// already issued for this user the moment
+// SESSION_REVOCATION_ENFORCED=true, since none of them will ever again
+// carry the new value. Called by authService.resetPassword alongside
+// revokeAllRefreshTokensForUser below (belt-and-suspenders, same
+// reasoning ADR-021's reassignment lifecycle gives for doing both).
+async function incrementTokenVersion(client, userId) {
+  const result = await client.query(
+    'UPDATE users SET token_version = token_version + 1 WHERE id = $1 RETURNING token_version',
+    [userId],
+  );
+  return result.rows[0] ? result.rows[0].token_version : null;
+}
+
+// The bulk half of ADR-024's "revocable individually or in bulk per
+// account": revokeRefreshToken (below) already does the individual
+// case (logout, refresh rotation); this is the "every outstanding
+// refresh token for this account, in one action" case a password
+// reset needs. Only touches not-yet-revoked rows, same idempotent
+// intent revokeRefreshToken's own WHERE clause has at the single-row
+// level.
+async function revokeAllRefreshTokensForUser(client, userId) {
+  await client.query(
+    'UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL',
+    [userId],
+  );
 }
 
 // requestPasswordReset's own lookup: a user identifies themselves by
@@ -165,6 +204,9 @@ module.exports = {
   activateUser,
   deactivateUser,
   setMfaEnabled,
+  getTokenVersion,
+  incrementTokenVersion,
+  revokeAllRefreshTokensForUser,
   createRefreshToken,
   getRefreshTokenByHash,
   revokeRefreshToken,

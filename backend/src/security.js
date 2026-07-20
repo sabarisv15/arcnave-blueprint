@@ -45,9 +45,19 @@ async function needsRehash(passwordHash) {
   return argon2.needsRehash(passwordHash);
 }
 
-function createAccessToken({ userId, collegeId, role }) {
+// tokenVersion: embeds the users.token_version (ADR-024) the token was
+// minted with, so a later reset can invalidate it. Defaults to 0 for
+// any caller that doesn't pass one (e.g. existing tests written before
+// this column existed) — 0 is also every pre-existing user's actual
+// column value, so this default doesn't change what a decoded claim
+// means for a caller that never opts into passing it explicitly.
+function createAccessToken({
+  userId, collegeId, role, tokenVersion = 0,
+}) {
   return jwt.sign(
-    { sub: userId, college_id: collegeId, role, type: 'access' },
+    {
+      sub: userId, college_id: collegeId, role, token_version: tokenVersion, type: 'access',
+    },
     config.jwtSecretKey,
     { algorithm: config.jwtAlgorithm, expiresIn: `${config.accessTokenExpireMinutes}m` },
   );

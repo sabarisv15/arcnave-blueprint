@@ -6,6 +6,7 @@ const asyncHandler = require('./middleware/asyncHandler');
 const { requestContextMiddleware } = require('./middleware/requestContext');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
+const { sessionRevocationMiddleware } = require('./middleware/sessionRevocation');
 const errorHandler = require('./middleware/errorHandler');
 const createAuthRouter = require('./routes/auth');
 const createConfigurationsRouter = require('./routes/configurations');
@@ -93,6 +94,11 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   // Python/Starlette port).
   app.use(authMiddleware);
   app.use(asyncHandler(tenantMiddleware));
+  // ADR-024/Phase 0: after tenantMiddleware so req.dbClient (the
+  // tenant-scoped transaction) exists to read token_version through —
+  // see middleware/sessionRevocation.js's own docstring for why this
+  // ordering is load-bearing, not incidental.
+  app.use(asyncHandler(sessionRevocationMiddleware));
 
   // Proves the whole resolve -> set_tenant_context -> route-handler
   // pipeline actually reaches Postgres: reads current_setting() back
