@@ -26,6 +26,8 @@ const fileStorage = require('../src/storage/fileStorage');
 const templateMerger = require('../src/generators/templateMerger');
 const documentService = require('../src/services/documentService');
 const visibilityService = require('../src/services/visibilityService');
+const documentCategoryService = require('../src/services/documentCategoryService');
+const academicYearService = require('../src/services/academicYearService');
 
 function buildFakeDocxBuffer() {
   const zip = new PizZip();
@@ -237,6 +239,80 @@ test('DocumentService validation, actor stamping, and audit logging (no DB, no f
     }, { actorUserId: 'u1' });
 
     assert.equal(createMock.mock.callCount(), 1);
+  });
+
+  await t.test('uploadInstitutionalDocument rejects a missing title, without touching storage or the DB', async () => {
+    const { buildPathMock, createMock } = mockHappyPath(t);
+
+    await assert.rejects(
+      () => documentService.uploadInstitutionalDocument({}, {
+        collegeId: 'c1', categoryId: 'cat-1', fileName: 'a.pdf', mimeType: 'application/pdf', fileBuffer: Buffer.from('x'),
+      }, { actorUserId: 'u1' }),
+      documentService.DocumentValidationError,
+    );
+    assert.equal(buildPathMock.mock.callCount(), 0);
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('uploadInstitutionalDocument rejects a categoryId that does not resolve to a real category', async () => {
+    const { createMock } = mockHappyPath(t);
+    const getCategoryMock = t.mock.method(documentCategoryService, 'getCategory', async () => null);
+    t.after(() => getCategoryMock.mock.restore());
+
+    await assert.rejects(
+      () => documentService.uploadInstitutionalDocument({}, {
+        collegeId: 'c1', title: 'Notice', categoryId: 'bogus', fileName: 'a.pdf', mimeType: 'application/pdf', fileBuffer: Buffer.from('x'),
+      }, { actorUserId: 'u1' }),
+      documentService.DocumentCategoryNotFoundError,
+    );
+    assert.equal(createMock.mock.callCount(), 0);
+  });
+
+  await t.test('uploadInstitutionalDocument resolves category/active-year, forces studentId to null, and derives docType from the category slug', async () => {
+    const { createMock } = mockHappyPath(t);
+    const getCategoryMock = t.mock.method(documentCategoryService, 'getCategory', async () => ({ id: 'cat-1', slug: 'circular', name: 'Circulars' }));
+    const getActiveYearMock = t.mock.method(academicYearService, 'getActiveAcademicYear', async () => ({ id: 'year-1' }));
+    t.after(() => { getCategoryMock.mock.restore(); getActiveYearMock.mock.restore(); });
+
+    await documentService.uploadInstitutionalDocument({}, {
+      collegeId: 'c1', title: 'Diwali holiday notice', categoryId: 'cat-1', classId: 'class-1', fileName: 'notice.pdf', mimeType: 'application/pdf', fileBuffer: Buffer.from('x'),
+    }, { actorUserId: 'u1' });
+
+    assert.equal(createMock.mock.callCount(), 1);
+    const [, fields] = createMock.mock.calls[0].arguments;
+    assert.equal(fields.studentId, null);
+    assert.equal(fields.classId, 'class-1');
+    assert.equal(fields.docType, 'circular');
+    assert.equal(fields.title, 'Diwali holiday notice');
+    assert.equal(fields.categoryId, 'cat-1');
+    assert.equal(fields.academicYearId, 'year-1', 'omitted academicYearId must default to the college\'s active year');
+  });
+
+  await t.test('uploadInstitutionalDocument leaves academicYearId null when no year is Active', async () => {
+    const { createMock } = mockHappyPath(t);
+    const getCategoryMock = t.mock.method(documentCategoryService, 'getCategory', async () => ({ id: 'cat-1', slug: 'circular', name: 'Circulars' }));
+    const getActiveYearMock = t.mock.method(academicYearService, 'getActiveAcademicYear', async () => null);
+    t.after(() => { getCategoryMock.mock.restore(); getActiveYearMock.mock.restore(); });
+
+    await documentService.uploadInstitutionalDocument({}, {
+      collegeId: 'c1', title: 'Notice', categoryId: 'cat-1', fileName: 'notice.pdf', mimeType: 'application/pdf', fileBuffer: Buffer.from('x'),
+    }, { actorUserId: 'u1' });
+
+    const [, fields] = createMock.mock.calls[0].arguments;
+    assert.equal(fields.academicYearId, null);
+  });
+
+  await t.test('listInstitutionalDocuments delegates to documentRepository.findInstitutional with the given filters', async () => {
+    const findInstitutionalMock = t.mock.method(documentRepository, 'findInstitutional', async () => [{ id: 'doc-1' }]);
+    t.after(() => findInstitutionalMock.mock.restore());
+
+    const result = await documentService.listInstitutionalDocuments({}, { categoryId: 'cat-1', academicYearId: 'year-1', departmentId: 'dept-1', search: 'notice' });
+
+    assert.equal(findInstitutionalMock.mock.callCount(), 1);
+    assert.deepEqual(findInstitutionalMock.mock.calls[0].arguments[1], {
+      docType: undefined, classId: undefined, categoryId: 'cat-1', academicYearId: 'year-1', departmentId: 'dept-1', search: 'notice',
+    });
+    assert.deepEqual(result, [{ id: 'doc-1' }]);
   });
 
   await t.test('mergeDocumentTemplate persists the merged bytes as a new document via uploadDocument', async () => {

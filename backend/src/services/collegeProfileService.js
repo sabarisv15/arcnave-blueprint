@@ -26,6 +26,7 @@
 const collegeProfileRepository = require('../repositories/collegeProfileRepository');
 const departmentRepository = require('../repositories/departmentRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
+const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
 
 // createDepartment/updateDepartment given no name (create) — NOT NULL
 // at the DB level, raised before any repository call, same as every
@@ -62,6 +63,25 @@ async function listDepartments(client, collegeId) {
 
 async function getDepartment(client, id) {
   return departmentRepository.findById(client, id);
+}
+
+// resolveDepartmentId: mirrors academicService.resolveClassId — given
+// either a real department id or a human-readable name (e.g. "ECE"),
+// returns the real id, or throws IdentifierResolutionError. ARCNAVE
+// AI's own document-upload tools are the first caller (only a
+// department name to go on from a chat message, never the internal
+// id).
+async function resolveDepartmentId(client, collegeId, identifier) {
+  if (isUuid(identifier)) {
+    return identifier;
+  }
+  const department = await departmentRepository.findByCollegeAndName(client, collegeId, identifier);
+  if (department === null) {
+    throw new IdentifierResolutionError(
+      `no department found named ${JSON.stringify(identifier)} in this college`,
+    );
+  }
+  return department.id;
 }
 
 async function createDepartment(client, { collegeId, name, approvedIntake }, { actorUserId } = {}) {
@@ -144,6 +164,7 @@ module.exports = {
   updateProfile,
   listDepartments,
   getDepartment,
+  resolveDepartmentId,
   createDepartment,
   updateDepartment,
   removeDepartment,

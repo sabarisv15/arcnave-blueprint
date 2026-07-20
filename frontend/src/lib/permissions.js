@@ -35,6 +35,8 @@ export const PERMISSION_ROLES = {
 
   'documents.upload': ['principal'],
   'documents.templates.upload': ['principal'],
+  'documents.institutional.upload': ['principal', 'hod', 'staff'],
+  'document_categories.manage': ['principal'],
   'documents.ocr.run': ['principal'],
   'documents.review': ['principal'],
   'documents.delete': ['principal'],

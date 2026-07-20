@@ -6,6 +6,7 @@ const { requireAuth, requirePermission } = require('../middleware/rbac');
 const documentService = require('../services/documentService');
 const ocrService = require('../services/ocrService');
 const visibilityService = require('../services/visibilityService');
+const collegeProfileService = require('../services/collegeProfileService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -71,6 +72,10 @@ function mapDocumentServiceError(err, res) {
   }
   if (err instanceof documentService.DocumentInvalidTemplateError) {
     res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof documentService.DocumentCategoryNotFoundError) {
+    res.status(404).json({ detail: err.message });
     return true;
   }
   if (err instanceof documentService.TemplateMergeError) {
@@ -177,6 +182,88 @@ function createDocumentsRouter() {
     if (!requireResolvedTenant(req, res)) return;
     const templates = await documentService.listTemplates(req.dbClient);
     res.json(templates);
+  }));
+
+  // Institutional Documents Phase 1 — the central, browsable repository
+  // (Curriculum/Circulars/Academic Calendar/Examination/Policies/
+  // Forms/Notices/...) that ARCNAVE AI is a consumer of, not the owner
+  // of. requirePermission('documents.institutional.upload') (mapped to
+  // ['principal','hod','staff']) is intentionally wider than every
+  // other write on this router; uploadInstitutionalDocument is what
+  // keeps that safe — it fixes studentId=null structurally and
+  // resolves category_id against real per-college document_categories
+  // rows (never a caller-supplied doc_type directly), same "the route
+  // can't forge more than the service allows" shape
+  // /documents/templates already establishes for its own doc_type.
+  router.post('/documents/institutional', requirePermission('documents.institutional.upload'), express.json({ limit: '15mb' }), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const {
+      file_base64: fileBase64,
+      title,
+      category_id: categoryId,
+      academic_year_id: academicYearId,
+      department_id: departmentId,
+      class_id: classId,
+      file_name: fileName,
+      mime_type: mimeType,
+    } = req.body || {};
+    if (typeof fileBase64 !== 'string' || fileBase64.length === 0) {
+      res.status(400).json({ detail: 'file_base64 is required' });
+      return;
+    }
+
+    try {
+      const document = await documentService.uploadInstitutionalDocument(
+        req.dbClient,
+        {
+          collegeId: req.collegeId,
+          title,
+          categoryId,
+          academicYearId,
+          departmentId,
+          classId,
+          fileName,
+          mimeType,
+          fileBuffer: Buffer.from(fileBase64, 'base64'),
+        },
+        { actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(document);
+    } catch (err) {
+      if (mapDocumentServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // requireAuth, not gated by the upload permission: browsing the
+  // institutional repository is a read any authenticated tenant user
+  // needs, same "reads are requireAuth, writes are the gated action"
+  // split /documents/templates draws. Every filter is optional — this
+  // is a faceted browse (Academic Year / Department / Category /
+  // free-text search, any combination), not a single required scope
+  // the way GET /documents' student_id is.
+  router.get('/documents/institutional', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const {
+      doc_type: docType, class_id: classId, category_id: categoryId, academic_year_id: academicYearId, department_id: departmentId, search,
+    } = req.query;
+    const documents = await documentService.listInstitutionalDocuments(req.dbClient, {
+      docType, classId, categoryId, academicYearId, departmentId, search,
+    });
+    res.json(documents);
+  }));
+
+  // requireAuth, not gated by departments.read (principal-only —
+  // middleware/permissions.js): every hod/staff who can upload/browse
+  // the institutional repository needs the department list to pick a
+  // destination or filter by it, and this route intentionally exposes
+  // only what that needs (id/name), not department CRUD. Deliberately
+  // its own scoped route rather than loosening the existing, unrelated
+  // /departments permission.
+  router.get('/documents/institutional/departments', requireAuth, asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    const departments = await collegeProfileService.listDepartments(req.dbClient, req.collegeId);
+    res.json(departments);
   }));
 
   // The one real caller this slice names: merge arbitrary

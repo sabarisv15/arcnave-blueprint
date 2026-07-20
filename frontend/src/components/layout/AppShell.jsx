@@ -19,6 +19,7 @@ const PRIMARY_NAV_ITEMS = [
   { to: '/academic', label: 'Academic' },
   { to: '/finance', label: 'Finance' },
   { to: '/documents', label: 'Documents' },
+  { to: '/institutional-documents', label: 'Institutional Documents' },
   { to: '/calendar', label: 'Calendar' },
   { to: '/workflow/pending', label: 'Approvals' },
 ];
@@ -27,7 +28,7 @@ const MORE_NAV_ITEMS = [
   { to: '/attendance', label: 'Attendance' },
   { to: '/reports', label: 'Reports', permission: 'reports.generate' },
   { to: '/notifications', label: 'Notifications', permission: 'notifications.read' },
-  { to: '/ai/copilot', label: 'AI Copilot' },
+  { to: '/ai/copilot', label: 'ARCNAVE AI' },
   { to: '/analytics', label: 'Analytics', permission: 'analytics.attendance_rate.read' },
   { to: '/archival', label: 'Archival' },
 ];

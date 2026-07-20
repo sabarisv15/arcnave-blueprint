@@ -88,6 +88,18 @@ const PERMISSION_ROLES = {
   // Template upload moved from college_admin to principal — see the
   // college_profile note above.
   'documents.templates.upload': ['principal'],
+  // Institution-wide Curriculum/Circulars uploads (ARCNAVE AI's own
+  // upload+browse task) — a dedicated permission, not a widening of
+  // documents.upload: the user explicitly asked for hod/staff reach
+  // here without loosening the existing (principal-only) per-student
+  // upload path.
+  'documents.institutional.upload': ['principal', 'hod', 'staff'],
+  // routes/documentCategories.js — Institutional Documents Phase 1.
+  // Categories are institution-wide taxonomy (Curriculum, Circulars,
+  // ...), same "structural, college-wide config" reasoning
+  // departments.create/college_profile.update already use for
+  // principal-only.
+  'document_categories.manage': ['principal'],
   'documents.ocr.run': ['principal'],
   'documents.review': ['principal'],
   'documents.delete': ['principal'],

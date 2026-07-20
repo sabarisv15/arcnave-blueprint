@@ -26,6 +26,10 @@ const COLUMNS = [
   ['studentId', 'student_id'],
   ['classId', 'class_id'],
   ['docType', 'doc_type'],
+  ['title', 'title'],
+  ['academicYearId', 'academic_year_id'],
+  ['departmentId', 'department_id'],
+  ['categoryId', 'category_id'],
   ['fileName', 'file_name'],
   ['storagePath', 'storage_path'],
   ['mimeType', 'mime_type'],
@@ -105,6 +109,54 @@ async function findByClassId(client, classId) {
   return result.rows;
 }
 
+// Institution-wide documents (student_id IS NULL) — Institutional
+// Documents Phase 1's own faceted browse: categoryId/academicYearId/
+// departmentId/classId narrow to one facet each (any combination, or
+// none); search does a case-insensitive match against title OR
+// file_name, since raw uploaded file names are frequently the only
+// thing a caller who skipped the title field has to go on. docType is
+// kept for the AI-search classification path (documentSearchService.js
+// still keys off it), not exposed as a separate UI facet now that
+// categoryId supersedes it for browsing.
+async function findInstitutional(client, {
+  docType, classId, categoryId, academicYearId, departmentId, search,
+} = {}) {
+  const conditions = ['student_id IS NULL', 'deleted_at IS NULL'];
+  const values = [];
+  if (docType !== undefined) {
+    values.push(docType);
+    conditions.push(`doc_type = $${values.length}`);
+  }
+  if (classId !== undefined) {
+    values.push(classId);
+    conditions.push(`class_id = $${values.length}`);
+  }
+  if (categoryId !== undefined) {
+    values.push(categoryId);
+    conditions.push(`category_id = $${values.length}`);
+  }
+  if (academicYearId !== undefined) {
+    values.push(academicYearId);
+    conditions.push(`academic_year_id = $${values.length}`);
+  }
+  if (departmentId !== undefined) {
+    values.push(departmentId);
+    conditions.push(`department_id = $${values.length}`);
+  }
+  if (search !== undefined && search !== '') {
+    values.push(`%${search}%`);
+    conditions.push(`(title ILIKE $${values.length} OR file_name ILIKE $${values.length})`);
+  }
+
+  const result = await client.query(
+    `SELECT * FROM documents
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY created_at DESC`,
+    values,
+  );
+  return result.rows;
+}
+
 async function findByDocType(client, docType) {
   const result = await client.query(
     `SELECT * FROM documents
@@ -161,6 +213,7 @@ module.exports = {
   findById,
   findByStudentId,
   findByClassId,
+  findInstitutional,
   findLatestByStudentAndType,
   findByDocType,
   update,
