@@ -36,9 +36,27 @@ export const documentsApi = {
     return api.get(`/documents/institutional${qs ? `?${qs}` : ''}`);
   },
   uploadInstitutional: ({
-    title, categoryId, academicYearId, departmentId, classId, fileName, mimeType, fileBase64,
+    title, categoryId, academicYearId, departmentId, classId, fileName, mimeType, fileBase64, documentGroupId, confirmUpload,
   }) => api.post('/documents/institutional', {
-    title, category_id: categoryId, academic_year_id: academicYearId, department_id: departmentId, class_id: classId, file_name: fileName, mime_type: mimeType, file_base64: fileBase64,
+    title,
+    category_id: categoryId,
+    academic_year_id: academicYearId,
+    department_id: departmentId,
+    class_id: classId,
+    file_name: fileName,
+    mime_type: mimeType,
+    file_base64: fileBase64,
+    document_group_id: documentGroupId,
+    confirm_upload: confirmUpload,
   }),
   listInstitutionalDepartments: () => api.get('/documents/institutional/departments'),
+
+  // Institutional Documents Phase 3
+  listVersions: (documentGroupId) => api.get(`/documents/institutional/versions/${documentGroupId}`),
+  compareVersions: (versionAId, versionBId) => api.get(`/documents/institutional/versions/compare?a=${versionAId}&b=${versionBId}`),
+  linkLineage: (documentId, previousYearDocumentId) => api.post(`/documents/institutional/${documentId}/lineage`, { previous_year_document_id: previousYearDocumentId }),
+  getLineage: (documentId) => api.get(`/documents/institutional/${documentId}/lineage`),
+  submitPublish: (documentId) => api.post(`/documents/institutional/${documentId}/publish`),
+  submitSupersede: (documentId, reason) => api.post(`/documents/institutional/${documentId}/supersede`, { reason }),
+  archive: (documentId) => api.post(`/documents/institutional/${documentId}/archive`),
 };

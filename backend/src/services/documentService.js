@@ -24,6 +24,7 @@
 // documentRepository has no hard-delete function at all, so there is
 // no branch here that could accidentally do so.
 
+const crypto = require('node:crypto');
 const PizZip = require('pizzip');
 const documentRepository = require('../repositories/documentRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
@@ -32,6 +33,8 @@ const templateMerger = require('../generators/templateMerger');
 const visibilityService = require('./visibilityService');
 const documentCategoryService = require('./documentCategoryService');
 const academicYearService = require('./academicYearService');
+const workflowService = require('./workflowService');
+const staffService = require('./staffService');
 
 // Missing studentId, docType, fileName, mimeType, fileBuffer, or
 // actorUserId — documents' own NOT NULL columns, plus the actor
@@ -68,6 +71,73 @@ const TEMPLATE_DOC_TYPE = 'template';
 // from a different tenant — RLS already prevents that read from
 // returning a row at all, so this covers both cases identically).
 class DocumentCategoryNotFoundError extends Error {}
+
+// --- Institutional Documents Phase 3 -------------------------------
+// Version history, cross-year lineage, duplicate detection, and a
+// Draft -> Published -> Superseded -> Archived publish lifecycle
+// gated by WorkflowService (CLAUDE.md rule 3 — the same approval gate
+// financeService.submitFeeStructureApproval already uses, not a
+// second mechanism).
+
+// uploadInstitutionalDocument was given a byte-identical or
+// probable-duplicate match against an existing institutional
+// document, and the caller did not pass confirmUpload: true to
+// proceed anyway. err.duplicates carries the candidate row(s) so a
+// caller (route/AI tool) can show the user what it matched before
+// deciding whether to re-submit with confirmUpload.
+class DocumentDuplicateDetectedError extends Error {
+  constructor(message, duplicates) {
+    super(message);
+    this.duplicates = duplicates;
+  }
+}
+
+// getVersionHistory/compareDocumentVersions/uploadInstitutionalDocument
+// (when versioning) given a documentGroupId/version id that resolves
+// to no live row.
+class DocumentVersionNotFoundError extends Error {}
+
+// linkDocumentLineage/getDocumentLineage given a documentId that
+// doesn't resolve, or an attempt to link a document to itself/its own
+// existing ancestor (a cycle).
+class DocumentLineageError extends Error {}
+
+// publish/supersede/archive called on a document whose current
+// publication_status doesn't allow the requested transition (e.g.
+// publishing an already-Published document, archiving a Draft).
+class DocumentPublicationStateError extends Error {}
+
+// approvePublish/rejectPublish/approveSupersede/rejectSupersede called
+// for a document with no live Pending workflow_requests row governing
+// it — same shape financeService.FeeStructureNoPendingRequestError
+// already establishes.
+class DocumentNoPendingRequestError extends Error {}
+
+const PUBLICATION_STATUSES = ['Draft', 'Published', 'Superseded', 'Archived'];
+
+// Roles that see every publication_status. Anything else (including a
+// future 'student' role — BusinessRules.md's own "student, where a
+// student portal is enabled" carve-out; no student login exists yet
+// in this codebase, so this is the forward-looking half of task #5)
+// only ever sees 'Published' institutional documents — Draft/
+// Superseded/Archived are invisible to them, same "role check here,
+// real scope in the service" split visibilityService.js already uses.
+const STAFF_TIER_ROLES = ['staff', 'hod', 'principal'];
+
+function isStaffTierRole(actorRole) {
+  return actorRole === undefined || STAFF_TIER_ROLES.includes(actorRole);
+}
+
+// The one real filter listInstitutionalDocuments/assertCanViewDocument
+// apply for task #5: undefined (no filter — every status) for a
+// staff-tier or internal-system actor, ['Published'] for anyone else.
+function allowedPublicationStatusesForRole(actorRole) {
+  return isStaffTierRole(actorRole) ? undefined : ['Published'];
+}
+
+function computeContentHash(fileBuffer) {
+  return crypto.createHash('sha256').update(fileBuffer).digest('hex');
+}
 
 // The one doc_type value CLAUDE.md rule 8 singles out — never used for
 // identity, dedup, import, search, AI reasoning, or reporting.
@@ -241,28 +311,84 @@ async function listDocumentsForClass(client, classId) {
 // decision that Academic Year should default, not be forced) — left
 // null if no year is Active yet, rather than erroring; departmentId/
 // classId stay optional (nullable = college-wide / not class-specific).
+// documentGroupId (Phase 3, task #1 — version history): when passed,
+// this upload becomes a NEW VERSION of that existing logical document
+// rather than a brand-new one — version_number is resolved from the
+// group's current latest row (never caller-supplied, same "the actor
+// is who did it right now" reasoning verifiedAt/verifiedByUserId
+// already establish for reviewDocument), and the group's own
+// college/category identity is trusted over whatever the caller
+// passed (a versioning call inherits its group's home, it doesn't
+// re-decide it). A new version always starts 'Draft' — publishing it
+// is a separate, WorkflowService-gated step (publishInstitutionalDocument
+// below), never automatic on upload.
+//
+// confirmUpload (task #3 — duplicate detection): a byte-identical
+// match (content_hash, any category/year) or a probable match
+// (same title, case-insensitive, same category+year) against another
+// EXISTING institutional document group blocks the upload with
+// DocumentDuplicateDetectedError unless the caller explicitly passes
+// confirmUpload: true — "warn/flag rather than silently allowing exact
+// re-uploads," per this session's own task, not a hard block with no
+// way through it. Skipped entirely when documentGroupId is set: a
+// deliberate new version of an already-known document is not a
+// duplicate-upload scenario, it's the versioning flow above.
 async function uploadInstitutionalDocument(client, {
   collegeId, title, categoryId, academicYearId, departmentId, classId, fileName, mimeType, fileBuffer,
+  documentGroupId, confirmUpload,
 }, { actorUserId } = {}) {
   if (!title || !String(title).trim()) {
     throw new DocumentValidationError('title is required');
   }
-  if (!categoryId) {
+  if (!categoryId && !documentGroupId) {
     throw new DocumentValidationError('categoryId is required');
   }
 
-  const category = await documentCategoryService.getCategory(client, categoryId);
+  let resolvedCategoryId = categoryId;
+  let versionNumber = 1;
+  let priorVersion = null;
+
+  if (documentGroupId) {
+    priorVersion = await documentRepository.findLatestInGroup(client, documentGroupId);
+    if (priorVersion === null) {
+      throw new DocumentVersionNotFoundError(`no document version found in group ${JSON.stringify(documentGroupId)}`);
+    }
+    versionNumber = priorVersion.version_number + 1;
+    resolvedCategoryId = resolvedCategoryId || priorVersion.category_id;
+  }
+
+  const category = await documentCategoryService.getCategory(client, resolvedCategoryId);
   if (category === null) {
-    throw new DocumentCategoryNotFoundError(`no document category found with id ${JSON.stringify(categoryId)}`);
+    throw new DocumentCategoryNotFoundError(`no document category found with id ${JSON.stringify(resolvedCategoryId)}`);
   }
 
   let resolvedAcademicYearId = academicYearId;
   if (resolvedAcademicYearId === undefined || resolvedAcademicYearId === null) {
-    const activeYear = await academicYearService.getActiveAcademicYear(client, collegeId);
-    resolvedAcademicYearId = activeYear ? activeYear.id : null;
+    if (priorVersion) {
+      resolvedAcademicYearId = priorVersion.academic_year_id;
+    } else {
+      const activeYear = await academicYearService.getActiveAcademicYear(client, collegeId);
+      resolvedAcademicYearId = activeYear ? activeYear.id : null;
+    }
   }
 
-  return uploadDocument(
+  const contentHash = fileBuffer ? computeContentHash(fileBuffer) : null;
+
+  if (!documentGroupId && contentHash && !confirmUpload) {
+    const exactMatches = await documentRepository.findByContentHash(client, { collegeId, contentHash });
+    const similarMatches = await documentRepository.findSimilarInstitutional(client, {
+      collegeId, title: title.trim(), categoryId: resolvedCategoryId, academicYearId: resolvedAcademicYearId,
+    });
+    const duplicates = [...exactMatches, ...similarMatches.filter((d) => !exactMatches.some((e) => e.id === d.id))];
+    if (duplicates.length > 0) {
+      throw new DocumentDuplicateDetectedError(
+        `${duplicates.length} likely-duplicate document(s) already exist — pass confirmUpload: true to upload anyway`,
+        duplicates,
+      );
+    }
+  }
+
+  const document = await uploadDocument(
     client,
     {
       collegeId,
@@ -272,13 +398,27 @@ async function uploadInstitutionalDocument(client, {
       title: title.trim(),
       academicYearId: resolvedAcademicYearId,
       departmentId,
-      categoryId,
+      categoryId: resolvedCategoryId,
       fileName,
       mimeType,
       fileBuffer,
     },
     { actorUserId },
   );
+
+  // A second, targeted update rather than threading five more fields
+  // through uploadDocument's own general COLUMNS-filtered create path:
+  // document_group_id/version_number/content_hash/publication_status
+  // are Phase 3-only concerns that no other uploadDocument caller
+  // (per-student uploads, templates, merged reports) needs to know
+  // exist. documentRepository.update's own entries-filter means this
+  // is a single targeted UPDATE, not a second INSERT.
+  return documentRepository.update(client, document.id, {
+    documentGroupId: documentGroupId || document.id,
+    versionNumber,
+    contentHash,
+    publicationStatus: 'Draft',
+  });
 }
 
 // requireAuth-level read (see routes/documents.js) — same "browsing a
@@ -288,11 +428,27 @@ async function uploadInstitutionalDocument(client, {
 // categoryId/academicYearId/departmentId/classId/search, all optional
 // — a pure passthrough to the repository, no business logic of its
 // own to add here (unlike upload, a read has no invariant to protect).
+// actorRole (Phase 3, task #5): threaded through to
+// allowedPublicationStatusesForRole so a student-tier caller's browse
+// silently excludes Draft/Superseded/Archived rows rather than
+// needing every route/AI tool caller to remember to filter client-side
+// (the same "the service is the gate" discipline assertCanViewDocument
+// already establishes for single-document reads). Omitted (undefined)
+// by existing callers that haven't been updated to pass it yet — same
+// as isStaffTierRole's own actorRole === undefined branch, this
+// defaults to "no filter," never to the more restrictive behavior, so
+// this is purely additive for any caller that doesn't opt in.
 async function listInstitutionalDocuments(client, {
   docType, classId, categoryId, academicYearId, departmentId, search,
-} = {}) {
+} = {}, { actorRole } = {}) {
   return documentRepository.findInstitutional(client, {
-    docType, classId, categoryId, academicYearId, departmentId, search,
+    docType,
+    classId,
+    categoryId,
+    academicYearId,
+    departmentId,
+    search,
+    publicationStatuses: allowedPublicationStatusesForRole(actorRole),
   });
 }
 
@@ -464,12 +620,421 @@ async function assertCanViewDocument(client, document, { actorUserId, actorRole 
   if (document.doc_type === TEMPLATE_DOC_TYPE) {
     return;
   }
+  // Institutional document (student_id null, category_id set — see
+  // uploadInstitutionalDocument): browsing the repository (GET
+  // /documents/institutional) is already open to any authenticated
+  // tenant user (that route's own comment), so resolving a single
+  // institutional document's metadata/bytes/OCR text is the same
+  // "staff-tier reach" — never narrowed to principal-or-uploader the
+  // way an unrelated generated report is. task #5's own gate applies
+  // ONLY on top of that: a non-staff-tier actor (no real role reaches
+  // this yet — see allowedPublicationStatusesForRole's own comment,
+  // but the check is real and structural, not a TODO) may view it only
+  // if it's Published; Draft/Superseded/Archived are treated as not
+  // found from their point of view, same "unauthorized, not merely
+  // empty" shape every other branch in this function already uses.
+  if (document.category_id !== null && document.category_id !== undefined) {
+    if (!isStaffTierRole(actorRole) && document.publication_status !== 'Published') {
+      throw new DocumentNotAuthorizedError(
+        `role ${JSON.stringify(actorRole)} may not view document ${JSON.stringify(document.id)} (publication_status ${JSON.stringify(document.publication_status)})`,
+      );
+    }
+    return;
+  }
   if (actorRole === 'principal' || document.uploaded_by_user_id === actorUserId) {
     return;
   }
   throw new DocumentNotAuthorizedError(
     `role ${JSON.stringify(actorRole)} (user ${JSON.stringify(actorUserId)}) may not view document ${JSON.stringify(document.id)}`,
   );
+}
+
+// --- Version history (task #1) --------------------------------------
+
+// Every non-deleted version of a logical document, newest first —
+// documentRepository.findByGroupId's own natural shape, no extra
+// business logic needed beyond passing the group id through.
+async function getVersionHistory(client, documentGroupId) {
+  return documentRepository.findByGroupId(client, documentGroupId);
+}
+
+// Metadata diff between two versions of (normally) the same
+// document_group_id — every field a version-comparison UI would want
+// to show changed, computed as {field: {from, to}} pairs, omitting
+// unchanged fields entirely so the caller can render only what
+// actually differs. Content diff is included only where feasible, per
+// this session's own task wording: a real line diff for text/plain
+// content (the same mime_type documentSearchService.js already knows
+// how to extract text from), a byte-length/hash comparison note for
+// everything else (a real PDF/DOCX text diff is out of scope for this
+// slice — flagged, not silently guessed at).
+const METADATA_DIFF_FIELDS = [
+  ['title', 'title'], ['file_name', 'file_name'], ['mime_type', 'mime_type'],
+  ['file_size_bytes', 'file_size_bytes'], ['category_id', 'category_id'],
+  ['department_id', 'department_id'], ['academic_year_id', 'academic_year_id'],
+  ['publication_status', 'publication_status'], ['content_hash', 'content_hash'],
+];
+
+function diffTextContent(bufferA, bufferB) {
+  const linesA = bufferA.toString('utf8').split(/\r?\n/);
+  const linesB = bufferB.toString('utf8').split(/\r?\n/);
+  const max = Math.max(linesA.length, linesB.length);
+  const changes = [];
+  for (let i = 0; i < max; i += 1) {
+    if (linesA[i] !== linesB[i]) {
+      changes.push({ line: i + 1, from: linesA[i] ?? null, to: linesB[i] ?? null });
+    }
+  }
+  return changes;
+}
+
+async function compareDocumentVersions(client, versionAId, versionBId) {
+  const [versionA, versionB] = await Promise.all([
+    documentRepository.findById(client, versionAId),
+    documentRepository.findById(client, versionBId),
+  ]);
+  if (versionA === null || versionB === null) {
+    throw new DocumentVersionNotFoundError(
+      `one or both document versions (${JSON.stringify(versionAId)}, ${JSON.stringify(versionBId)}) do not exist`,
+    );
+  }
+
+  const metadataDiff = {};
+  for (const [key] of METADATA_DIFF_FIELDS) {
+    if (versionA[key] !== versionB[key]) {
+      metadataDiff[key] = { from: versionA[key], to: versionB[key] };
+    }
+  }
+
+  let contentDiff = null;
+  if (versionA.content_hash && versionB.content_hash && versionA.content_hash === versionB.content_hash) {
+    contentDiff = { identical: true };
+  } else if (versionA.mime_type === 'text/plain' && versionB.mime_type === 'text/plain') {
+    const [bufferA, bufferB] = await Promise.all([
+      fileStorage.readFile(versionA.storage_path),
+      fileStorage.readFile(versionB.storage_path),
+    ]);
+    contentDiff = { identical: false, type: 'text', changes: diffTextContent(bufferA, bufferB) };
+  } else {
+    // Not a text mime type — a real content diff isn't feasible here
+    // (PDF/DOCX text extraction is documentSearchService's OCR/ingest
+    // pipeline territory, not this comparison path). Callers still get
+    // a clear "these differ" signal from file_size_bytes/content_hash
+    // already surfaced in metadataDiff above.
+    contentDiff = { identical: false, type: 'unsupported' };
+  }
+
+  return {
+    versionA, versionB, metadataDiff, contentDiff,
+  };
+}
+
+// --- Cross-year lineage (task #2) ------------------------------------
+
+// Links documentId to its successor's predecessor: sets
+// documentId's OWN lineage_parent_id when documentId is the successor
+// (the more common direction — "here's this year's version, it
+// replaces last year's"). previousYearDocumentId must already exist,
+// belong to the same college (RLS already prevents a cross-tenant
+// documentId from resolving at all, so this only needs to check both
+// resolve), and not equal documentId itself or create a cycle (walking
+// a bounded number of hops up previousYearDocumentId's own chain and
+// refusing if documentId appears in it).
+const MAX_LINEAGE_WALK = 50;
+
+async function assertNoLineageCycle(client, documentId, previousYearDocumentId) {
+  let cursor = previousYearDocumentId;
+  for (let hops = 0; hops < MAX_LINEAGE_WALK && cursor; hops += 1) {
+    if (cursor === documentId) {
+      throw new DocumentLineageError('linking these documents would create a lineage cycle');
+    }
+    // eslint-disable-next-line no-await-in-loop
+    const row = await documentRepository.findById(client, cursor);
+    cursor = row ? row.lineage_parent_id : null;
+  }
+}
+
+async function linkDocumentLineage(client, { documentId, previousYearDocumentId }, { actorUserId } = {}) {
+  if (!documentId || !previousYearDocumentId) {
+    throw new DocumentValidationError('documentId and previousYearDocumentId are required');
+  }
+  if (documentId === previousYearDocumentId) {
+    throw new DocumentLineageError('a document cannot be linked to itself');
+  }
+
+  const [document, predecessor] = await Promise.all([
+    documentRepository.findById(client, documentId),
+    documentRepository.findById(client, previousYearDocumentId),
+  ]);
+  if (document === null) {
+    throw new DocumentVersionNotFoundError(`document ${JSON.stringify(documentId)} does not exist`);
+  }
+  if (predecessor === null) {
+    throw new DocumentVersionNotFoundError(`document ${JSON.stringify(previousYearDocumentId)} does not exist`);
+  }
+
+  await assertNoLineageCycle(client, documentId, previousYearDocumentId);
+
+  const updated = await documentRepository.update(client, documentId, { lineageParentId: previousYearDocumentId });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: document.college_id,
+    userId: actorUserId,
+    action: 'document_lineage_linked',
+    entity: 'documents',
+    entityId: documentId,
+    metadata: { previousYearDocumentId },
+  });
+
+  return updated;
+}
+
+// Full lineage for navigation: every ancestor (walking lineage_parent_id
+// upward) and every direct descendant (documentRepository.
+// findByLineageParentId — rows whose OWN lineage_parent_id names this
+// one). Ancestors returned oldest-first, matching how a "history of
+// this document across years" view would want to render a timeline.
+async function getDocumentLineage(client, documentId) {
+  const document = await documentRepository.findById(client, documentId);
+  if (document === null) {
+    throw new DocumentVersionNotFoundError(`document ${JSON.stringify(documentId)} does not exist`);
+  }
+
+  const ancestors = [];
+  let cursor = document.lineage_parent_id;
+  for (let hops = 0; hops < MAX_LINEAGE_WALK && cursor; hops += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const ancestor = await documentRepository.findById(client, cursor);
+    if (ancestor === null) break;
+    ancestors.unshift(ancestor);
+    cursor = ancestor.lineage_parent_id;
+  }
+
+  const descendants = await documentRepository.findByLineageParentId(client, documentId);
+
+  return { document, ancestors, descendants };
+}
+
+// --- Publish / supersede / archive lifecycle (task #4) ---------------
+// Draft -> Published -> Superseded -> Archived. Publishing and
+// superseding are the two transitions CLAUDE.md rule 3 names as
+// needing a human approval gate; both route through WorkflowService,
+// mirroring financeService.submitFeeStructureApproval/approveFeeStructure/
+// rejectFeeStructure exactly (single-step Principal approver chain,
+// findPendingForEntity to correlate the workflow_requests row back to
+// this document) — not a second approval mechanism. Archiving is left
+// as a direct principal/hod action (documentService.archiveInstitutionalDocument
+// below): CLAUDE.md rule 3 and this session's own task name only
+// publish/supersede as workflow-gated, and archiving an already-
+// inactive (Superseded, or a Published doc being retired) document
+// carries materially lower risk than making one newly visible to the
+// whole institution or to students.
+
+async function loadInstitutionalDocumentOrThrow(client, documentId) {
+  const document = await documentRepository.findById(client, documentId);
+  if (document === null) {
+    throw new DocumentVersionNotFoundError(`document ${JSON.stringify(documentId)} does not exist`);
+  }
+  return document;
+}
+
+// Submits a Draft document for Publish approval. Single-step Principal
+// chain — same reasoning financeService's own header comment gives for
+// fee_structures (nothing in BusinessRules.md scopes this to a
+// department, so there's no HOD to resolve).
+async function submitPublishRequest(client, documentId, { requestedByUserId, origin = 'human' } = {}) {
+  if (!requestedByUserId) {
+    throw new DocumentValidationError('requestedByUserId is required');
+  }
+  const document = await loadInstitutionalDocumentOrThrow(client, documentId);
+  if (document.publication_status !== 'Draft') {
+    throw new DocumentPublicationStateError(
+      `document ${JSON.stringify(documentId)} is ${document.publication_status}, not Draft — only a Draft document can be submitted for publish`,
+    );
+  }
+
+  const principal = await staffService.findPrincipal(client, document.college_id);
+
+  return workflowService.submitRequest(client, {
+    collegeId: document.college_id,
+    entityType: 'institutional_document_publish',
+    entityId: document.id,
+    requestedByUserId,
+    origin,
+    approverChain: [{ step: 1, role: 'principal', user_id: principal.user_id }],
+  });
+}
+
+async function loadPendingRequestForDocument(client, entityType, documentId) {
+  const document = await loadInstitutionalDocumentOrThrow(client, documentId);
+  const pending = await workflowService.findPendingForEntity(client, entityType, documentId);
+  if (pending === null) {
+    throw new DocumentNoPendingRequestError(`document ${JSON.stringify(documentId)} has no pending ${entityType} request`);
+  }
+  return { document, pending };
+}
+
+// Approving publish is the one place a version transitions
+// automatically: if this document belongs to a group with an existing
+// Published version, that OLDER version moves to Superseded in the
+// same call — "publishing a new version supersedes the old one" is the
+// whole point of versioning an institutional document (task #1 and #4
+// composing, not two unrelated features) — never left for someone to
+// remember as a separate manual step.
+async function approvePublish(client, documentId, { actorUserId, remarks } = {}) {
+  const { document, pending } = await loadPendingRequestForDocument(client, 'institutional_document_publish', documentId);
+  await workflowService.approveRequest(client, pending.id, { actorUserId, remarks });
+
+  const siblings = await documentRepository.findByGroupId(client, document.document_group_id);
+  const previouslyPublished = siblings.find((row) => row.id !== document.id && row.publication_status === 'Published');
+  if (previouslyPublished) {
+    await documentRepository.update(client, previouslyPublished.id, {
+      publicationStatus: 'Superseded',
+      supersededAt: new Date(),
+    });
+    await auditLogRepository.createAuditLogEntry(client, {
+      collegeId: document.college_id,
+      userId: actorUserId,
+      action: 'document_superseded',
+      entity: 'documents',
+      entityId: previouslyPublished.id,
+      metadata: { supersededByDocumentId: document.id },
+    });
+  }
+
+  const updated = await documentRepository.update(client, documentId, { publicationStatus: 'Published' });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: document.college_id,
+    userId: actorUserId,
+    action: 'document_published',
+    entity: 'documents',
+    entityId: documentId,
+    metadata: null,
+  });
+
+  return updated;
+}
+
+async function rejectPublish(client, documentId, { actorUserId, remarks } = {}) {
+  const { document, pending } = await loadPendingRequestForDocument(client, 'institutional_document_publish', documentId);
+  await workflowService.rejectRequest(client, pending.id, { actorUserId, remarks });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: document.college_id,
+    userId: actorUserId,
+    action: 'document_publish_rejected',
+    entity: 'documents',
+    entityId: documentId,
+    metadata: null,
+  });
+
+  // Stays Draft — a rejected publish request is not itself a state
+  // transition (same shape financeService.rejectFeeStructure's own
+  // status -> 'Rejected' update gives fee_structures, except a document
+  // has no dedicated 'Rejected' publication_status: Draft already means
+  // "not yet published," which remains true after a rejection).
+  return document;
+}
+
+// Marks an already-Published document Superseded WITHOUT a
+// replacement version necessarily existing yet (e.g. "this policy is
+// obsolete, effective immediately," ahead of any successor upload) —
+// the manual counterpart to approvePublish's own automatic supersede-
+// on-new-publish above. Same WorkflowService gate, same single-step
+// Principal chain, distinct entityType so it never collides with a
+// pending publish request on the same document (workflow_requests'
+// own partial unique index is keyed on (entity_type, entity_id), not
+// entity_id alone).
+async function submitSupersedeRequest(client, documentId, { requestedByUserId, origin = 'human', reason } = {}) {
+  if (!requestedByUserId) {
+    throw new DocumentValidationError('requestedByUserId is required');
+  }
+  const document = await loadInstitutionalDocumentOrThrow(client, documentId);
+  if (document.publication_status !== 'Published') {
+    throw new DocumentPublicationStateError(
+      `document ${JSON.stringify(documentId)} is ${document.publication_status}, not Published — only a Published document can be superseded`,
+    );
+  }
+
+  const principal = await staffService.findPrincipal(client, document.college_id);
+
+  return workflowService.submitRequest(client, {
+    collegeId: document.college_id,
+    entityType: 'institutional_document_supersede',
+    entityId: document.id,
+    requestedByUserId,
+    origin,
+    approverChain: [{ step: 1, role: 'principal', user_id: principal.user_id }],
+    actionManifest: reason ? { reason } : null,
+  });
+}
+
+async function approveSupersede(client, documentId, { actorUserId, remarks } = {}) {
+  const { document, pending } = await loadPendingRequestForDocument(client, 'institutional_document_supersede', documentId);
+  await workflowService.approveRequest(client, pending.id, { actorUserId, remarks });
+
+  const updated = await documentRepository.update(client, documentId, {
+    publicationStatus: 'Superseded',
+    supersededAt: new Date(),
+  });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: document.college_id,
+    userId: actorUserId,
+    action: 'document_superseded',
+    entity: 'documents',
+    entityId: documentId,
+    metadata: null,
+  });
+
+  return updated;
+}
+
+async function rejectSupersede(client, documentId, { actorUserId, remarks } = {}) {
+  const { document, pending } = await loadPendingRequestForDocument(client, 'institutional_document_supersede', documentId);
+  await workflowService.rejectRequest(client, pending.id, { actorUserId, remarks });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: document.college_id,
+    userId: actorUserId,
+    action: 'document_supersede_rejected',
+    entity: 'documents',
+    entityId: documentId,
+    metadata: null,
+  });
+
+  return document;
+}
+
+// Archive: a direct action, no WorkflowService gate — see this
+// section's own header comment. Only a Published or Superseded
+// document may be archived (a Draft was never live; archiving one is
+// meaningless — remove/soft-delete is the right action for an unwanted
+// Draft instead).
+async function archiveInstitutionalDocument(client, documentId, { actorUserId } = {}) {
+  const document = await loadInstitutionalDocumentOrThrow(client, documentId);
+  if (!['Published', 'Superseded'].includes(document.publication_status)) {
+    throw new DocumentPublicationStateError(
+      `document ${JSON.stringify(documentId)} is ${document.publication_status} — only a Published or Superseded document can be archived`,
+    );
+  }
+
+  const updated = await documentRepository.update(client, documentId, {
+    publicationStatus: 'Archived',
+    archivedAt: new Date(),
+  });
+
+  await auditLogRepository.createAuditLogEntry(client, {
+    collegeId: document.college_id,
+    userId: actorUserId,
+    action: 'document_archived',
+    entity: 'documents',
+    entityId: documentId,
+    metadata: null,
+  });
+
+  return updated;
 }
 
 module.exports = {
@@ -481,8 +1046,15 @@ module.exports = {
   DocumentInvalidTemplateError,
   DocumentNotAuthorizedError,
   DocumentCategoryNotFoundError,
+  DocumentDuplicateDetectedError,
+  DocumentVersionNotFoundError,
+  DocumentLineageError,
+  DocumentPublicationStateError,
+  DocumentNoPendingRequestError,
   TEMPLATE_DOC_TYPE,
   AADHAAR_DOC_TYPE,
+  PUBLICATION_STATUSES,
+  STAFF_TIER_ROLES,
   uploadDocument,
   uploadTemplate,
   uploadInstitutionalDocument,
@@ -499,4 +1071,15 @@ module.exports = {
   removeDocument,
   listDocuments,
   assertCanViewDocument,
+  getVersionHistory,
+  compareDocumentVersions,
+  linkDocumentLineage,
+  getDocumentLineage,
+  submitPublishRequest,
+  approvePublish,
+  rejectPublish,
+  submitSupersedeRequest,
+  approveSupersede,
+  rejectSupersede,
+  archiveInstitutionalDocument,
 };

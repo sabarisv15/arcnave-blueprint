@@ -454,6 +454,8 @@ async function requestPasswordReset(client, { collegeId, email }) {
 // and already-used tokens are both rejected with the same generic
 // PasswordResetTokenError — same pattern routes/invitations.js's
 // accept flow already uses for its own one-time token.
+const PASSWORD_COMPLEXITY_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}$/;
+
 async function resetPassword(client, { token, newPassword }) {
   if (!newPassword) {
     throw new PasswordResetValidationError('newPassword is required');
@@ -464,6 +466,12 @@ async function resetPassword(client, { token, newPassword }) {
 
   if (!stored || stored.used_at !== null || stored.expires_at.getTime() <= Date.now()) {
     throw new PasswordResetTokenError('Invalid or expired password reset token');
+  }
+
+  if (!PASSWORD_COMPLEXITY_RE.test(newPassword)) {
+    throw new PasswordResetValidationError(
+      'Password must be at least 8 characters and include an uppercase letter, a lowercase letter, a number, and a symbol',
+    );
   }
 
   await authRepository.updatePasswordHash(client, stored.user_id, await security.hashPassword(newPassword));
@@ -547,6 +555,12 @@ async function lookupPendingInvitation(client, token) {
 // ever granted (see the migration's own file-level comment on
 // principal_invitations' purpose).
 async function acceptInvitation(client, invitation, { username, password }) {
+  if (!PASSWORD_COMPLEXITY_RE.test(password || '')) {
+    throw new PasswordResetValidationError(
+      'Password must be at least 8 characters and include an uppercase letter, a lowercase letter, a number, and a symbol',
+    );
+  }
+
   let user;
   try {
     user = await authRepository.createUser(client, {

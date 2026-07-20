@@ -660,7 +660,12 @@ registerTool({
   description: 'Looks up whether a category, department, and/or academic year name the user mentioned (e.g. '
     + '"ECE", "Circulars", "2026-2027") match real Institutional Documents data for this college. Read-only — '
     + 'never uploads or moves anything. Always call this BEFORE telling the user their document was saved '
-    + 'somewhere, and relay any "not found" field back to the user as a clarifying question rather than guessing.',
+    + 'somewhere, and relay any "not found" field back to the user as a clarifying question rather than guessing. '
+    + 'Call this when the user names an actual document destination — a category, department, or year — while '
+    + 'talking about saving/uploading/filing a document (e.g. "save this under Circulars", "put it in the ECE '
+    + 'folder", "file this for 2026-2027"). Only pass the fields the user actually named; never invent a category, '
+    + 'department, or year to fill a param the user did not mention. If the user is only asking to upload a file '
+    + 'with no destination named yet, do NOT call this tool — ask them which category it belongs to first.',
   allowedRoles: ['principal', 'hod', 'staff'],
   params: {
     type: 'object',
@@ -776,10 +781,70 @@ registerTool({
       params.department ? collegeProfileService.resolveDepartmentId(client, actor.collegeId, params.department) : undefined,
       params.academic_year ? academicYearService.resolveAcademicYearId(client, actor.collegeId, params.academic_year) : undefined,
     ]);
-    return documentService.listInstitutionalDocuments(client, {
-      categoryId, departmentId, academicYearId, search: params.search,
-    });
+    return documentService.listInstitutionalDocuments(
+      client,
+      { categoryId, departmentId, academicYearId, search: params.search },
+      { actorRole: actor.role },
+    );
   },
+});
+
+// --- Institutional Documents Phase 3 — read-only lookups ---------------
+// Both L1/read-only, same reasoning search_documents/
+// list_institutional_documents above already establish: nothing here
+// writes, so neither needs humanOnly — the LLM may call these freely
+// to answer "what changed between versions" / "what's this year's
+// version of X" questions. Publish/supersede/archive themselves are
+// NOT exposed as AI tools at all: CLAUDE.md rule 3 requires those to
+// go through WorkflowService's human approval gate exactly like every
+// other Level 3 (Act) action, and this codebase's existing pattern
+// (upload_institutional_document above) is "the real write only ever
+// reaches the human's own Confirm button, never the LLM's own
+// function-calling list" — the same discipline applies here without
+// inventing a new mechanism: publishing/superseding stay
+// UI-only actions (routes/documents.js's own
+// /publish//supersede/archive endpoints), reachable by a human via the
+// Institutional Documents page, never via ARCNAVE AI.
+registerTool({
+  name: 'get_document_version_history',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: 'Lists every version of a logical Institutional Document (same document_group_id), newest first — '
+    + 'use after list_institutional_documents/search_documents has already resolved a document id.',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      document_id: { type: 'string', description: 'Any document id belonging to the version group (e.g. from list_institutional_documents).' },
+    },
+    required: ['document_id'],
+    additionalProperties: false,
+  },
+  handler: async (client, params) => {
+    const document = await documentService.getDocument(client, params.document_id);
+    if (document === null) {
+      return [];
+    }
+    return documentService.getVersionHistory(client, document.document_group_id);
+  },
+});
+
+registerTool({
+  name: 'get_document_lineage',
+  level: 'L1',
+  dataClassification: 'Internal',
+  description: 'Returns the cross-year lineage of an Institutional Document — its ancestor(s) in earlier academic '
+    + 'years and its successor(s) in later years, e.g. "what is the 2025-2026 version of the 2024-2025 Curriculum?"',
+  allowedRoles: ['principal', 'hod', 'staff'],
+  params: {
+    type: 'object',
+    properties: {
+      document_id: { type: 'string', description: 'The document id to resolve lineage for.' },
+    },
+    required: ['document_id'],
+    additionalProperties: false,
+  },
+  handler: (client, params) => documentService.getDocumentLineage(client, params.document_id),
 });
 
 // --- Real tool #5 — AI attendance assistant ----------------------------

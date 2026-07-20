@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Download, FolderOpen, Loader2, Search, Upload } from 'lucide-react';
+import {
+  Download, FolderOpen, History, Link2, Loader2, Search, Upload,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -13,6 +15,9 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger,
 } from '@/components/ui/dialog';
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+} from '@/components/ui/dropdown-menu';
 import {
   Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
 } from '@/components/ui/table';
@@ -31,46 +36,96 @@ function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+// Draft/Published/Superseded/Archived — task #4's publish lifecycle.
+// Colors mirror the existing house convention (default = the
+// "healthy"/current state, outline = neutral/in-progress, destructive-
+// adjacent muted tones for retired states) without inventing a new
+// badge variant.
+const STATUS_BADGE_VARIANT = {
+  Draft: 'outline',
+  Published: 'default',
+  Superseded: 'secondary',
+  Archived: 'secondary',
+};
+
+function StatusBadge({ status }) {
+  if (!status) return null;
+  return <Badge variant={STATUS_BADGE_VARIANT[status] || 'outline'}>{status}</Badge>;
+}
+
 // Bulk upload dialog — every selected file is uploaded with the SAME
 // category/academic-year/department (batch metadata, per the phased
 // plan's own "Bulk upload" requirement), and a per-file title defaulted
 // to its filename (stripped of extension) so a multi-file drop never
 // blocks on typing N titles by hand — still editable per file before
 // submitting.
+// duplicates (task #3): a 409 from the API carries err.body.duplicates
+// — this dialog surfaces them as a confirm-or-cancel step rather than
+// silently retrying or silently giving up, matching "warn/flag rather
+// than silently allowing exact re-uploads" from this session's own
+// task. Retrying re-sends the SAME already-base64-encoded file list
+// with confirmUpload: true, so the user never has to re-pick files.
 function UploadDialog({ categories, departments, academicYearId, onUploaded }) {
   const [open, setOpen] = useState(false);
   const [categoryId, setCategoryId] = useState('');
   const [departmentId, setDepartmentId] = useState('');
   const [yearOverride, setYearOverride] = useState('');
   const [files, setFiles] = useState([]);
+  const [duplicateWarning, setDuplicateWarning] = useState(null);
   const fileInputRef = useRef(null);
 
+  async function performUpload({ confirmUpload }) {
+    if (!categoryId) throw new ApiError(400, 'Choose a category first');
+    if (files.length === 0) throw new ApiError(400, 'Choose at least one file');
+    const effectiveYearId = yearOverride || (academicYearId !== ALL_YEARS ? academicYearId : undefined);
+    for (const { file, title } of files) {
+      // eslint-disable-next-line no-await-in-loop
+      const fileBase64 = await fileToBase64(file);
+      // eslint-disable-next-line no-await-in-loop
+      await documentsApi.uploadInstitutional({
+        title: title || file.name,
+        categoryId,
+        academicYearId: effectiveYearId || undefined,
+        departmentId: departmentId || undefined,
+        fileName: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        fileBase64,
+        confirmUpload,
+      });
+    }
+  }
+
   const uploadMutation = useMutation({
-    mutationFn: async () => {
-      if (!categoryId) throw new ApiError(400, 'Choose a category first');
-      if (files.length === 0) throw new ApiError(400, 'Choose at least one file');
-      const effectiveYearId = yearOverride || (academicYearId !== ALL_YEARS ? academicYearId : undefined);
-      for (const { file, title } of files) {
-        // eslint-disable-next-line no-await-in-loop
-        const fileBase64 = await fileToBase64(file);
-        // eslint-disable-next-line no-await-in-loop
-        await documentsApi.uploadInstitutional({
-          title: title || file.name,
-          categoryId,
-          academicYearId: effectiveYearId || undefined,
-          departmentId: departmentId || undefined,
-          fileName: file.name,
-          mimeType: file.type || 'application/octet-stream',
-          fileBase64,
-        });
-      }
-    },
+    mutationFn: () => performUpload({ confirmUpload: false }),
     onSuccess: () => {
       toast.success(files.length > 1 ? `${files.length} documents uploaded` : 'Document uploaded');
       setFiles([]);
       setCategoryId('');
       setDepartmentId('');
       setYearOverride('');
+      setDuplicateWarning(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      setOpen(false);
+      onUploaded();
+    },
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 409 && err.body && Array.isArray(err.body.duplicates)) {
+        setDuplicateWarning(err.body.duplicates);
+        return;
+      }
+      toast.error(err instanceof ApiError ? err.detail : 'Could not upload document(s)');
+    },
+  });
+
+  const confirmUploadMutation = useMutation({
+    mutationFn: () => performUpload({ confirmUpload: true }),
+    onSuccess: () => {
+      toast.success(files.length > 1 ? `${files.length} documents uploaded` : 'Document uploaded');
+      setFiles([]);
+      setCategoryId('');
+      setDepartmentId('');
+      setYearOverride('');
+      setDuplicateWarning(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
       setOpen(false);
       onUploaded();
@@ -141,11 +196,151 @@ function UploadDialog({ categories, departments, academicYearId, onUploaded }) {
               </SelectContent>
             </Select>
           </div>
+          {duplicateWarning && (
+            <div className="rounded-md border border-amber-400 bg-amber-50 p-2 text-sm text-amber-900">
+              <p className="font-medium">Possible duplicate{duplicateWarning.length > 1 ? 's' : ''} found</p>
+              <ul className="mt-1 list-disc pl-4">
+                {duplicateWarning.slice(0, 5).map((d) => (
+                  <li key={d.id}>{d.title || d.file_name} ({formatDate(d.created_at)})</li>
+                ))}
+              </ul>
+              <p className="mt-1 text-xs">Upload anyway if this is intentional (e.g. a correction), or cancel and use "Versions" on the existing document instead.</p>
+            </div>
+          )}
         </div>
         <DialogFooter>
-          <Button onClick={() => uploadMutation.mutate()} disabled={uploadMutation.isPending}>
-            {uploadMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : `Upload${files.length > 1 ? ` (${files.length})` : ''}`}
-          </Button>
+          {duplicateWarning ? (
+            <>
+              <Button variant="outline" onClick={() => setDuplicateWarning(null)}>Cancel</Button>
+              <Button onClick={() => confirmUploadMutation.mutate()} disabled={confirmUploadMutation.isPending}>
+                {confirmUploadMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Upload anyway'}
+              </Button>
+            </>
+          ) : (
+            <Button onClick={() => uploadMutation.mutate()} disabled={uploadMutation.isPending}>
+              {uploadMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : `Upload${files.length > 1 ? ` (${files.length})` : ''}`}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Version history + cross-year lineage (tasks #1/#2) in one dialog:
+// every version of this logical document (newest first), a pick-two-
+// compare action, and the document's lineage (ancestor/successor
+// across academic years) with an inline "link to previous year" form.
+function VersionHistoryDialog({ document, onClose }) {
+  const [compareIds, setCompareIds] = useState([]);
+  const [lineageDocId, setLineageDocId] = useState('');
+  const queryClient = useQueryClient();
+
+  const { data: versions, isLoading: versionsLoading } = useQuery({
+    queryKey: ['documents', 'institutional', 'versions', document.document_group_id],
+    queryFn: () => documentsApi.listVersions(document.document_group_id),
+    enabled: Boolean(document),
+  });
+
+  const { data: lineage } = useQuery({
+    queryKey: ['documents', 'institutional', 'lineage', document.id],
+    queryFn: () => documentsApi.getLineage(document.id),
+    enabled: Boolean(document),
+  });
+
+  const { data: comparison, isFetching: comparing } = useQuery({
+    queryKey: ['documents', 'institutional', 'compare', ...compareIds],
+    queryFn: () => documentsApi.compareVersions(compareIds[0], compareIds[1]),
+    enabled: compareIds.length === 2,
+  });
+
+  const linkMutation = useMutation({
+    mutationFn: () => documentsApi.linkLineage(document.id, lineageDocId),
+    onSuccess: () => {
+      toast.success('Linked to previous year');
+      setLineageDocId('');
+      queryClient.invalidateQueries({ queryKey: ['documents', 'institutional', 'lineage', document.id] });
+    },
+    onError: (err) => toast.error(err instanceof ApiError ? err.detail : 'Could not link documents'),
+  });
+
+  function toggleCompare(id) {
+    setCompareIds((prev) => {
+      if (prev.includes(id)) return prev.filter((x) => x !== id);
+      if (prev.length >= 2) return [prev[1], id];
+      return [...prev, id];
+    });
+  }
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Versions &amp; lineage — {document.title || document.file_name}</DialogTitle>
+        </DialogHeader>
+        <div className="max-h-[60vh] space-y-4 overflow-y-auto">
+          <div>
+            <h3 className="mb-2 text-sm font-medium">Version history</h3>
+            {versionsLoading && <Skeleton className="h-16 w-full" />}
+            <div className="space-y-2">
+              {(versions || []).map((v) => (
+                <div key={v.id} className="flex items-center justify-between rounded-md border p-2 text-sm">
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={compareIds.includes(v.id)} onChange={() => toggleCompare(v.id)} />
+                    <span>v{v.version_number} — {v.file_name}</span>
+                    <StatusBadge status={v.publication_status} />
+                  </label>
+                  <span className="text-muted-foreground">{formatDate(v.created_at)}</span>
+                </div>
+              ))}
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">Pick two versions to compare.</p>
+            {compareIds.length === 2 && (
+              <div className="mt-2 rounded-md border p-2 text-xs">
+                {comparing && <Loader2 className="h-4 w-4 animate-spin" />}
+                {comparison && (
+                  <div className="space-y-1">
+                    <p className="font-medium">Metadata changes</p>
+                    {Object.keys(comparison.metadataDiff).length === 0 && <p>No metadata differences.</p>}
+                    {Object.entries(comparison.metadataDiff).map(([field, { from, to }]) => (
+                      <p key={field}>{field}: <span className="line-through">{String(from)}</span> → {String(to)}</p>
+                    ))}
+                    {comparison.contentDiff && comparison.contentDiff.identical && <p className="font-medium">Content is identical.</p>}
+                    {comparison.contentDiff && !comparison.contentDiff.identical && comparison.contentDiff.type === 'text' && (
+                      <p>{comparison.contentDiff.changes.length} line(s) differ.</p>
+                    )}
+                    {comparison.contentDiff && comparison.contentDiff.type === 'unsupported' && (
+                      <p>Content diff not available for this file type — see metadata above.</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <h3 className="mb-2 flex items-center gap-1 text-sm font-medium"><Link2 className="h-4 w-4" /> Cross-year lineage</h3>
+            {lineage && lineage.ancestors.length > 0 && (
+              <p className="text-xs text-muted-foreground">Earlier: {lineage.ancestors.map((a) => a.title || a.file_name).join(' → ')}</p>
+            )}
+            {lineage && lineage.descendants.length > 0 && (
+              <p className="text-xs text-muted-foreground">Later: {lineage.descendants.map((d) => d.title || d.file_name).join(', ')}</p>
+            )}
+            <div className="mt-2 flex items-center gap-2">
+              <Input
+                placeholder="Previous year document id"
+                value={lineageDocId}
+                onChange={(e) => setLineageDocId(e.target.value)}
+                className="text-xs"
+              />
+              <Button size="sm" variant="outline" onClick={() => linkMutation.mutate()} disabled={!lineageDocId || linkMutation.isPending}>
+                Link
+              </Button>
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Close</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -164,6 +359,7 @@ export function InstitutionalDocumentsPage() {
   const [categoryId, setCategoryId] = useState('');
   const [departmentId, setDepartmentId] = useState('');
   const [search, setSearch] = useState('');
+  const [versionsDoc, setVersionsDoc] = useState(null);
 
   const { data: years } = useQuery({ queryKey: ['academic-years'], queryFn: () => academicYearsApi.list() });
   const { data: activeYear } = useQuery({ queryKey: ['academic-years', 'active'], queryFn: () => academicYearsApi.getActive() });
@@ -206,6 +402,29 @@ export function InstitutionalDocumentsPage() {
   function invalidateList() {
     queryClient.invalidateQueries({ queryKey: ['documents', 'institutional', 'list'] });
   }
+
+  // Publish/supersede submit a WorkflowService approval request (task
+  // #4) — they do not flip the document's status themselves; a
+  // principal resolves it from the existing Pending Approvals page
+  // (routes/workflowRequests.js's own generic dispatch, extended for
+  // entity_type 'institutional_document_publish'/'_supersede'). Archive
+  // is the one direct action (no approval gate — see
+  // documentService.archiveInstitutionalDocument's own comment).
+  const publishMutation = useMutation({
+    mutationFn: (id) => documentsApi.submitPublish(id),
+    onSuccess: () => { toast.success('Submitted for publish approval'); invalidateList(); },
+    onError: (err) => toast.error(err instanceof ApiError ? err.detail : 'Could not submit for publish'),
+  });
+  const supersedeMutation = useMutation({
+    mutationFn: (id) => documentsApi.submitSupersede(id),
+    onSuccess: () => { toast.success('Submitted for supersede approval'); invalidateList(); },
+    onError: (err) => toast.error(err instanceof ApiError ? err.detail : 'Could not submit for supersede'),
+  });
+  const archiveMutation = useMutation({
+    mutationFn: (id) => documentsApi.archive(id),
+    onSuccess: () => { toast.success('Document archived'); invalidateList(); },
+    onError: (err) => toast.error(err instanceof ApiError ? err.detail : 'Could not archive document'),
+  });
 
   return (
     <div className="space-y-4">
@@ -285,8 +504,9 @@ export function InstitutionalDocumentsPage() {
                   <TableHead>Title</TableHead>
                   <TableHead>Category</TableHead>
                   <TableHead>Department</TableHead>
+                  <TableHead>Status</TableHead>
                   <TableHead>Uploaded</TableHead>
-                  <TableHead className="w-10" />
+                  <TableHead className="w-24" />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -295,11 +515,44 @@ export function InstitutionalDocumentsPage() {
                     <TableCell className="font-medium">{doc.title || doc.file_name}</TableCell>
                     <TableCell>{categoryNameById.get(doc.category_id) || doc.doc_type}</TableCell>
                     <TableCell>{departmentNameById.get(doc.department_id) || 'College-wide'}</TableCell>
+                    <TableCell><StatusBadge status={doc.publication_status} /></TableCell>
                     <TableCell className="text-muted-foreground">{formatDate(doc.created_at)}</TableCell>
                     <TableCell>
-                      <Button size="icon" variant="ghost" onClick={() => documentsApi.download(doc.id, doc.file_name)}>
-                        <Download className="h-4 w-4" />
-                      </Button>
+                      <div className="flex items-center justify-end gap-1">
+                        <Button size="icon" variant="ghost" onClick={() => setVersionsDoc(doc)} title="Versions & lineage">
+                          <History className="h-4 w-4" />
+                        </Button>
+                        <Button size="icon" variant="ghost" onClick={() => documentsApi.download(doc.id, doc.file_name)} title="Download">
+                          <Download className="h-4 w-4" />
+                        </Button>
+                        <RoleGate permission="documents.institutional.upload">
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button size="icon" variant="ghost" title="Lifecycle actions">⋮</Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              {doc.publication_status === 'Draft' && (
+                                <DropdownMenuItem onClick={() => publishMutation.mutate(doc.id)}>
+                                  Submit for publish
+                                </DropdownMenuItem>
+                              )}
+                              {doc.publication_status === 'Published' && (
+                                <DropdownMenuItem onClick={() => supersedeMutation.mutate(doc.id)}>
+                                  Submit for supersede
+                                </DropdownMenuItem>
+                              )}
+                              {(doc.publication_status === 'Published' || doc.publication_status === 'Superseded') && (
+                                <DropdownMenuItem onClick={() => archiveMutation.mutate(doc.id)}>
+                                  Archive
+                                </DropdownMenuItem>
+                              )}
+                              {doc.publication_status === 'Archived' && (
+                                <DropdownMenuItem disabled>No actions available</DropdownMenuItem>
+                              )}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </RoleGate>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -308,6 +561,8 @@ export function InstitutionalDocumentsPage() {
           )}
         </CardContent>
       </Card>
+
+      {versionsDoc && <VersionHistoryDialog document={versionsDoc} onClose={() => setVersionsDoc(null)} />}
     </div>
   );
 }

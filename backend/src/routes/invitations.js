@@ -74,6 +74,11 @@ function createInvitationsRouter() {
         res.status(409).json({ detail: err.message });
         return;
       }
+      if (err instanceof authService.PasswordResetValidationError) {
+        await req.rollbackTransaction();
+        res.status(400).json({ detail: err.message });
+        return;
+      }
       throw err;
     }
 

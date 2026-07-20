@@ -8,6 +8,7 @@ const staffService = require('../services/staffService');
 const financeService = require('../services/financeService');
 const notificationService = require('../services/notificationService');
 const academicService = require('../services/academicService');
+const documentService = require('../services/documentService');
 
 function requireResolvedTenant(req, res) {
   if (req.collegeId === null) {
@@ -158,6 +159,26 @@ function mapWorkflowRequestsError(err, res) {
     res.status(501).json({ detail: err.message });
     return true;
   }
+  // Institutional Documents Phase 3 — publish/supersede cascade
+  // (documentService.approvePublish/rejectPublish/approveSupersede/
+  // rejectSupersede below), same shape financeService's own fee
+  // structure error mapping above already establishes.
+  if (err instanceof documentService.DocumentValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof documentService.DocumentVersionNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof documentService.DocumentNoPendingRequestError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof documentService.DocumentPublicationStateError) {
+    res.status(409).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -191,6 +212,14 @@ async function dispatchWorkflowAction(req, action) {
   }
   if (request.entity_type === 'fee_structure') {
     const fn = action === 'approve' ? financeService.approveFeeStructure : financeService.rejectFeeStructure;
+    return { result: await fn(req.dbClient, request.entity_id, { actorUserId, remarks }) };
+  }
+  if (request.entity_type === 'institutional_document_publish') {
+    const fn = action === 'approve' ? documentService.approvePublish : documentService.rejectPublish;
+    return { result: await fn(req.dbClient, request.entity_id, { actorUserId, remarks }) };
+  }
+  if (request.entity_type === 'institutional_document_supersede') {
+    const fn = action === 'approve' ? documentService.approveSupersede : documentService.rejectSupersede;
     return { result: await fn(req.dbClient, request.entity_id, { actorUserId, remarks }) };
   }
   if (request.entity_type === 'notification') {

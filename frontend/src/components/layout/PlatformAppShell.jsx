@@ -1,9 +1,11 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { LogOut, User } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { Bell, LogOut, Mail, User } from 'lucide-react';
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel,
 } from '@/components/ui/dropdown-menu';
 import { usePlatformAuth } from '@/hooks/usePlatformAuth';
+import { platformAdminApi } from '@/api/platform';
 import { cn } from '@/lib/utils';
 
 const NAV_ITEMS = [
@@ -21,6 +23,53 @@ function navLinkClass({ isActive }) {
   );
 }
 
+function NotificationsBell() {
+  const { data, isLoading } = useQuery({
+    queryKey: ['platform', 'invitations', { status: 'pending', limit: 5 }],
+    queryFn: () => platformAdminApi.listInvitations({ status: 'pending', limit: 5 }),
+  });
+  const count = data?.length ?? 0;
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="relative flex h-10 w-10 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <Bell className="h-4 w-4" />
+          {count > 0 && (
+            <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold text-destructive-foreground">
+              {count}
+            </span>
+          )}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-72">
+        <DropdownMenuLabel>Pending invitations</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {isLoading && <DropdownMenuItem disabled>Loading…</DropdownMenuItem>}
+        {!isLoading && count === 0 && <DropdownMenuItem disabled>No pending invitations.</DropdownMenuItem>}
+        {data?.map((inv) => (
+          <DropdownMenuItem key={inv.id} disabled className="flex items-start gap-2 opacity-100">
+            <Mail className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <div className="overflow-hidden">
+              <div className="truncate text-sm font-medium text-foreground">{inv.email}</div>
+              <div className="truncate text-xs text-muted-foreground">
+                {inv.college_id} · Expires {new Date(inv.expires_at).toLocaleDateString()}
+              </div>
+            </div>
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild className="cursor-pointer justify-center text-sm font-medium">
+          <NavLink to="/platform/invitations">View all</NavLink>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export function PlatformAppShell() {
   const { logout } = usePlatformAuth();
   const navigate = useNavigate();
@@ -31,8 +80,8 @@ export function PlatformAppShell() {
   }
 
   return (
-    <div className="min-h-screen bg-page-gradient">
-      <div className="mx-auto flex max-w-[1600px] flex-col gap-4 p-3 sm:p-4">
+    <div className="flex h-screen flex-col overflow-hidden bg-page-gradient">
+      <div className="mx-auto flex h-full w-full max-w-[1600px] flex-col gap-4 overflow-hidden p-3 sm:p-4">
         <header className="flex flex-wrap items-center gap-3 px-2 py-1">
           <div className="rounded-full border-[1.5px] border-foreground/70 px-4 py-2 text-[17px] font-bold tracking-tight">
             ARCNAVE
@@ -48,6 +97,7 @@ export function PlatformAppShell() {
           </nav>
 
           <div className="flex shrink-0 items-center gap-2">
+            <NotificationsBell />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button
@@ -72,7 +122,7 @@ export function PlatformAppShell() {
           </div>
         </header>
 
-        <main className="flex-1">
+        <main className="min-h-0 flex-1 overflow-hidden">
           <Outlet />
         </main>
       </div>

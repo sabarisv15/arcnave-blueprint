@@ -28,6 +28,8 @@ const documentService = require('../src/services/documentService');
 const visibilityService = require('../src/services/visibilityService');
 const documentCategoryService = require('../src/services/documentCategoryService');
 const academicYearService = require('../src/services/academicYearService');
+const workflowService = require('../src/services/workflowService');
+const staffService = require('../src/services/staffService');
 
 function buildFakeDocxBuffer() {
   const zip = new PizZip();
@@ -268,8 +270,20 @@ test('DocumentService validation, actor stamping, and audit logging (no DB, no f
     assert.equal(createMock.mock.callCount(), 0);
   });
 
+  // findByContentHash/findSimilarInstitutional (Phase 3's duplicate
+  // check) both stubbed to "nothing found" — these two tests exercise
+  // category/year resolution only, not duplicate detection (that has
+  // its own dedicated tests below).
+  function mockNoDuplicates(t) {
+    const hashMock = t.mock.method(documentRepository, 'findByContentHash', async () => []);
+    const similarMock = t.mock.method(documentRepository, 'findSimilarInstitutional', async () => []);
+    t.after(() => { hashMock.mock.restore(); similarMock.mock.restore(); });
+    return { hashMock, similarMock };
+  }
+
   await t.test('uploadInstitutionalDocument resolves category/active-year, forces studentId to null, and derives docType from the category slug', async () => {
-    const { createMock } = mockHappyPath(t);
+    const { createMock, updateMock } = mockHappyPath(t);
+    mockNoDuplicates(t);
     const getCategoryMock = t.mock.method(documentCategoryService, 'getCategory', async () => ({ id: 'cat-1', slug: 'circular', name: 'Circulars' }));
     const getActiveYearMock = t.mock.method(academicYearService, 'getActiveAcademicYear', async () => ({ id: 'year-1' }));
     t.after(() => { getCategoryMock.mock.restore(); getActiveYearMock.mock.restore(); });
@@ -286,10 +300,18 @@ test('DocumentService validation, actor stamping, and audit logging (no DB, no f
     assert.equal(fields.title, 'Diwali holiday notice');
     assert.equal(fields.categoryId, 'cat-1');
     assert.equal(fields.academicYearId, 'year-1', 'omitted academicYearId must default to the college\'s active year');
+    // The Phase 3 targeted update: a fresh group starts as version 1,
+    // Draft, with its own id as its document_group_id.
+    assert.equal(updateMock.mock.callCount(), 1);
+    const [, , updateFields] = updateMock.mock.calls[0].arguments;
+    assert.equal(updateFields.versionNumber, 1);
+    assert.equal(updateFields.publicationStatus, 'Draft');
+    assert.equal(updateFields.documentGroupId, 'doc-1');
   });
 
   await t.test('uploadInstitutionalDocument leaves academicYearId null when no year is Active', async () => {
     const { createMock } = mockHappyPath(t);
+    mockNoDuplicates(t);
     const getCategoryMock = t.mock.method(documentCategoryService, 'getCategory', async () => ({ id: 'cat-1', slug: 'circular', name: 'Circulars' }));
     const getActiveYearMock = t.mock.method(academicYearService, 'getActiveAcademicYear', async () => null);
     t.after(() => { getCategoryMock.mock.restore(); getActiveYearMock.mock.restore(); });
@@ -302,17 +324,77 @@ test('DocumentService validation, actor stamping, and audit logging (no DB, no f
     assert.equal(fields.academicYearId, null);
   });
 
-  await t.test('listInstitutionalDocuments delegates to documentRepository.findInstitutional with the given filters', async () => {
+  await t.test('uploadInstitutionalDocument blocks an exact-duplicate (content_hash match) unless confirmUpload is set', async () => {
+    mockHappyPath(t);
+    const getCategoryMock = t.mock.method(documentCategoryService, 'getCategory', async () => ({ id: 'cat-1', slug: 'circular', name: 'Circulars' }));
+    const getActiveYearMock = t.mock.method(academicYearService, 'getActiveAcademicYear', async () => ({ id: 'year-1' }));
+    const hashMock = t.mock.method(documentRepository, 'findByContentHash', async () => [{ id: 'existing-1', title: 'Notice' }]);
+    const similarMock = t.mock.method(documentRepository, 'findSimilarInstitutional', async () => []);
+    t.after(() => {
+      getCategoryMock.mock.restore(); getActiveYearMock.mock.restore(); hashMock.mock.restore(); similarMock.mock.restore();
+    });
+
+    await assert.rejects(
+      () => documentService.uploadInstitutionalDocument({}, {
+        collegeId: 'c1', title: 'Notice', categoryId: 'cat-1', fileName: 'notice.pdf', mimeType: 'application/pdf', fileBuffer: Buffer.from('x'),
+      }, { actorUserId: 'u1' }),
+      documentService.DocumentDuplicateDetectedError,
+    );
+
+    // confirmUpload: true proceeds past the same duplicate.
+    const { createMock } = mockHappyPath(t);
+    await documentService.uploadInstitutionalDocument({}, {
+      collegeId: 'c1', title: 'Notice', categoryId: 'cat-1', fileName: 'notice.pdf', mimeType: 'application/pdf', fileBuffer: Buffer.from('x'), confirmUpload: true,
+    }, { actorUserId: 'u1' });
+    assert.equal(createMock.mock.callCount(), 1);
+  });
+
+  await t.test('uploadInstitutionalDocument with a documentGroupId uploads a new version, skipping duplicate detection', async () => {
+    const { createMock, updateMock } = mockHappyPath(t);
+    const hashMock = t.mock.method(documentRepository, 'findByContentHash', async () => { throw new Error('must not be called when versioning'); });
+    const findLatestMock = t.mock.method(documentRepository, 'findLatestInGroup', async () => ({
+      id: 'v1', version_number: 1, category_id: 'cat-1', academic_year_id: 'year-1',
+    }));
+    const getCategoryMock = t.mock.method(documentCategoryService, 'getCategory', async () => ({ id: 'cat-1', slug: 'circular', name: 'Circulars' }));
+    t.after(() => {
+      hashMock.mock.restore(); findLatestMock.mock.restore(); getCategoryMock.mock.restore();
+    });
+
+    await documentService.uploadInstitutionalDocument({}, {
+      collegeId: 'c1', title: 'Notice v2', documentGroupId: 'group-1', fileName: 'notice-v2.pdf', mimeType: 'application/pdf', fileBuffer: Buffer.from('y'),
+    }, { actorUserId: 'u1' });
+
+    assert.equal(createMock.mock.callCount(), 1);
+    const [, , updateFields] = updateMock.mock.calls[0].arguments;
+    assert.equal(updateFields.versionNumber, 2);
+    assert.equal(updateFields.documentGroupId, 'group-1');
+    assert.equal(updateFields.publicationStatus, 'Draft');
+  });
+
+  await t.test('listInstitutionalDocuments delegates to documentRepository.findInstitutional with the given filters, and a staff-tier role applies no publication_status filter', async () => {
     const findInstitutionalMock = t.mock.method(documentRepository, 'findInstitutional', async () => [{ id: 'doc-1' }]);
     t.after(() => findInstitutionalMock.mock.restore());
 
-    const result = await documentService.listInstitutionalDocuments({}, { categoryId: 'cat-1', academicYearId: 'year-1', departmentId: 'dept-1', search: 'notice' });
+    const result = await documentService.listInstitutionalDocuments(
+      {},
+      { categoryId: 'cat-1', academicYearId: 'year-1', departmentId: 'dept-1', search: 'notice' },
+      { actorRole: 'staff' },
+    );
 
     assert.equal(findInstitutionalMock.mock.callCount(), 1);
     assert.deepEqual(findInstitutionalMock.mock.calls[0].arguments[1], {
-      docType: undefined, classId: undefined, categoryId: 'cat-1', academicYearId: 'year-1', departmentId: 'dept-1', search: 'notice',
+      docType: undefined, classId: undefined, categoryId: 'cat-1', academicYearId: 'year-1', departmentId: 'dept-1', search: 'notice', publicationStatuses: undefined,
     });
     assert.deepEqual(result, [{ id: 'doc-1' }]);
+  });
+
+  await t.test('listInstitutionalDocuments restricts a non-staff-tier role to Published only', async () => {
+    const findInstitutionalMock = t.mock.method(documentRepository, 'findInstitutional', async () => []);
+    t.after(() => findInstitutionalMock.mock.restore());
+
+    await documentService.listInstitutionalDocuments({}, {}, { actorRole: 'student' });
+
+    assert.deepEqual(findInstitutionalMock.mock.calls[0].arguments[1].publicationStatuses, ['Published']);
   });
 
   await t.test('mergeDocumentTemplate persists the merged bytes as a new document via uploadDocument', async () => {
@@ -426,6 +508,283 @@ test('DocumentService.assertCanViewDocument (no DB)', async (t) => {
         { actorUserId: 'other-staff-u2', actorRole: 'staff' },
       ),
       documentService.DocumentNotAuthorizedError,
+    );
+  });
+
+  await t.test('an institutional document (category_id set) is readable by staff-tier roles regardless of publication_status', async () => {
+    await documentService.assertCanViewDocument(
+      {},
+      {
+        id: 'inst-1', student_id: null, category_id: 'cat-1', doc_type: 'circular', publication_status: 'Draft', uploaded_by_user_id: 'staff-u1',
+      },
+      { actorUserId: 'other-staff-u2', actorRole: 'staff' },
+    );
+  });
+
+  await t.test('an institutional document is rejected for a non-staff-tier role unless Published', async () => {
+    await assert.rejects(
+      () => documentService.assertCanViewDocument(
+        {},
+        {
+          id: 'inst-1', student_id: null, category_id: 'cat-1', doc_type: 'circular', publication_status: 'Draft', uploaded_by_user_id: 'staff-u1',
+        },
+        { actorUserId: 'student-u1', actorRole: 'student' },
+      ),
+      documentService.DocumentNotAuthorizedError,
+    );
+
+    await documentService.assertCanViewDocument(
+      {},
+      {
+        id: 'inst-1', student_id: null, category_id: 'cat-1', doc_type: 'circular', publication_status: 'Published', uploaded_by_user_id: 'staff-u1',
+      },
+      { actorUserId: 'student-u1', actorRole: 'student' },
+    );
+  });
+});
+
+// Institutional Documents Phase 3 — version history, comparison,
+// cross-year lineage, and the publish/supersede/archive lifecycle.
+// Same no-DB, no-filesystem mocking discipline as the rest of this
+// file: workflowService/staffService are stubbed here too, since
+// publish/supersede route through workflowService.submitRequest/
+// approveRequest/rejectRequest exactly like
+// financeService.submitFeeStructureApproval already does (see
+// finance-service.test.js for the precedent this mirrors).
+test('DocumentService Phase 3 — versions, lineage, publish/supersede/archive (no DB)', async (t) => {
+  await t.test('getVersionHistory delegates to documentRepository.findByGroupId', async () => {
+    const findByGroupIdMock = t.mock.method(documentRepository, 'findByGroupId', async (client, groupId) => [
+      { id: 'v2', version_number: 2, document_group_id: groupId },
+      { id: 'v1', version_number: 1, document_group_id: groupId },
+    ]);
+    t.after(() => findByGroupIdMock.mock.restore());
+
+    const versions = await documentService.getVersionHistory({}, 'group-1');
+    assert.equal(versions.length, 2);
+    assert.equal(findByGroupIdMock.mock.calls[0].arguments[1], 'group-1');
+  });
+
+  await t.test('compareDocumentVersions surfaces metadata differences and flags identical content via content_hash', async () => {
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async (client, id) => {
+      if (id === 'v1') {
+        return {
+          id: 'v1', title: 'Notice', file_name: 'n1.pdf', mime_type: 'application/pdf', file_size_bytes: 100, content_hash: 'abc',
+        };
+      }
+      return {
+        id: 'v2', title: 'Notice (revised)', file_name: 'n1.pdf', mime_type: 'application/pdf', file_size_bytes: 100, content_hash: 'abc',
+      };
+    });
+    t.after(() => findByIdMock.mock.restore());
+
+    const result = await documentService.compareDocumentVersions({}, 'v1', 'v2');
+    assert.deepEqual(result.metadataDiff.title, { from: 'Notice', to: 'Notice (revised)' });
+    assert.equal(result.metadataDiff.file_name, undefined, 'unchanged fields must be omitted');
+    assert.deepEqual(result.contentDiff, { identical: true });
+  });
+
+  await t.test('compareDocumentVersions rejects when either version id does not exist', async () => {
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async (client, id) => (id === 'v1' ? { id: 'v1' } : null));
+    t.after(() => findByIdMock.mock.restore());
+
+    await assert.rejects(
+      () => documentService.compareDocumentVersions({}, 'v1', 'missing'),
+      documentService.DocumentVersionNotFoundError,
+    );
+  });
+
+  await t.test('linkDocumentLineage sets lineage_parent_id after validating both documents exist and rejects a direct self-link', async () => {
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async (client, id) => ({ id, college_id: 'c1', lineage_parent_id: null }));
+    const updateMock = t.mock.method(documentRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => { findByIdMock.mock.restore(); updateMock.mock.restore(); auditMock.mock.restore(); });
+
+    const updated = await documentService.linkDocumentLineage(
+      {},
+      { documentId: 'doc-2026', previousYearDocumentId: 'doc-2025' },
+      { actorUserId: 'u1' },
+    );
+    assert.equal(updated.lineageParentId, 'doc-2025');
+    assert.equal(auditMock.mock.callCount(), 1);
+
+    await assert.rejects(
+      () => documentService.linkDocumentLineage({}, { documentId: 'doc-x', previousYearDocumentId: 'doc-x' }, { actorUserId: 'u1' }),
+      documentService.DocumentLineageError,
+    );
+  });
+
+  await t.test('linkDocumentLineage rejects a cycle (A -> B -> A)', async () => {
+    // doc-a already points at doc-b; linking doc-b -> doc-a would close
+    // the loop.
+    const rows = {
+      'doc-a': { id: 'doc-a', college_id: 'c1', lineage_parent_id: 'doc-b' },
+      'doc-b': { id: 'doc-b', college_id: 'c1', lineage_parent_id: null },
+    };
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async (client, id) => rows[id] || null);
+    t.after(() => findByIdMock.mock.restore());
+
+    await assert.rejects(
+      () => documentService.linkDocumentLineage({}, { documentId: 'doc-b', previousYearDocumentId: 'doc-a' }, { actorUserId: 'u1' }),
+      documentService.DocumentLineageError,
+    );
+  });
+
+  await t.test('getDocumentLineage returns ancestors oldest-first and descendants', async () => {
+    const rows = {
+      'y2026': {
+        id: 'y2026', title: '2026 Curriculum', lineage_parent_id: 'y2025',
+      },
+      'y2025': {
+        id: 'y2025', title: '2025 Curriculum', lineage_parent_id: 'y2024',
+      },
+      'y2024': { id: 'y2024', title: '2024 Curriculum', lineage_parent_id: null },
+    };
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async (client, id) => rows[id] || null);
+    const findByLineageParentIdMock = t.mock.method(documentRepository, 'findByLineageParentId', async () => [{ id: 'y2027', title: '2027 Curriculum' }]);
+    t.after(() => { findByIdMock.mock.restore(); findByLineageParentIdMock.mock.restore(); });
+
+    const lineage = await documentService.getDocumentLineage({}, 'y2026');
+    assert.deepEqual(lineage.ancestors.map((a) => a.id), ['y2024', 'y2025']);
+    assert.deepEqual(lineage.descendants.map((d) => d.id), ['y2027']);
+  });
+
+  await t.test('submitPublishRequest only accepts a Draft document and routes through workflowService with a principal-only chain', async () => {
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async () => ({
+      id: 'doc-1', college_id: 'c1', publication_status: 'Draft',
+    }));
+    const findPrincipalMock = t.mock.method(staffService, 'findPrincipal', async () => ({ user_id: 'principal-1' }));
+    const submitMock = t.mock.method(workflowService, 'submitRequest', async (client, fields) => ({ id: 'wf-1', ...fields }));
+    t.after(() => { findByIdMock.mock.restore(); findPrincipalMock.mock.restore(); submitMock.mock.restore(); });
+
+    const request = await documentService.submitPublishRequest({}, 'doc-1', { requestedByUserId: 'u1' });
+    assert.equal(request.entityType, 'institutional_document_publish');
+    assert.equal(request.entityId, 'doc-1');
+    assert.deepEqual(request.approverChain, [{ step: 1, role: 'principal', user_id: 'principal-1' }]);
+  });
+
+  await t.test('submitPublishRequest rejects a document that is not Draft', async () => {
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async () => ({
+      id: 'doc-1', college_id: 'c1', publication_status: 'Published',
+    }));
+    t.after(() => findByIdMock.mock.restore());
+
+    await assert.rejects(
+      () => documentService.submitPublishRequest({}, 'doc-1', { requestedByUserId: 'u1' }),
+      documentService.DocumentPublicationStateError,
+    );
+  });
+
+  await t.test('approvePublish sets Published and automatically supersedes a previously Published sibling in the same group', async () => {
+    const rows = {
+      'doc-2': {
+        id: 'doc-2', college_id: 'c1', publication_status: 'Draft', document_group_id: 'group-1',
+      },
+    };
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async (client, id) => rows[id]);
+    const findPendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({ id: 'wf-1', status: 'Approved' }));
+    const findByGroupIdMock = t.mock.method(documentRepository, 'findByGroupId', async () => [
+      {
+        id: 'doc-1', publication_status: 'Published', document_group_id: 'group-1',
+      },
+      rows['doc-2'],
+    ]);
+    const updateMock = t.mock.method(documentRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findByIdMock.mock.restore(); findPendingMock.mock.restore(); approveMock.mock.restore();
+      findByGroupIdMock.mock.restore(); updateMock.mock.restore(); auditMock.mock.restore();
+    });
+
+    const updated = await documentService.approvePublish({}, 'doc-2', { actorUserId: 'principal-1' });
+    assert.equal(updated.publicationStatus, 'Published');
+    assert.equal(updateMock.mock.callCount(), 2, 'must update both the superseded sibling and the newly published document');
+    const supersedeCall = updateMock.mock.calls.find((c) => c.arguments[1] === 'doc-1');
+    assert.equal(supersedeCall.arguments[2].publicationStatus, 'Superseded');
+  });
+
+  await t.test('approvePublish/approveSupersede reject when there is no pending request for the document', async () => {
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async () => ({ id: 'doc-1', college_id: 'c1', publication_status: 'Draft' }));
+    const findPendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => null);
+    t.after(() => { findByIdMock.mock.restore(); findPendingMock.mock.restore(); });
+
+    await assert.rejects(
+      () => documentService.approvePublish({}, 'doc-1', { actorUserId: 'principal-1' }),
+      documentService.DocumentNoPendingRequestError,
+    );
+  });
+
+  await t.test('rejectPublish leaves the document Draft', async () => {
+    const document = {
+      id: 'doc-1', college_id: 'c1', publication_status: 'Draft',
+    };
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async () => document);
+    const findPendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const rejectMock = t.mock.method(workflowService, 'rejectRequest', async () => ({ id: 'wf-1', status: 'Rejected' }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findByIdMock.mock.restore(); findPendingMock.mock.restore(); rejectMock.mock.restore(); auditMock.mock.restore();
+    });
+
+    const result = await documentService.rejectPublish({}, 'doc-1', { actorUserId: 'principal-1' });
+    assert.equal(result.publication_status, 'Draft');
+  });
+
+  await t.test('submitSupersedeRequest only accepts a Published document', async () => {
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async () => ({
+      id: 'doc-1', college_id: 'c1', publication_status: 'Draft',
+    }));
+    t.after(() => findByIdMock.mock.restore());
+
+    await assert.rejects(
+      () => documentService.submitSupersedeRequest({}, 'doc-1', { requestedByUserId: 'u1' }),
+      documentService.DocumentPublicationStateError,
+    );
+  });
+
+  await t.test('approveSupersede sets Superseded and stamps superseded_at', async () => {
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async () => ({
+      id: 'doc-1', college_id: 'c1', publication_status: 'Published',
+    }));
+    const findPendingMock = t.mock.method(workflowService, 'findPendingForEntity', async () => ({ id: 'wf-1' }));
+    const approveMock = t.mock.method(workflowService, 'approveRequest', async () => ({}));
+    const updateMock = t.mock.method(documentRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findByIdMock.mock.restore(); findPendingMock.mock.restore(); approveMock.mock.restore(); updateMock.mock.restore(); auditMock.mock.restore();
+    });
+
+    const updated = await documentService.approveSupersede({}, 'doc-1', { actorUserId: 'principal-1' });
+    assert.equal(updated.publicationStatus, 'Superseded');
+    assert.ok(updated.supersededAt instanceof Date);
+  });
+
+  await t.test('archiveInstitutionalDocument is a direct action (no workflowService call) and only accepts Published/Superseded', async () => {
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async () => ({
+      id: 'doc-1', college_id: 'c1', publication_status: 'Superseded',
+    }));
+    const submitMock = t.mock.method(workflowService, 'submitRequest', async () => { throw new Error('must not be called'); });
+    const updateMock = t.mock.method(documentRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    t.after(() => {
+      findByIdMock.mock.restore(); submitMock.mock.restore(); updateMock.mock.restore(); auditMock.mock.restore();
+    });
+
+    const updated = await documentService.archiveInstitutionalDocument({}, 'doc-1', { actorUserId: 'principal-1' });
+    assert.equal(updated.publicationStatus, 'Archived');
+    assert.ok(updated.archivedAt instanceof Date);
+    assert.equal(submitMock.mock.callCount(), 0);
+  });
+
+  await t.test('archiveInstitutionalDocument rejects a Draft document', async () => {
+    const findByIdMock = t.mock.method(documentRepository, 'findById', async () => ({
+      id: 'doc-1', college_id: 'c1', publication_status: 'Draft',
+    }));
+    t.after(() => findByIdMock.mock.restore());
+
+    await assert.rejects(
+      () => documentService.archiveInstitutionalDocument({}, 'doc-1', { actorUserId: 'principal-1' }),
+      documentService.DocumentPublicationStateError,
     );
   });
 });
