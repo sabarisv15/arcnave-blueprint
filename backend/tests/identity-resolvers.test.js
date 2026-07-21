@@ -325,4 +325,122 @@ test('identity resolvers (Phase 3)', async (t) => {
     const noHod = await identityService.resolvePositionOccupant(pool, { collegeId, departmentId: deptId });
     assert.equal(noHod, null);
   });
+
+  // Phase 2 step 4 — the Institutional Identity Context's
+  // resolveCapabilitiesForPosition, not wired to any middleware/route
+  // yet. Proves decision 4: capabilities resolve for exactly the
+  // queried Position Account, never unioned with any other position
+  // the same occupant also holds.
+  await t.test('identityService.resolveCapabilitiesForPosition: Level 1 -> principal/college, own moduleKeys only', async () => {
+    const collegeId = `idr${suffix}j`;
+    collegeIds.push(collegeId);
+    await insertCollege(pool, collegeId);
+    const principalUserId = await insertUser(pool, collegeId, 'principal5', 'principal');
+    const { position, account } = await makePosition(pool, {
+      collegeId, level: 1, title: 'Principal', createdBy: principalUserId,
+    });
+    await occupy(pool, { collegeId, accountId: account.id, userId: principalUserId });
+    await positionRepository.createPositionModuleAssignment(pool, {
+      collegeId, positionId: position.id, moduleKey: 'finance', assignedBy: principalUserId,
+    });
+
+    const capabilities = await identityService.resolveCapabilitiesForPosition(pool, { positionAccountId: account.id });
+
+    assert.equal(capabilities.positionAccountId, account.id);
+    assert.equal(capabilities.positionId, position.id);
+    assert.equal(capabilities.level, 1);
+    assert.equal(capabilities.positionType, null);
+    assert.equal(capabilities.collegeId, collegeId);
+    assert.equal(capabilities.currentOccupantUserId, principalUserId);
+    assert.deepEqual(capabilities.moduleKeys, ['finance']);
+    assert.deepEqual(capabilities.departmentIds, []);
+    assert.deepEqual(capabilities.classIds, []);
+    assert.equal(capabilities.effectiveRole, 'principal');
+    assert.equal(capabilities.scopeLevel, 'college');
+  });
+
+  await t.test('identityService.resolveCapabilitiesForPosition: Level 2 -> level2/department', async () => {
+    const collegeId = `idr${suffix}k`;
+    collegeIds.push(collegeId);
+    await insertCollege(pool, collegeId);
+    const level2UserId = await insertUser(pool, collegeId, 'level2user2', 'staff');
+    const deptId = await insertDepartment(pool, collegeId, 'Dean Office 2');
+    const { position, account } = await makePosition(pool, {
+      collegeId, level: 2, title: 'Vice Principal', createdBy: level2UserId,
+    });
+    await occupy(pool, { collegeId, accountId: account.id, userId: level2UserId });
+    await positionRepository.createPositionDepartmentAssignment(pool, {
+      collegeId, positionId: position.id, departmentId: deptId, assignedBy: level2UserId,
+    });
+
+    const capabilities = await identityService.resolveCapabilitiesForPosition(pool, { positionAccountId: account.id });
+    assert.equal(capabilities.effectiveRole, 'level2');
+    assert.equal(capabilities.scopeLevel, 'department');
+    assert.deepEqual(capabilities.departmentIds, [deptId]);
+  });
+
+  await t.test('identityService.resolveCapabilitiesForPosition: Level 4 + position_type=class_tutor -> class_tutor/class, classIds still [] (no classResolver yet)', async () => {
+    const collegeId = `idr${suffix}l`;
+    collegeIds.push(collegeId);
+    await insertCollege(pool, collegeId);
+    const tutorUserId = await insertUser(pool, collegeId, 'tutor1', 'staff');
+    const { position, account } = await makePosition(pool, {
+      collegeId, level: 4, title: 'Class Tutor', createdBy: tutorUserId,
+    });
+    await pool.query("UPDATE positions SET position_type = 'class_tutor' WHERE id = $1", [position.id]);
+    await occupy(pool, { collegeId, accountId: account.id, userId: tutorUserId });
+
+    const capabilities = await identityService.resolveCapabilitiesForPosition(pool, { positionAccountId: account.id });
+    assert.equal(capabilities.positionType, 'class_tutor');
+    assert.equal(capabilities.effectiveRole, 'class_tutor');
+    assert.equal(capabilities.scopeLevel, 'class');
+    assert.deepEqual(capabilities.classIds, []);
+  });
+
+  await t.test('identityService.resolveCapabilitiesForPosition: throws PositionAccountNotFoundError for an unknown positionAccountId', async () => {
+    await assert.rejects(
+      () => identityService.resolveCapabilitiesForPosition(pool, { positionAccountId: crypto.randomUUID() }),
+      identityService.PositionAccountNotFoundError,
+    );
+  });
+
+  await t.test('identityService.resolveCapabilitiesForPosition: one occupant holding TWO positions gets each position\'s OWN scope, never unioned', async () => {
+    const collegeId = `idr${suffix}m`;
+    collegeIds.push(collegeId);
+    await insertCollege(pool, collegeId);
+    const deptId = await insertDepartment(pool, collegeId, 'Physics');
+    const occupantUserId = await insertUser(pool, collegeId, 'dual1', 'staff');
+
+    const principal = await makePosition(pool, {
+      collegeId, level: 1, title: 'Principal', createdBy: occupantUserId,
+    });
+    await occupy(pool, { collegeId, accountId: principal.account.id, userId: occupantUserId });
+    await positionRepository.createPositionModuleAssignment(pool, {
+      collegeId, positionId: principal.position.id, moduleKey: 'academics', assignedBy: occupantUserId,
+    });
+
+    const hod = await makePosition(pool, {
+      collegeId, level: 3, title: 'HOD Physics', createdBy: occupantUserId,
+    });
+    await occupy(pool, { collegeId, accountId: hod.account.id, userId: occupantUserId });
+    await positionRepository.createPositionDepartmentAssignment(pool, {
+      collegeId, positionId: hod.position.id, departmentId: deptId, assignedBy: occupantUserId,
+    });
+
+    const principalCapabilities = await identityService.resolveCapabilitiesForPosition(pool, {
+      positionAccountId: principal.account.id,
+    });
+    assert.equal(principalCapabilities.effectiveRole, 'principal');
+    assert.equal(principalCapabilities.scopeLevel, 'college');
+    assert.deepEqual(principalCapabilities.moduleKeys, ['academics']);
+    assert.deepEqual(principalCapabilities.departmentIds, []);
+
+    const hodCapabilities = await identityService.resolveCapabilitiesForPosition(pool, {
+      positionAccountId: hod.account.id,
+    });
+    assert.equal(hodCapabilities.effectiveRole, 'hod');
+    assert.equal(hodCapabilities.scopeLevel, 'department');
+    assert.deepEqual(hodCapabilities.departmentIds, [deptId]);
+    assert.deepEqual(hodCapabilities.moduleKeys, []);
+  });
 });

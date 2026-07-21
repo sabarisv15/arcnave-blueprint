@@ -32,9 +32,21 @@ const departmentResolver = require('./identity/departmentResolver');
 const assignmentResolver = require('./identity/assignmentResolver');
 const visibilityResolver = require('./identity/visibilityResolver');
 const positionSlotResolver = require('./identity/positionSlotResolver');
+const positionRepository = require('../repositories/positionRepository');
 
 const PRINCIPAL_LEVEL = 1;
+const LEVEL2 = 2;
 const HOD_LEVEL = 3;
+const STAFF_LEVEL = 4;
+const CLASS_TUTOR_TYPE = 'class_tutor';
+
+// resolveCapabilitiesForPosition given a positionAccountId with no
+// matching position_accounts row (or whose position_id no longer
+// resolves) — shouldn't happen in practice by the time middleware/
+// identity.js reaches this (a Position Account access token's `sub` IS
+// the position_account_id, minted only for an account that exists),
+// but this function makes no assumption about future callers.
+class PositionAccountNotFoundError extends Error {}
 
 // The new model has no `role` string of its own (v1's whole point is
 // to stop keying authorization off a flat users.role column) — but
@@ -142,4 +154,70 @@ async function resolvePositionOccupant(client, { collegeId, level, departmentId 
   return assignmentResolver.resolveCurrentOccupantUserId(client, position.positionAccountId);
 }
 
-module.exports = { resolveCapabilities, resolvePositionOccupant };
+// Decision 4 (Phase 2 plan) / the Institutional Identity Context: a
+// SEPARATE derivation from deriveEffectiveRole above, deliberately not
+// reused — deriveEffectiveRole answers "what does this PERSON's whole
+// set of positions imply," which is exactly the union this function
+// must never produce. Pure function of one position's level +
+// position_type only. classIds/'class_tutor' are wired here as a shape
+// placeholder — a real classResolver lands in Phase 2 group (b); until
+// then a level-4/class_tutor position (none can exist yet — nothing
+// creates one) would resolve with an always-empty classIds.
+function deriveEffectiveRoleAndScopeForPosition({ level, positionType }) {
+  if (level === PRINCIPAL_LEVEL) return { effectiveRole: 'principal', scopeLevel: 'college' };
+  if (level === LEVEL2) return { effectiveRole: 'level2', scopeLevel: 'department' };
+  if (level === HOD_LEVEL) return { effectiveRole: 'hod', scopeLevel: 'department' };
+  if (level === STAFF_LEVEL && positionType === CLASS_TUTOR_TYPE) {
+    return { effectiveRole: 'class_tutor', scopeLevel: 'class' };
+  }
+  return { effectiveRole: 'staff', scopeLevel: 'department' };
+}
+
+// The Institutional Identity Context's one public entry point (Phase 2
+// decision 4) — sits ALONGSIDE resolveCapabilities, never modifying its
+// frozen ADR-022 shape. Resolves capabilities for exactly ONE Position
+// Account, never unioned with any other position the same occupant
+// might also hold personally or via a second Position Account. Called
+// from middleware/identity.js's 'position_access' branch once step 5
+// wires it — not consumed by anything yet at this step.
+async function resolveCapabilitiesForPosition(client, { positionAccountId }) {
+  const account = await positionRepository.findPositionAccountById(client, positionAccountId);
+  if (account === null) {
+    throw new PositionAccountNotFoundError(`position account ${JSON.stringify(positionAccountId)} does not exist`);
+  }
+
+  const position = await positionRepository.findPositionById(client, account.position_id);
+  if (position === null) {
+    throw new PositionAccountNotFoundError(`position ${JSON.stringify(account.position_id)} does not exist`);
+  }
+
+  const moduleKeys = await moduleResolver.resolveOwnedModules(client, position.id);
+  const departmentIds = await departmentResolver.resolveMappedDepartments(client, position.id);
+  const currentOccupantUserId = await assignmentResolver.resolveCurrentOccupantUserId(client, positionAccountId);
+
+  const { effectiveRole, scopeLevel } = deriveEffectiveRoleAndScopeForPosition({
+    level: position.level, positionType: position.position_type,
+  });
+
+  return {
+    positionAccountId,
+    positionId: position.id,
+    level: position.level,
+    positionType: position.position_type,
+    title: position.title,
+    collegeId: account.college_id,
+    currentOccupantUserId,
+    moduleKeys,
+    departmentIds,
+    classIds: [],
+    effectiveRole,
+    scopeLevel,
+  };
+}
+
+module.exports = {
+  resolveCapabilities,
+  resolvePositionOccupant,
+  resolveCapabilitiesForPosition,
+  PositionAccountNotFoundError,
+};
