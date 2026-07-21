@@ -34,14 +34,22 @@ first scoped:
    Platform Admin → Level 1/2. Level 2 → HOD (Level 3) within their own
    scope. **HOD → Class Tutor (Level 4 + `position_type='class_tutor'`)
    within their own department's classes only.**
-4. **Authorization resolves per-office.** A Position Account session
-   returns only that one position's own capabilities — a new function,
-   `identityService.resolveCapabilitiesForPosition(client,
-   {positionAccountId})`, sits *alongside* the frozen
-   `resolveCapabilities(userId)`, never modifying it. The session token
-   for a Position Account carries `sub: positionAccountId` (not a
-   userId) specifically so there's no `userId` to accidentally union
-   against.
+4. **Two named identity contexts, never blended.**
+   - **Personal Identity Context** (Phase 1, shipped): represents the
+     authenticated individual. Capabilities resolve as the union of
+     every institutional responsibility currently held by that person
+     (`identityService.resolveCapabilities(userId)`). For the user's own
+     workspace and personal operations.
+   - **Institutional Identity Context** (this phase, new): represents a
+     single institutional account. Capabilities resolve *exclusively*
+     for that account, never merged with any other responsibility the
+     current occupant holds (`identityService.resolveCapabilitiesForPosition
+     (client, {positionAccountId})`, a new function sitting *alongside*
+     the frozen `resolveCapabilities`, never modifying it). For acting
+     on behalf of a specific institutional entity. The session token
+     for a Position Account carries `sub: positionAccountId` (not a
+     userId) specifically so there's no `userId` to accidentally union
+     against.
 5. Reassignment lifecycle (ADR-021 §10) is in scope, uniformly across
    Level 1/2/3 and the Class Tutor assignment — one shared function,
    not per-type copies.

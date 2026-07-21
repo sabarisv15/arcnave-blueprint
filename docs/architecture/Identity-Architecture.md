@@ -207,22 +207,29 @@ every request, not how a subject authenticates in the first place
   Effective Identity
 ```
 
-### Current Model
-No per-request resolution happens. The role label embedded in the
-session token at login time (§8) *is* the effective identity for the
-lifetime of that session — none of the steps above (Occupant →
-Position → Scope → Capabilities) run on any request today.
+### Personal Identity Context (shipped)
+Represents the authenticated individual. On every request, the
+pipeline above runs for real: `identityService.resolveCapabilities`
+resolves the subject's active Occupant link(s), the Position(s) those
+link to, and the capabilities those positions grant — unioned across
+every position the person currently holds, plus a derived effective
+role label and scope. This is the live mechanism behind authorization
+(§9), workflow routing, visibility/data-scope, and audit logging today
+(Phase 1, commits `35092a2`..`231a5cc`). This context is for the user's
+own workspace and personal operations — it is deliberately allowed to
+reflect everything a person is entitled to, not scoped to a single
+office.
 
-### Target Model
-Each step in the diagram above is a real, independently verified
-operation (§7 details each one): given an authenticated subject, resolve
-their active Occupant link(s), the Position(s) those link to, the scope
-those positions imply, and the capabilities that scope grants —
-producing an Effective Identity that authorization (§9) and workflow
-routing consult in place of a static token claim. The resolver that
-performs this pipeline already exists and is independently verified
-against real seeded data; it has zero live callers today — no request
-path invokes it yet.
+### Institutional Identity Context (target, not yet built)
+Represents a single institutional account (Position Account) rather
+than a person. Capabilities resolve *exclusively* for that one account
+— never merged with any other responsibilities the current occupant
+happens to also hold — via a second, position-scoped resolver
+(`resolveCapabilitiesForPosition`, planned) that sits alongside the
+frozen `resolveCapabilities` contract rather than replacing it. This
+context is for acting on behalf of a specific institutional entity
+(logging in "as HOD-CSE," not "as Alice"). Not yet implemented — see
+`docs/architecture/Phase2-Position-Account-Auth-Plan.md`.
 
 ## 7. Capability Resolution
 
@@ -288,22 +295,27 @@ than one position is held.
   Occupant ──▶ Position Account ──(password, MFA)──▶ Session
 ```
 
-### Current Model
-Every authorization and workflow-routing check reads the role label
-embedded in the session token at login time — a claim minted from the
-User's own record. This is the live, active mechanism for every level
-today, including structural ones. It is not legacy scaffolding kept
-alive pending a migration; it is how authentication actually happens
-today, provisioned alongside (not superseded by) the structural
-Position Account created at the same time.
+### Personal Identity Context (shipped)
+Login is via the User record (username/password, MFA), minting a
+session whose claims are then resolved into a full Personal Identity
+Context on every request (§6/§7) via `resolveCapabilities`. This is the
+live, active mechanism for every level today, including structural
+ones. It is not legacy scaffolding kept alive pending a migration; it
+is how authentication actually happens today, provisioned alongside
+(not superseded by) the structural Position Account created at the
+same time.
 
-### Target Model
+### Institutional Identity Context (target, not yet built)
 The Position Account already carries everything an authentication path
 needs (credential, MFA state, session-version counter, recovery
 methods), but nothing reads or writes it for authentication purposes
-yet. Building that path is the prerequisite for retiring any part of
-the User-record-based flow — not a parallel option that can simply be
-switched on.
+yet. Building that path (Phase 2) adds a second, independent login
+mechanism — logging into a Position Account directly, rather than
+through a person's User record — producing an Institutional Identity
+Context (§6) instead of a Personal one. It is a new, additional
+capability, not a prerequisite for retiring the User-record-based flow;
+the two are expected to coexist — a person may have both a personal
+login and, separately, credentials for an office they occupy.
 
 ## 9. Authorization
 
@@ -319,25 +331,31 @@ switched on.
                            position-aware successor) ──▶ Allow/Deny
 ```
 
-### RBAC
-Authorization is a static, code-level role-to-permission table keyed
-on the same legacy role label space authentication issues today — not
-tenant-configurable, and not aware of positions, accounts, or
-occupants at all. This is a named, tracked gap, not an oversight.
+### RBAC (shipped)
+`middleware/rbac.js`'s `requirePermission` reads `req.capabilities.
+effectiveRole`, populated per-request by the Personal Identity Context
+resolver (`identityService.resolveCapabilities`, wired in by
+`middleware/identity.js`) — not a static claim trusted from the token
+at login time. The permission table itself is still a static,
+code-level role-to-permission map, not yet tenant-configurable, but its
+*input* (the role label) now comes from live position data every
+request, not from the User record's stored role.
 
-### Position-based permissions
-Not enforced anywhere yet. The Capability Resolver's effective-role
-output is deliberately shaped to be a drop-in comparison against the
-same role labels the permission table already uses, specifically so a
-future cutover can replace the *source* of the role label (resolved
-position data instead of the User record) without reshaping every call
-site that checks it.
+### Position-based permissions (shipped for Personal Identity Context; Institutional Identity Context not yet built)
+Enforced today for personal logins via the mechanism above. The
+Capability Resolver's effective-role output is a drop-in comparison
+against the same role labels the permission table already uses,
+specifically so the source of the role label could be swapped without
+reshaping every call site that checks it — which is exactly what
+happened. Not yet built: authorization for an Institutional Identity
+Context session (logging in as a specific office), which needs its own
+position-scoped resolver (`resolveCapabilitiesForPosition`, planned,
+Phase 2) rather than reusing this one — see §6.
 
-### Workflow integration
-Approval routing runs entirely off the same User-record role label
-today; it does not consult the Capability Resolver or any position
-data. Wiring workflow routing to resolved capabilities is a named
-future direction, not something already in place.
+### Workflow integration (shipped)
+Approval routing (`workflowChainService.resolveRoleUserId`) resolves
+'principal'/'hod' via `identityService.resolvePositionOccupant`, the
+reverse slot→occupant lookup — not a static User-record role label.
 
 ## 10. Position Lifecycle
 
@@ -471,8 +489,8 @@ the corresponding section notes must be updated together.
 |---|---|---|
 | Data model | Position/Account/Occupant/Module-scope/Department-scope tables exist, tenant-isolated, additive only | Same data model, fully consumed |
 | Structural Level 1 provisioning | Automatic, unconditional, at institution onboarding | Unchanged |
-| Resolution layer | Capability Resolver built, independently verified, zero live callers | Called from authorization, AI tooling, and workflow routing |
-| Authentication | Entirely User-record based, session token carries a role label | Position Account authentication for structural levels; User-record based (or a decided alternative) for the base level |
+| Resolution layer | Personal Identity Context (`resolveCapabilities`) live — called from authorization, workflow routing, visibility, and audit (Phase 1, `35092a2`..`231a5cc`) | Institutional Identity Context (`resolveCapabilitiesForPosition`) added alongside it, scoped per-office, never merged with Personal |
+| Authentication | Personal Identity Context: User-record based, live for every level | Institutional Identity Context: Position Account authentication, coexisting with (not replacing) the User-record path |
 | Session revocation | Enforced unconditionally, but only against the User record today; the Position Account's session-version counter exists unused | Position Account session-version counter checked once its authentication path exists |
 | Authorization | Static role→permission table keyed on legacy role labels | Position-derived effective role feeding the same table, or its successor |
 | Workflow routing | Keyed on the User record's role label | Consumes resolved capabilities, per the resolution layer's stated intent |

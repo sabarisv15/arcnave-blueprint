@@ -72,16 +72,23 @@ the seat and its powers never do.
 ### 2b. Two corrections to the original plan — BOTH RESOLVED, DESIGNED, IN THE PLAN
 
 **(i) Authorization must scope to the specific office, not the person
-broadly — RESOLVED.** Position Account login must NOT resolve straight
-through `identityService.resolveCapabilities(occupantUserId)` (that
-would return *everything the person can do*, identical to their
-personal login). Solved via a new sibling function,
-`identityService.resolveCapabilitiesForPosition(client,
-{positionAccountId})`, added **alongside** (never modifying) the
-frozen `resolveCapabilities(userId)` contract. The Position Account
-JWT's `sub` claim is the `position_account_id` itself, not a `userId`
-— structurally impossible to union against anything else the occupant
-holds. Fully designed in `Phase2-Position-Account-Auth-Plan.md`.
+broadly — RESOLVED.** Formalized as two named, never-blended identity
+contexts:
+- **Personal Identity Context** (Phase 1, shipped) — the authenticated
+  individual; capabilities are the union of every responsibility they
+  currently hold (`resolveCapabilities(userId)`). For personal
+  workspace/operations.
+- **Institutional Identity Context** (Phase 2, planned) — a single
+  institutional account; capabilities resolve exclusively for that
+  account, never merged with anything else the occupant holds
+  (`resolveCapabilitiesForPosition(positionAccountId)`, new, sits
+  alongside the frozen `resolveCapabilities`, never modifies it). For
+  acting on behalf of a specific institutional entity.
+
+The Position Account JWT's `sub` claim is the `position_account_id`
+itself, not a `userId` — structurally impossible to union against
+anything else the occupant holds. Fully designed in
+`Phase2-Position-Account-Auth-Plan.md`.
 
 **(ii) Class Tutor is IN SCOPE, and is Level 4 + `position_type`, NOT a
 new level — RESOLVED (this took two passes to get right).** First pass
