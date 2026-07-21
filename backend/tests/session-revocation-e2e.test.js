@@ -1,21 +1,10 @@
 'use strict';
 
-// End-to-end proof of ADR-024 with SESSION_REVOCATION_ENFORCED=true —
-// a real running Express app against a live Postgres, same harness
-// tests/auth.test.js already uses. Kept in its own file/process
-// (node --test runs each file as a separate subprocess) specifically
-// because config.sessionRevocationEnforced is read once from
-// process.env at module-load time — this file sets the env var
-// BEFORE requiring src/app/src/config at all, so it gets its own,
-// independent "flag on" process rather than mutating shared state
-// tests/auth.test.js's own process relies on staying off.
-//
-// tests/auth.test.js's whole suite already runs with the flag at its
-// real default (unset/false) and passes unchanged — that IS this
-// migration's "zero behavior change when disabled" proof; this file
-// is the complementary "and it actually works when enabled" proof.
-
-process.env.SESSION_REVOCATION_ENFORCED = 'true';
+// End-to-end proof of ADR-024 — a real running Express app against a
+// live Postgres, same harness tests/auth.test.js already uses. Proves
+// session revocation (now unconditional, permanent architecture) via
+// the real, unmocked auth flow: a password reset actually invalidates
+// a previously-issued access token, immediately.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -103,7 +92,7 @@ async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM colleges WHERE college_id = $1', [college.collegeId]);
 }
 
-test('session revocation, enforced', async (t) => {
+test('session revocation', async (t) => {
   const app = createApp();
   const server = await startServer(app);
   const { port } = server.address();

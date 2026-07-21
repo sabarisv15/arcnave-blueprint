@@ -54,17 +54,6 @@ module.exports = {
   // (never the raw token) — see src/security.js.
   refreshTokenExpireDays: Number(process.env.REFRESH_TOKEN_EXPIRE_DAYS) || 30,
 
-  // ADR-024 (Session revocation): gates
-  // middleware/sessionRevocation.js's per-request token_version check.
-  // Default OFF — with this unset/false, the new column exists but is
-  // never read, i.e. zero behavior change to today's auth path (see
-  // the migration plan's Phase 0 rollback story: "disable flag; column
-  // stays, harmless if unchecked"). Deliberately opt-in, not opt-out:
-  // this adds a real per-request DB read that needs a load-test signoff
-  // before enabling in any shared environment, per ADR-024's own
-  // "Revisit when" section.
-  sessionRevocationEnforced: process.env.SESSION_REVOCATION_ENFORCED === 'true',
-
   // Identity-Migration-Plan.md Phase 4 (Create/Edit College experience):
   // gates whether accepting a principal invitation ALSO provisions the
   // new-model Level 1 `positions` + `position_accounts` +

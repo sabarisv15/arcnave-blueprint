@@ -1,15 +1,14 @@
 'use strict';
 
 // Unit tests for ADR-024 (Session revocation, direct DB check, no
-// cache layer yet) — security.createAccessToken's new token_version
-// claim, and middleware/sessionRevocation.js's enforcement logic.
-// authService/req.dbClient are mocked via node:test's built-in mock,
-// same technique as every other *-service.test.js file in this suite
-// — no live Postgres needed for these; the real-DB end-to-end proof
-// (a password reset actually invalidating a previously-issued token)
-// lives in tests/auth.test.js's own password-reset suite plus the
-// manual SESSION_REVOCATION_ENFORCED=true verification described in
-// this session's own report.
+// cache layer yet) — security.createAccessToken's token_version
+// claim, and middleware/sessionRevocation.js's unconditional
+// enforcement logic. authService/req.dbClient are mocked via
+// node:test's built-in mock, same technique as every other
+// *-service.test.js file in this suite — no live Postgres needed for
+// these; the real-DB end-to-end proof (a password reset actually
+// invalidating a previously-issued token) lives in
+// tests/session-revocation-e2e.test.js.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -52,33 +51,9 @@ function fakeRes() {
 }
 
 test('sessionRevocationMiddleware', async (t) => {
-  await t.test('is a no-op when SESSION_REVOCATION_ENFORCED is off (the default) — zero behavior change', async () => {
-    const original = config.sessionRevocationEnforced;
-    config.sessionRevocationEnforced = false;
-    const getVersionMock = t.mock.method(authService, 'getCurrentTokenVersion', async () => 0);
-    t.after(() => {
-      config.sessionRevocationEnforced = original;
-      getVersionMock.mock.restore();
-    });
-
-    const req = { jwtClaims: { sub: 'u1', type: 'access', token_version: 5 }, dbClient: {} };
-    const res = fakeRes();
-    let nextCalled = false;
-    await sessionRevocationMiddleware(req, res, () => { nextCalled = true; });
-
-    assert.equal(nextCalled, true);
-    assert.equal(res.statusCode, null);
-    assert.equal(getVersionMock.mock.callCount(), 0, 'must not read the DB at all when the flag is off');
-  });
-
-  await t.test('when enforced, lets a request through whose token_version still matches the DB', async () => {
-    const original = config.sessionRevocationEnforced;
-    config.sessionRevocationEnforced = true;
+  await t.test('lets a request through whose token_version still matches the DB', async () => {
     const getVersionMock = t.mock.method(authService, 'getCurrentTokenVersion', async () => 3);
-    t.after(() => {
-      config.sessionRevocationEnforced = original;
-      getVersionMock.mock.restore();
-    });
+    t.after(() => getVersionMock.mock.restore());
 
     const req = { jwtClaims: { sub: 'u1', type: 'access', token_version: 3 }, dbClient: {} };
     const res = fakeRes();
@@ -89,14 +64,9 @@ test('sessionRevocationMiddleware', async (t) => {
     assert.equal(res.statusCode, null);
   });
 
-  await t.test('when enforced, rejects a token whose embedded version is stale (e.g. after a password reset)', async () => {
-    const original = config.sessionRevocationEnforced;
-    config.sessionRevocationEnforced = true;
+  await t.test('rejects a token whose embedded version is stale (e.g. after a password reset)', async () => {
     const getVersionMock = t.mock.method(authService, 'getCurrentTokenVersion', async () => 4);
-    t.after(() => {
-      config.sessionRevocationEnforced = original;
-      getVersionMock.mock.restore();
-    });
+    t.after(() => getVersionMock.mock.restore());
 
     const req = { jwtClaims: { sub: 'u1', type: 'access', token_version: 3 }, dbClient: {} };
     const res = fakeRes();
@@ -107,14 +77,9 @@ test('sessionRevocationMiddleware', async (t) => {
     assert.equal(res.statusCode, 401);
   });
 
-  await t.test('when enforced, rejects a token naming a user that no longer exists', async () => {
-    const original = config.sessionRevocationEnforced;
-    config.sessionRevocationEnforced = true;
+  await t.test('rejects a token naming a user that no longer exists', async () => {
     const getVersionMock = t.mock.method(authService, 'getCurrentTokenVersion', async () => null);
-    t.after(() => {
-      config.sessionRevocationEnforced = original;
-      getVersionMock.mock.restore();
-    });
+    t.after(() => getVersionMock.mock.restore());
 
     const req = { jwtClaims: { sub: 'ghost', type: 'access', token_version: 0 }, dbClient: {} };
     const res = fakeRes();
@@ -125,14 +90,9 @@ test('sessionRevocationMiddleware', async (t) => {
     assert.equal(res.statusCode, 401);
   });
 
-  await t.test('when enforced, passes through a missing/invalid token unchecked — RBAC downstream still 401s it', async () => {
-    const original = config.sessionRevocationEnforced;
-    config.sessionRevocationEnforced = true;
+  await t.test('passes through a missing/invalid token unchecked — RBAC downstream still 401s it', async () => {
     const getVersionMock = t.mock.method(authService, 'getCurrentTokenVersion', async () => 0);
-    t.after(() => {
-      config.sessionRevocationEnforced = original;
-      getVersionMock.mock.restore();
-    });
+    t.after(() => getVersionMock.mock.restore());
 
     const req = { jwtClaims: null, dbClient: {} };
     const res = fakeRes();

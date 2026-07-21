@@ -495,9 +495,8 @@ async function resetPassword(client, { token, newPassword }) {
   // valid on its own until natural expiry, and a stolen refresh token
   // would otherwise still mint fresh ones. Bumping token_version
   // invalidates every live access token the next time
-  // sessionRevocationMiddleware checks it (once
-  // SESSION_REVOCATION_ENFORCED=true); revoking every refresh token
-  // closes the other half — a reset with only one of these two would
+  // sessionRevocationMiddleware checks it; revoking every refresh
+  // token closes the other half — a reset with only one of these two would
   // leave a real gap (see ADR-021's "best-effort multi-step process"
   // alternative, rejected for exactly this reason).
   await authRepository.incrementTokenVersion(client, stored.user_id);

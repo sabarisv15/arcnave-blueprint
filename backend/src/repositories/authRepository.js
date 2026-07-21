@@ -52,8 +52,7 @@ async function getTokenVersion(client, userId) {
 
 // Bumps token_version by exactly one (never a blind SET to a caller-
 // supplied number) — this is what actually revokes every access token
-// already issued for this user the moment
-// SESSION_REVOCATION_ENFORCED=true, since none of them will ever again
+// already issued for this user, since none of them will ever again
 // carry the new value. Called by authService.resetPassword alongside
 // revokeAllRefreshTokensForUser below (belt-and-suspenders, same
 // reasoning ADR-021's reassignment lifecycle gives for doing both).
