@@ -23,6 +23,7 @@
 // same "decode/resolve is non-enforcing, RBAC enforces" split
 // middleware/auth.js's own docstring establishes.
 const identityService = require('../services/identityService');
+const { getRequestContext } = require('../logging/context');
 
 async function identityMiddleware(req, res, next) {
   const claims = req.jwtClaims;
@@ -35,6 +36,17 @@ async function identityMiddleware(req, res, next) {
     userId: claims.sub,
     collegeId: req.collegeId,
   });
+
+  // Same "mutate the existing AsyncLocalStorage store in place" pattern
+  // db/tenantTransaction.js already uses for req.collegeId — this is
+  // what lets auditLogRepository.createAuditLogEntry (called from deep
+  // inside services with no `req` in scope) default an entry's
+  // position_account_id/position_id without every one of its ~100 call
+  // sites needing to thread capabilities through as an explicit
+  // parameter.
+  const context = getRequestContext();
+  if (context) context.capabilities = req.capabilities;
+
   next();
 }
 
