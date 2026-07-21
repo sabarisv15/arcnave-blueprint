@@ -65,6 +65,20 @@ module.exports = {
   // "Revisit when" section.
   sessionRevocationEnforced: process.env.SESSION_REVOCATION_ENFORCED === 'true',
 
+  // Identity-Migration-Plan.md Phase 4 (Create/Edit College experience):
+  // gates whether accepting a principal invitation ALSO provisions the
+  // new-model Level 1 `positions` + `position_accounts` +
+  // `position_occupants` rows (ADR-021) for the college, in addition to
+  // the unchanged legacy `users.role = 'principal'` row every college
+  // has always gotten. Default OFF — with this unset/false,
+  // authService.acceptInvitation behaves byte-for-byte as it did before
+  // Phase 4 (see the migration plan's own "old 'create college with a
+  // bare Principal' path must stay fully intact and usable in parallel"
+  // requirement). Deliberately opt-in, not opt-out, same reasoning as
+  // sessionRevocationEnforced above: this is real new production data
+  // shape that hasn't been trusted at scale yet.
+  newCollegeOnboardingEnabled: process.env.NEW_COLLEGE_ONBOARDING_ENABLED === 'true',
+
   // Signs/verifies platform-admin access JWTs. Deliberately a
   // DIFFERENT secret from jwtSecretKey, required, no fallback to it:
   // a platform token and a tenant token must never verify against the

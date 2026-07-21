@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const config = require('../config');
 const security = require('../security');
 const authRepository = require('../repositories/authRepository');
+const positionRepository = require('../repositories/positionRepository');
 const principalInvitationRepository = require('../repositories/principalInvitationRepository');
 const userMfaOtpRepository = require('../repositories/userMfaOtpRepository');
 const notificationService = require('./notificationService');
@@ -582,13 +583,84 @@ async function lookupPendingInvitation(client, token) {
   return invitation;
 }
 
+// Identity-Migration-Plan.md Phase 4 (ADR-021) — the Level 1
+// "Institutional Position Account" a new college's Principal gets
+// alongside their unchanged legacy `users` row. Only called when
+// config.newCollegeOnboardingEnabled is true (see acceptInvitation
+// below); with the flag off this function is never reached and
+// acceptInvitation behaves exactly as it did before Phase 4.
+//
+// Deferred to accept time rather than college-creation time
+// (platformService.createCollege): positions.created_by and
+// position_occupants.assigned_by are NOT NULL FKs to users(id) — a
+// real hidden assumption Phase 4's own plan section flagged — and at
+// createCollege time no users row for the eventual principal exists
+// yet (their email isn't even known until invitePrincipal, let alone
+// their chosen username/password, which only exist once accept runs).
+// Attributing creation/assignment to the new principal's own id, the
+// moment that id first exists, mirrors exactly how
+// positionBackfillService.js attributes a backfilled Level 1 position
+// to the existing principal it's built from — same reasoning, applied
+// at the one point in this flow where it's actually possible.
+//
+// Idempotency guard: if this college already has a Level 1 position
+// (e.g. it was already migrated via Phase 2's backfill, or a principal
+// was already re-invited/accepted once through this same path), this
+// is a no-op — never a second Level 1 position for one college. The
+// cosmetic Level 1 title ("Principal"/"Director"/etc, per ADR-021) is
+// NOT yet configurable per college through this path: doing so would
+// require persisting an admin-chosen title somewhere across the
+// create-college -> invite -> accept gap, and every table that could
+// hold it (principal_invitations, positions, position_accounts) is
+// either one of Phase 1's frozen five or would need a new column to
+// carry it — exactly the kind of schema change Phase 4's exit criteria
+// says to flag rather than assume. Defaults to "Principal" (matching
+// positionBackfillService.js's own default) until that's explicitly
+// decided.
+async function provisionLevel1PositionForNewPrincipal(client, collegeId, user, passwordHash) {
+  const existing = await positionRepository.findActivePositionByCollegeAndLevel(client, collegeId, 1);
+  if (existing) {
+    return null;
+  }
+
+  const position = await positionRepository.createPosition(client, {
+    collegeId, level: 1, title: 'Principal', createdBy: user.id,
+  });
+  const account = await positionRepository.createPositionAccount(client, {
+    collegeId,
+    positionId: position.id,
+    officialEmail: user.email,
+    // authRepository.createUser's RETURNING deliberately omits
+    // password_hash (same "never echo a hash back through a normal
+    // service return value" discipline every other read path in this
+    // codebase follows) — the account's starting credential is the
+    // SAME hash just computed for the user row below, passed through
+    // explicitly rather than re-read off `user`.
+    passwordHash,
+  });
+  const occupant = await positionRepository.createPositionOccupant(client, {
+    collegeId,
+    positionAccountId: account.id,
+    userId: user.id,
+    assignedBy: user.id,
+  });
+
+  return { position, account, occupant };
+}
+
 // The post-transaction half: client here IS the tenant-scoped
 // transaction routes/invitations.js opens (via openTenantTransaction)
 // against invitation.college_id once lookupPendingInvitation has
 // already proven the token authentic. Every invitation accepted this
 // way creates a 'principal' account — the only role this route has
 // ever granted (see the migration's own file-level comment on
-// principal_invitations' purpose).
+// principal_invitations' purpose). This legacy `users.role = 'principal'`
+// row is a REQUIRED dual-write, not just historical behavior — every
+// un-migrated permissions.js/aiToolRegistry.js/workflowChainService.js
+// check still reads req.jwtClaims.role directly (Phase 6 hasn't run
+// yet), so a college onboarded here must be indistinguishable from a
+// legacy college to every one of those checks, whether or not Phase
+// 4's new-model provisioning below also runs.
 async function acceptInvitation(client, invitation, { username, password }) {
   if (!PASSWORD_COMPLEXITY_RE.test(password || '')) {
     throw new PasswordResetValidationError(
@@ -596,13 +668,14 @@ async function acceptInvitation(client, invitation, { username, password }) {
     );
   }
 
+  const passwordHash = await security.hashPassword(password);
   let user;
   try {
     user = await authRepository.createUser(client, {
       collegeId: invitation.college_id,
       username,
       email: invitation.email,
-      passwordHash: await security.hashPassword(password),
+      passwordHash,
       role: 'principal',
       isActive: true,
     });
@@ -614,6 +687,17 @@ async function acceptInvitation(client, invitation, { username, password }) {
   }
 
   await principalInvitationRepository.markInvitationAccepted(client, invitation.id);
+
+  // Identity-Migration-Plan.md Phase 4 — additive to the dual-write
+  // above, never a replacement for it (see this function's own comment).
+  // Runs in the SAME transaction as the user creation/invitation-accept
+  // above, so the whole accept either fully succeeds (legacy user +
+  // Level 1 position/account/occupant all committed together) or fully
+  // rolls back — never a user with no matching position account, or
+  // vice versa.
+  if (config.newCollegeOnboardingEnabled) {
+    await provisionLevel1PositionForNewPrincipal(client, invitation.college_id, user, passwordHash);
+  }
 
   return user;
 }

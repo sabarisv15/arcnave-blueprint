@@ -43,6 +43,27 @@ async function findPositionById(client, id) {
   return result.rows[0] || null;
 }
 
+// Identity-Migration-Plan.md Phase 4 — authService.acceptInvitation's
+// idempotency guard: is there already a position at this level for this
+// college (from a prior accept through this same path, or from Phase
+// 2's backfill for a college that already had one before Phase 4's
+// flag was ever turned on)? Positions has no unique constraint on
+// (college_id, level) — nothing before Phase 4 needed one, since Phase
+// 2's backfill and Phase 4's provisioning were never expected to race
+// against each other for the same college — so this is the one place
+// that has to check before inserting, same "let the caller decide, the
+// schema doesn't enforce this for you" reasoning positionBackfillService
+// already applies via findActiveOccupancyForUserAtLevel. Oldest first
+// (there should only ever be one) so a bug that somehow created two
+// resolves deterministically to the first-created one.
+async function findActivePositionByCollegeAndLevel(client, collegeId, level) {
+  const result = await client.query(
+    'SELECT * FROM positions WHERE college_id = $1 AND level = $2 ORDER BY created_at ASC LIMIT 1',
+    [collegeId, level],
+  );
+  return result.rows[0] || null;
+}
+
 async function createPositionAccount(client, {
   collegeId, positionId, officialEmail, passwordHash, migrationBatchId,
 }) {
@@ -225,6 +246,7 @@ async function findCollegeIdsForMigrationBatch(client, migrationBatchId) {
 module.exports = {
   createPosition,
   findPositionById,
+  findActivePositionByCollegeAndLevel,
   createPositionAccount,
   findPositionAccountByPositionId,
   createPositionOccupant,

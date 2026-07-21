@@ -6,6 +6,7 @@ import { Building2, Users, Mail, Clock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/components/ui/card';
 import {
   Form, FormField, FormItem, FormLabel, FormControl, FormMessage,
@@ -32,8 +33,25 @@ function StatCard({ icon: Icon, label, value, isLoading }) {
   );
 }
 
+// Identity-Migration-Plan.md Phase 4 — read-only visibility into
+// whether NEW_COLLEGE_ONBOARDING_ENABLED is set on the backend. The
+// flag itself isn't a form field here (there's nothing for an admin to
+// toggle per-request — see platformService.getSettings' own comment):
+// it's an environment-level rollout switch, so this just tells the
+// admin what will happen when they invite a principal for a college
+// created through this form. With the flag off, the old bare-Principal
+// flow is completely unaffected.
+function useNewOnboardingFlag() {
+  const { data } = useQuery({
+    queryKey: ['platform', 'settings'],
+    queryFn: () => platformAdminApi.getSettings(),
+  });
+  return Boolean(data?.new_college_onboarding_enabled);
+}
+
 function CreateCollegeCard() {
   const queryClient = useQueryClient();
+  const newOnboardingEnabled = useNewOnboardingFlag();
   const form = useForm({
     resolver: zodResolver(collegeFormSchema),
     defaultValues: { collegeId: '', name: '', subdomain: '' },
@@ -53,8 +71,17 @@ function CreateCollegeCard() {
   return (
     <Card className="flex h-full flex-col overflow-hidden">
       <CardHeader className="shrink-0">
-        <CardTitle>Create New College</CardTitle>
-        <CardDescription>Onboard a new college/organization to the platform.</CardDescription>
+        <div className="flex items-center gap-2">
+          <CardTitle>Create New College</CardTitle>
+          <Badge variant={newOnboardingEnabled ? 'success' : 'outline'}>
+            {newOnboardingEnabled ? 'Institutional Position Accounts: On' : 'Institutional Position Accounts: Off'}
+          </Badge>
+        </div>
+        <CardDescription>
+          {newOnboardingEnabled
+            ? 'Onboard a new college/organization to the platform. When its Principal invitation is accepted, a Level 1 Institutional Position Account is also provisioned alongside the Principal user.'
+            : 'Onboard a new college/organization to the platform.'}
+        </CardDescription>
       </CardHeader>
       <CardContent className="min-h-0 overflow-y-auto">
         <Form {...form}>
