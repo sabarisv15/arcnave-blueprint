@@ -1,6 +1,8 @@
 # ADR-025: Backfill and migration rollback policy
 
-Status: Accepted
+Status: Superseded — no production deployment exists yet; backfill/rollback
+tooling isn't needed for a greenfield system. Revisit if/when a real
+migration (e.g. upgrading a live pilot college) is ever needed.
 
 ## Decision
 Backfilling existing colleges into the [[ADR-021-Institutional-Position-Account-Model]]

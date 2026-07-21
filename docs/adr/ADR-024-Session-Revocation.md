@@ -4,11 +4,12 @@ Status: Accepted
 
 ## Decision
 Add a `token_version` column to `users` and, once
-[[ADR-021-Institutional-Position-Account-Model]] lands, to
-`position_accounts`. Every authenticated request re-checks the JWT's
-embedded `token_version` against the current DB value on that row — a
-direct DB read, not a cached lookup. Refresh tokens are stored in a
-new append-only table (`refresh_token_id`, owning `user_id` or
+[[ADR-021-Institutional-Position-Account-Model]]'s login path exists,
+to `position_accounts`. Every authenticated request re-checks the
+JWT's embedded `token_version` against the current DB value on that
+row — a direct DB read, not a cached lookup, and unconditional (not
+gated behind a rollout flag). Refresh tokens are stored in a new
+append-only table (`refresh_token_id`, owning `user_id` or
 `position_account_id`, `revoked_at`), revocable individually or
 in bulk per account.
 
@@ -38,22 +39,22 @@ A direct DB read on every request is the simplest correct
 implementation and matches this project's established default (add
 infrastructure when a measured need proves it, not speculatively). It
 does add one DB round-trip to every authenticated request where there
-was none before — that cost must be measured, not assumed, which is
-why Phase 0 of `Identity-Migration-Plan.md` requires a load test before
-`SESSION_REVOCATION_ENFORCED` is turned on in production.
+was none before — that cost must be measured, not assumed, before this
+is trusted at real production scale.
 
 ## Revisit when
-Phase 0's load test shows a material latency regression from the added
+A load test shows a material latency regression from the added
 per-request DB read. At that point, introduce a cache (in-memory
 per-instance with a short TTL, or Redis if multi-instance consistency
 requires it) — this would be the first real, evidence-backed trigger
-for introducing Redis into this stack, tracked as `ADR-026-Identity-
-Cache-Strategy` per the migration plan.
+for introducing Redis into this stack, tracked as
+`ADR-026-Identity-Cache-Strategy`.
 
 ## Consequences
 - New column: `users.token_version` (default 0, incremented on
   reset/reassignment).
 - New table: `refresh_tokens` (or equivalent), revocable per account.
-- `position_accounts.token_version` added when Phase 1 of the
-  migration plan lands.
+- `position_accounts.token_version` to be added once
+  [[ADR-021-Institutional-Position-Account-Model]]'s login path is
+  built.
 - No new infrastructure dependency introduced by this decision.

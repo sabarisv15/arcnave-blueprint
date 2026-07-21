@@ -3,14 +3,12 @@
 Status: Accepted
 
 ## Decision
-`services/identityService.js` is the one public façade over the new
+`services/identityService.js` is the one public façade over the
 Position/Institutional Position Account/Occupant model (ADR-021).
-Routes, AI tools, and `workflowChainService` (Phase 5) must only ever
-require this file — never `services/identity/*Resolver.js` directly,
-and no resolver module may call another resolver module. This mirrors
-CLAUDE.md's "repositories never call other repositories" one layer up,
-per the migration plan's "Service architecture decision: identityService,
-internally split."
+Routes, AI tools, and `workflowChainService` must only ever require
+this file — never `services/identity/*Resolver.js` directly, and no
+resolver module may call another resolver module. This mirrors
+CLAUDE.md's "repositories never call other repositories" one layer up.
 
 ## Public contract (frozen)
 
@@ -44,13 +42,13 @@ The one entry point. Returns:
   `effectiveRole: 'staff'`, `scopeLevel: 'self_assigned'`. Only a
   genuine DB error propagates.
 - `effectiveRole` exists solely so a caller comparing against the
-  legacy `users.role` string (shadow mode, and eventually Phase 6's
-  cutover) has something directly comparable — it is a derived label,
-  not a stored value anywhere in the new schema. Derivation: an active
-  Level 1 position → `'principal'`; else an active Level 3 position →
-  `'hod'`; else → `'staff'`. A position holding both is treated as
-  Level 1 (lower level number wins), though nothing in Phase 1-3
-  actually produces that state today.
+  `users.role` string has something directly comparable — it is a
+  derived label, not a stored value anywhere in the new schema.
+  Derivation: an active Level 1 position → `'principal'`; else an
+  active Level 3 position → `'hod'`; else → `'staff'`. A position
+  holding both is treated as Level 1 (lower level number wins), though
+  nothing in the current position schema actually produces that state
+  today.
 - `positions` is a list, not a single value, because nothing in the
   schema forbids a person from occupying more than one position at
   once — callers that need one "primary" position apply their own
@@ -84,36 +82,36 @@ another resolver:
   not part of this account model" line]). Level 2 positions
   deliberately have no scope mapping yet — v1 leaves Level 2
   configurable per-college by Level 1, so there is no single fixed
-  answer; assigning one is real Phase 5/6 policy work.
+  answer; assigning one is real future policy work.
 
 These signatures are internal implementation detail, not frozen by
 this ADR — they may change freely as long as `resolveCapabilities`'s
-own contract above doesn't. Phase 5/6 code must never depend on them
+own contract above doesn't. Callers must never depend on them
 directly.
 
 ## What is explicitly NOT in scope of this contract
 - No enforcement semantics — `resolveCapabilities` only resolves facts,
   it never decides "is this allowed." `permissions.js`/`aiToolRegistry.js`
-  (Phase 6) and `workflowChainService` (Phase 5) are the callers that
-  turn these facts into a decision.
+  and `workflowChainService` are the callers that turn these facts into
+  a decision.
 - No caching — every call re-reads the DB through the given `client`
   (normally the request's own transaction connection). A cache
   strategy is deliberately deferred to ADR-026, written once
   `identityService` is a real production hot path.
 - No write path — every resolver here is read-only. Reassignment,
   module/department (re)assignment, and any other mutation belongs to
-  Phase 7 (occupant reassignment lifecycle) and the positions
-  create/edit flows (Phase 4), never to this façade.
+  the occupant reassignment lifecycle and the positions create/edit
+  flows, never to this façade.
 
-## Why frozen now (Phase 3 checkpoint)
-Per the migration plan's "Checkpoint — resolver contract freeze": once
-Phase 3 is stable, `identityService`'s public interface must be treated
-as frozen before Phase 5 (workflow routing cutover) and Phase 6
-(RBAC/AI tool cutover) start in parallel — otherwise both workstreams
-would depend on, and independently reshape, the same interface at the
-same time. This ADR is that freeze point, written after the resolver
-was actually built and shadow-verified (see Consequences), describing
-what was built rather than a prior design intent.
+## Why the contract is frozen
+`identityService`'s public interface (`resolveCapabilities`'s shape
+above) is frozen once stable, so that every future consumer —
+`workflowChainService`, RBAC, AI tool authorization — can build
+directly against it without independently reshaping the same
+interface out from under one another. This ADR is that freeze point,
+written after the resolver was actually built and verified (see
+Verification below), describing what was built rather than a prior
+design intent.
 
 ## Verification behind this freeze
 - `identity-resolvers.test.js`: unit coverage for all five internal
@@ -121,15 +119,8 @@ what was built rather than a prior design intent.
   data (positions/accounts/occupants/module and department
   assignments), including the "no active position → staff/
   self_assigned, not an error" case.
-- `identity-shadow-enforced.test.js`: end-to-end proof, with
-  `IDENTITY_SHADOW_MODE=true` against a real backfilled test college —
-  zero mismatches across the four routes enrolled in shadow comparison
-  (`GET /college-profile`, `GET /departments`, `GET /ai-config`,
-  `GET /background-jobs`) — and proof that a LEGACY (not-yet-backfilled)
-  college is never enrolled even with the flag on.
-- Full existing suite (1167 tests, pre-Phase-3) passes unchanged with
-  the flag at its real default (off) — zero behavior change to any
-  existing route.
+- Full existing test suite passes unchanged — zero behavior change to
+  any existing route.
 
 ## Alternatives considered
 - **Five separately-callable services** (`PositionResolver`,
@@ -137,30 +128,16 @@ what was built rather than a prior design intent.
   would let identity logic scatter across call sites the way
   `permissions.js` currently scatters role checks across 22+ files,
   and conflicts with CLAUDE.md's "every AI tool calls a Business
-  Service" (singular). See the migration plan's own "Service
-  architecture decision" section for the full reasoning.
+  Service" (singular).
 - **One monolithic `identityService` with no internal split**:
   rejected — risks becoming a God Service as visibility, module,
   department, and assignment logic all pile into one file, and makes
-  Phase 5/6 parallel ownership harder (different engineers can't
-  cleanly own different resolver modules).
+  parallel ownership harder (different engineers can't cleanly own
+  different resolver modules).
 
 ## Consequences
 - `services/identityService.js` and `services/identity/*Resolver.js`
-  exist and are shadow-verified against a real backfilled college.
-- `middleware/identityShadow.js` + `services/identityShadowService.js`
-  + `identity_migration_mismatches` (migration
-  `1757200000000_identity-migration-mismatches.js`) give Phase 3 its
-  required mismatch-logging pipeline (Observability & monitoring's
-  "Mismatch reporting" requirement).
-- Phase 5 (`workflowChainService`) and Phase 6 (RBAC/AI tool cutover)
-  may now build directly on `resolveCapabilities`'s frozen shape above.
-- This session's shadow enrollment (`IDENTITY_SHADOW_MODE`, four
-  low-risk GET routes) has NOT yet run for a real, sustained
-  production observation window — per the migration plan's own Phase 3
-  exit criteria ("production observation period complete" before
-  moving a college `BACKFILLED → SHADOW`), no college's
-  `migration_state` was moved to `SHADOW` in this session. That
-  transition is a calendar/process step for a later session, not
-  something this implementation pass can honestly claim to have
-  fulfilled.
+  exist and are verified against real seeded position data.
+- Future consumers (`workflowChainService`, RBAC/AI tool
+  authorization) may build directly on `resolveCapabilities`'s frozen
+  shape above.

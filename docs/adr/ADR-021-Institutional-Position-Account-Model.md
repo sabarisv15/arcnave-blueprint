@@ -67,14 +67,12 @@ of collapsing to only one half of that fact.
 
 ## Reasoning
 This is the schema and lifecycle foundation the rest of the identity
-migration depends on (see `Identity-Migration-Plan.md`, Phase 1 and
-Phase 7) — dual-login, immediate handover cutover, and audit
+model depends on — dual-login, immediate handover cutover, and audit
 correctness are all consequences of this model, not features bolted on
 separately.
 
 ## Consequences
-- New tables: `position_accounts`, `position_occupants` (see Phase 1
-  of the migration plan for the full shape).
+- New tables: `position_accounts`, `position_occupants`.
 - `token_version`/refresh-token revocation must exist per
   `position_account`, not only per `users` row (see ADR-024).
 - Every audit-logging call site must record `position_account_id` and
