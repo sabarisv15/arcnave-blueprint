@@ -215,6 +215,30 @@ new rule is decided, in the module that owns it.
   staff member may hold multiple institutional roles/duties
   simultaneously; existing duties continue unless explicitly
   reassigned.
+- **Institutional identity model (Position Accounts)**: for Level 1
+  and Level 3 positions, the permanent identity is the Institutional
+  Position Account, not the person — one account per position,
+  created once, never deleted (ADR-021). Occupant reassignment (e.g.
+  a new Principal appointed) is a single atomic operation: revoke all
+  active sessions, invalidate every refresh token, increment
+  `token_version`, reset credentials and MFA enrollment, and require
+  password/MFA re-enrollment on the new occupant's first login;
+  official email/mailbox, resolved permissions, and audit history
+  carry over unchanged. Level 1 accounts are provisioned automatically
+  and unconditionally when a college's Principal invitation is
+  accepted — standing behavior, not a rollout flag. Level 2 positions
+  are Principal-configured per institution; Level 4 (ordinary staff)
+  stays person-centric and outside this account model. **Current
+  state**: `position_accounts`/`position_occupants` are provisioned,
+  but authentication still runs through `users.role`, not through
+  Position Accounts — the two identity paths coexist until a
+  Position-Account login path is built; do not assume Position-Account
+  credentials are live for end-user login yet.
+- **Session revocation** (ADR-024): every authenticated request
+  re-validates `token_version` against the database, unconditionally.
+  Password reset, MFA reset, or a Position Account occupant change all
+  bump `token_version` and revoke outstanding refresh tokens
+  immediately — no partial-revocation window.
 - **Resolved (College Admin — final model)** — College Admin is an
   **ARCNAVE support employee, not a college employee, and not part of
   the institution's academic hierarchy** (Faculty / HOD / Principal).
