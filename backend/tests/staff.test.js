@@ -21,6 +21,7 @@ const http = require('node:http');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const { seedPrincipalPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 const notificationService = require('../src/services/notificationService');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
@@ -110,6 +111,7 @@ async function seedTenant(adminPool, label) {
     );
     userIds[username] = result.rows[0].id;
   }
+  await seedPrincipalPosition(adminPool, { collegeId: college.collegeId, userId: userIds.principaluser, passwordHash });
   const department = await adminPool.query(
     `INSERT INTO departments (college_id, name, approved_intake)
      VALUES ($1, $2, 60) RETURNING id`,
@@ -121,15 +123,10 @@ async function seedTenant(adminPool, label) {
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
   // Phase 1 (Capability Resolver integration): appointHodInCharge/
-  // provisionHodAccount now create position_occupants/position_accounts/
-  // positions/position_department_assignments rows FK'd to
-  // departments(id)/users(id) — same ordering fix
+  // provisionHodAccount/seedPrincipalPosition all create position_*
+  // rows FK'd to departments(id)/users(id) — same ordering fix
   // principal-invitation.test.js already needed for the Level 1 path.
-  await adminPool.query('DELETE FROM position_occupants WHERE college_id = $1', [college.collegeId]);
-  await adminPool.query('DELETE FROM position_module_assignments WHERE college_id = $1', [college.collegeId]);
-  await adminPool.query('DELETE FROM position_department_assignments WHERE college_id = $1', [college.collegeId]);
-  await adminPool.query('DELETE FROM position_accounts WHERE college_id = $1', [college.collegeId]);
-  await adminPool.query('DELETE FROM positions WHERE college_id = $1', [college.collegeId]);
+  await cleanupPositionRows(adminPool, college.collegeId);
   await adminPool.query('DELETE FROM staff WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM departments WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
