@@ -71,6 +71,26 @@ function decodeAccessToken(token) {
   }
 }
 
+// Phase 2 (Position Account Auth): a Position Account's session token.
+// Signed with the SAME jwtSecretKey/algorithm as createAccessToken (so
+// middleware/identity.js can decode either with one decodeAccessToken
+// call) but structurally distinct in one deliberate way: `sub` is the
+// position_account_id, not a userId, and there is no `role` claim at
+// all — role/scope is derived fresh every request from live position
+// state via identityService.resolveCapabilitiesForPosition, never
+// trusted from the token. `type: 'position_access'` is what
+// middleware/identity.js and middleware/sessionRevocation.js branch on
+// to tell this apart from a personal-login 'access' token.
+function createPositionAccessToken({ positionAccountId, collegeId, tokenVersion = 0 }) {
+  return jwt.sign(
+    {
+      sub: positionAccountId, college_id: collegeId, token_version: tokenVersion, type: 'position_access',
+    },
+    config.jwtSecretKey,
+    { algorithm: config.jwtAlgorithm, expiresIn: `${config.accessTokenExpireMinutes}m` },
+  );
+}
+
 // Platform-admin token. Signed with platformJwtSecretKey — a
 // different key from createAccessToken's jwtSecretKey — and carries
 // no college_id or role claim at all, only type: 'platform_access'.
@@ -136,6 +156,7 @@ module.exports = {
   needsRehash,
   createAccessToken,
   decodeAccessToken,
+  createPositionAccessToken,
   createPlatformAccessToken,
   decodePlatformAccessToken,
   generateRefreshToken,
