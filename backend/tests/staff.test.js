@@ -120,6 +120,16 @@ async function seedTenant(adminPool, label) {
 
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
+  // Phase 1 (Capability Resolver integration): appointHodInCharge/
+  // provisionHodAccount now create position_occupants/position_accounts/
+  // positions/position_department_assignments rows FK'd to
+  // departments(id)/users(id) — same ordering fix
+  // principal-invitation.test.js already needed for the Level 1 path.
+  await adminPool.query('DELETE FROM position_occupants WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM position_module_assignments WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM position_department_assignments WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM position_accounts WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM positions WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM staff WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM departments WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
