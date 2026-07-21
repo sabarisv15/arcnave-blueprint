@@ -1,12 +1,10 @@
 'use strict';
 
-// Coverage for Identity-Migration-Plan.md Phase 3's internal resolver
-// modules (services/identity/*Resolver.js) and the identityService
-// façade that composes them — against real seeded position data, same
-// MIGRATION_DATABASE_URL (bypasses RLS) fixture pattern
-// position-schema.test.js and position-backfill-service.test.js
-// already use for this exact reason (this suite is inherently
-// cross-tenant/cross-role: it seeds positions/accounts/occupants
+// Coverage for the internal resolver modules (services/identity/*Resolver.js)
+// and the identityService façade that composes them — against real seeded
+// position data, same MIGRATION_DATABASE_URL (bypasses RLS) fixture pattern
+// position-schema.test.js already uses for this exact reason (this suite is
+// inherently cross-tenant/cross-role: it seeds positions/accounts/occupants
 // directly rather than going through any tenant-scoped route).
 //
 // Deliberately tests the resolvers both individually (positionResolver
