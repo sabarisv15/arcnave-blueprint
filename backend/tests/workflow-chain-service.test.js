@@ -2,14 +2,46 @@
 
 // Unit tests for WorkflowChainService.resolveApproverChain and the
 // delegation functions — no live Postgres needed: configurationService/
-// staffService/classRepository/workflowDelegationRepository/
+// positionRepository/classRepository/workflowDelegationRepository/
 // auditLogRepository are stubbed via node:test's built-in mock, same
 // technique as every other *-service.test.js file in this suite.
+// 'principal'/'hod' resolution moved off staffService onto
+// positionRepository in Phase 1 (Capability Resolver integration) —
+// see workflowChainService.js's resolveRoleUserId/resolveOccupantForPosition.
+
+function mockPrincipalPosition(t, { userId = 'principal-1' } = {}) {
+  const findLevel1Mock = t.mock.method(positionRepository, 'findActivePositionByCollegeAndLevel', async () => ({ id: 'principal-pos-1' }));
+  const findAccountMock = t.mock.method(positionRepository, 'findPositionAccountByPositionId', async () => ({ id: 'principal-acct-1' }));
+  const findOccupantMock = t.mock.method(positionRepository, 'findActiveOccupant', async () => ({ user_id: userId }));
+  t.after(() => {
+    findLevel1Mock.mock.restore();
+    findAccountMock.mock.restore();
+    findOccupantMock.mock.restore();
+  });
+}
+
+// Distinguishes the hod vs. principal position by id, since a single
+// test can resolve both in one chain (see "uses the institution-
+// configured chain" below).
+function mockHodAndPrincipalPositions(t, { hodUserId = 'hod-1', principalUserId = 'principal-1' } = {}) {
+  const findDeptAssignmentMock = t.mock.method(positionRepository, 'findActiveDepartmentAssignment', async () => ({ position_id: 'hod-pos-1' }));
+  const findLevel1Mock = t.mock.method(positionRepository, 'findActivePositionByCollegeAndLevel', async () => ({ id: 'principal-pos-1' }));
+  const findAccountMock = t.mock.method(positionRepository, 'findPositionAccountByPositionId', async (client, positionId) => ({ id: `${positionId}-acct` }));
+  const findOccupantMock = t.mock.method(positionRepository, 'findActiveOccupant', async (client, accountId) => (
+    accountId === 'hod-pos-1-acct' ? { user_id: hodUserId } : { user_id: principalUserId }
+  ));
+  t.after(() => {
+    findDeptAssignmentMock.mock.restore();
+    findLevel1Mock.mock.restore();
+    findAccountMock.mock.restore();
+    findOccupantMock.mock.restore();
+  });
+}
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const configurationService = require('../src/services/configurationService');
-const staffService = require('../src/services/staffService');
+const positionRepository = require('../src/repositories/positionRepository');
 const classRepository = require('../src/repositories/classRepository');
 const workflowDelegationRepository = require('../src/repositories/workflowDelegationRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
@@ -34,11 +66,10 @@ test('resolveApproverChain', async (t) => {
 
   await t.test('falls back to DEFAULT_CHAINS when the institution has not configured anything', async () => {
     const getConfigMock = t.mock.method(configurationService, 'getConfiguration', async () => null);
-    const findPrincipalMock = t.mock.method(staffService, 'findPrincipal', async () => ({ user_id: 'principal-1' }));
+    mockPrincipalPosition(t);
     const findNoDelegationMock = t.mock.method(workflowDelegationRepository, 'findActive', async () => null);
     t.after(() => {
       getConfigMock.mock.restore();
-      findPrincipalMock.mock.restore();
       findNoDelegationMock.mock.restore();
     });
 
@@ -50,13 +81,10 @@ test('resolveApproverChain', async (t) => {
     const getConfigMock = t.mock.method(configurationService, 'getConfiguration', async () => ({
       configuration: { fee_structure: ['hod', 'principal'] },
     }));
-    const findHodMock = t.mock.method(staffService, 'findHodForDepartment', async () => ({ user_id: 'hod-1' }));
-    const findPrincipalMock = t.mock.method(staffService, 'findPrincipal', async () => ({ user_id: 'principal-1' }));
+    mockHodAndPrincipalPositions(t);
     const findNoDelegationMock = t.mock.method(workflowDelegationRepository, 'findActive', async () => null);
     t.after(() => {
       getConfigMock.mock.restore();
-      findHodMock.mock.restore();
-      findPrincipalMock.mock.restore();
       findNoDelegationMock.mock.restore();
     });
 
@@ -96,16 +124,41 @@ test('resolveApproverChain', async (t) => {
 
   await t.test('substitutes an active delegation for the resolved principal', async () => {
     const getConfigMock = t.mock.method(configurationService, 'getConfiguration', async () => null);
-    const findPrincipalMock = t.mock.method(staffService, 'findPrincipal', async () => ({ user_id: 'principal-1' }));
+    mockPrincipalPosition(t);
     const findDelegationMock = t.mock.method(workflowDelegationRepository, 'findActive', async () => ({ delegate_user_id: 'delegate-1' }));
     t.after(() => {
       getConfigMock.mock.restore();
-      findPrincipalMock.mock.restore();
       findDelegationMock.mock.restore();
     });
 
     const chain = await workflowChainService.resolveApproverChain({}, { collegeId: 'c1', entityType: 'fee_structure' });
     assert.equal(chain[0].user_id, 'delegate-1');
+  });
+
+  await t.test('throws WorkflowChainMissingContextError when no active Principal exists to resolve', async () => {
+    const getConfigMock = t.mock.method(configurationService, 'getConfiguration', async () => null);
+    const findLevel1Mock = t.mock.method(positionRepository, 'findActivePositionByCollegeAndLevel', async () => null);
+    t.after(() => {
+      getConfigMock.mock.restore();
+      findLevel1Mock.mock.restore();
+    });
+    await assert.rejects(
+      () => workflowChainService.resolveApproverChain({}, { collegeId: 'c1', entityType: 'fee_structure' }),
+      workflowChainService.WorkflowChainMissingContextError,
+    );
+  });
+
+  await t.test('throws WorkflowChainMissingContextError when a department has no active HOD, permanent or acting', async () => {
+    const getConfigMock = t.mock.method(configurationService, 'getConfiguration', async () => null);
+    const findDeptAssignmentMock = t.mock.method(positionRepository, 'findActiveDepartmentAssignment', async () => null);
+    t.after(() => {
+      getConfigMock.mock.restore();
+      findDeptAssignmentMock.mock.restore();
+    });
+    await assert.rejects(
+      () => workflowChainService.resolveApproverChain({}, { collegeId: 'c1', entityType: 'timetable_approval', departmentId: 'dept-1' }),
+      workflowChainService.WorkflowChainMissingContextError,
+    );
   });
 });
 

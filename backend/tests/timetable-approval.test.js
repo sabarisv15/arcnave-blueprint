@@ -118,6 +118,49 @@ async function seedTenant(adminPool) {
     [college.collegeId, userIds.principaluser],
   );
 
+  // Phase 1 (Capability Resolver integration): workflowChainService's
+  // 'principal'/'hod' resolution now reads Position/Position Account/
+  // Occupant (positionRepository), not staff+users — every tenant this
+  // suite seeds needs the equivalent Position rows, same as
+  // authService.acceptInvitation/staffService.provisionHodAccount
+  // create in the real onboarding/HOD-assignment flows.
+  const principalPosition = await adminPool.query(
+    `INSERT INTO positions (college_id, level, title, created_by)
+     VALUES ($1, 1, 'Principal', $2) RETURNING id`,
+    [college.collegeId, userIds.principaluser],
+  );
+  const principalAccount = await adminPool.query(
+    `INSERT INTO position_accounts (college_id, position_id, official_email, password_hash)
+     VALUES ($1, $2, 'principal-position@timetable-approval-test.internal', $3) RETURNING id`,
+    [college.collegeId, principalPosition.rows[0].id, passwordHash],
+  );
+  await adminPool.query(
+    `INSERT INTO position_occupants (college_id, position_account_id, user_id, assigned_by)
+     VALUES ($1, $2, $3, $3)`,
+    [college.collegeId, principalAccount.rows[0].id, userIds.principaluser],
+  );
+
+  const hodPosition = await adminPool.query(
+    `INSERT INTO positions (college_id, level, title, created_by)
+     VALUES ($1, 3, 'HOD', $2) RETURNING id`,
+    [college.collegeId, userIds.hoduser],
+  );
+  const hodAccount = await adminPool.query(
+    `INSERT INTO position_accounts (college_id, position_id, official_email, password_hash)
+     VALUES ($1, $2, 'hod-position@timetable-approval-test.internal', $3) RETURNING id`,
+    [college.collegeId, hodPosition.rows[0].id, passwordHash],
+  );
+  await adminPool.query(
+    `INSERT INTO position_department_assignments (college_id, position_id, department_id, assigned_by)
+     VALUES ($1, $2, $3, $4)`,
+    [college.collegeId, hodPosition.rows[0].id, departmentId, userIds.principaluser],
+  );
+  await adminPool.query(
+    `INSERT INTO position_occupants (college_id, position_account_id, user_id, assigned_by)
+     VALUES ($1, $2, $3, $3)`,
+    [college.collegeId, hodAccount.rows[0].id, userIds.hoduser],
+  );
+
   const cls = await adminPool.query(
     `INSERT INTO classes (college_id, class_name, department_id)
      VALUES ($1, 'Timetable Approval Class', $2) RETURNING id`,
@@ -136,6 +179,10 @@ async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM workflow_requests WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM attendance_sessions WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM position_occupants WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM position_department_assignments WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM position_accounts WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM positions WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM staff WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM classes WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM departments WHERE college_id = $1', [college.collegeId]);
