@@ -220,6 +220,38 @@ test('identity resolvers (Phase 3)', async (t) => {
     assert.deepEqual(staffScope.assignedClassIds, []);
   });
 
+  await t.test('visibilityResolver: Level 2 falls back to self_assigned with no configured policy, department scope once Level 1 assigns one', async () => {
+    const collegeId = `idr${suffix}e2`;
+    collegeIds.push(collegeId);
+    await insertCollege(pool, collegeId);
+
+    const level2UserId = await insertUser(pool, collegeId, 'level2user', 'staff');
+    const level2Position = await makePosition(pool, {
+      collegeId, level: 2, title: 'Vice Principal', createdBy: level2UserId,
+    });
+    await occupy(pool, { collegeId, accountId: level2Position.account.id, userId: level2UserId });
+    const level2Positions = await positionResolver.resolveActivePositions(pool, { collegeId, userId: level2UserId });
+
+    const unconfiguredScope = await visibilityResolver.resolveVisibilityScope(pool, {
+      userId: level2UserId,
+      positions: level2Positions,
+      resolveDepartmentIds: (positionId) => departmentResolver.resolveMappedDepartments(pool, positionId),
+    });
+    assert.equal(unconfiguredScope.scopeLevel, SCOPE_LEVELS.SELF_ASSIGNED);
+
+    const deptId = await insertDepartment(pool, collegeId, 'Dean Office');
+    await positionRepository.createPositionDepartmentAssignment(pool, {
+      collegeId, positionId: level2Position.position.id, departmentId: deptId, assignedBy: level2UserId,
+    });
+    const configuredScope = await visibilityResolver.resolveVisibilityScope(pool, {
+      userId: level2UserId,
+      positions: level2Positions,
+      resolveDepartmentIds: (positionId) => departmentResolver.resolveMappedDepartments(pool, positionId),
+    });
+    assert.equal(configuredScope.scopeLevel, SCOPE_LEVELS.DEPARTMENT);
+    assert.deepEqual(configuredScope.departmentIds, [deptId]);
+  });
+
   await t.test('identityService.resolveCapabilities: composes all five resolvers into one comparable structure', async () => {
     const collegeId = `idr${suffix}f`;
     collegeIds.push(collegeId);

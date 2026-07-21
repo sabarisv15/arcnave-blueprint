@@ -36,12 +36,16 @@
 //   model per ADR-021's own "Level 4 ... not part of this account
 //   model" line.
 //
-// Level 2 positions are deliberately NOT given a scope mapping here —
-// v1's domain model leaves Level 2 configurable per-college by Level 1
-// (Identity-Organization-Model.md), so there is no single fixed
-// scope-level a Level 2 seat resolves to the way Level 1/3 do; deciding
-// that is real future policy work, not something this resolver should
-// guess at.
+// Level 2 positions have no fixed scope-level the way Level 1/3 do —
+// v1's domain model leaves them Principal-configurable (Identity-
+// Architecture.md §5.2 / ADR-021). The configuration mechanism is the
+// same position_department_assignments table Level 3 already uses:
+// if Level 1 has assigned a Level 2 position one or more departments,
+// that IS the Principal-defined policy, and it resolves to DEPARTMENT
+// scope over exactly those departments. No assignment configured for
+// it yet (the only case that exists anywhere today) falls straight
+// through to the ordinary staff/SELF_ASSIGNED default below — never a
+// hardcoded Level 2-specific scope.
 
 const classRepository = require('../../repositories/classRepository');
 const facultyAllocationRepository = require('../../repositories/facultyAllocationRepository');
@@ -49,6 +53,7 @@ const { SCOPE_LEVELS } = require('../../constants/scopeLevels');
 
 const PRINCIPAL_LEVEL = 1;
 const HOD_LEVEL = 3;
+const LEVEL_2 = 2;
 
 // Mirrors actorContextService.resolveAssignedClassIds exactly — same
 // two sources, same de-dup-via-Set, same "tutor class first, then
@@ -86,6 +91,14 @@ async function resolveVisibilityScope(client, { userId, positions, resolveDepart
   if (hodPosition) {
     const departmentIds = await resolveDepartmentIds(hodPosition.positionId);
     return { scopeLevel: SCOPE_LEVELS.DEPARTMENT, departmentIds, assignedClassIds: [] };
+  }
+
+  const level2Position = positions.find((p) => p.level === LEVEL_2);
+  if (level2Position) {
+    const departmentIds = await resolveDepartmentIds(level2Position.positionId);
+    if (departmentIds.length > 0) {
+      return { scopeLevel: SCOPE_LEVELS.DEPARTMENT, departmentIds, assignedClassIds: [] };
+    }
   }
 
   const assignedClassIds = await resolveAssignedClassIds(client, userId);
