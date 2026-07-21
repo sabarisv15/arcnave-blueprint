@@ -1,8 +1,8 @@
 'use strict';
 
 // Unit tests (no DB) for positionAccountInvitationService's recursive
-// invite-guard (Phase 2 step 6, Group (a) scope — Level 1/2/3 only;
-// Class Tutor's 'ownDepartmentOnly' rule lands in step 10).
+// invite-guard: Phase 2 step 6 delivered Level 1/2/3 (Group (a)); step
+// 10 adds Class Tutor's 'ownDepartmentOnly' rule (Group (b)).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -89,21 +89,61 @@ test('assertCanInvite: Level 3 (HOD) requires a Level 2 tenant actor in the same
   });
 });
 
-test('assertCanInvite: Class Tutor (Level 4 + class_tutor) is not supported yet — step 10', async (t) => {
-  await t.test('throws PositionInvitationLevelNotSupportedError, not a generic forbidden error', () => {
+test('assertCanInvite: Class Tutor (Level 4 + class_tutor) requires a Level 3 HOD actor in the target class\'s own department', async (t) => {
+  await t.test('an HOD whose department matches the target class\'s department may invite', () => {
+    assert.doesNotThrow(() => assertCanInvite({
+      actorIsPlatformAdmin: false,
+      actorCapabilities: { collegeId: 'c1', departmentIds: ['dept-1'], positions: [{ level: 3 }] },
+      targetLevel: 4,
+      targetPositionType: 'class_tutor',
+      targetCollegeId: 'c1',
+      targetDepartmentId: 'dept-1',
+    }));
+  });
+
+  await t.test('an HOD of a DIFFERENT department is forbidden', () => {
     assert.throws(
       () => assertCanInvite({
         actorIsPlatformAdmin: false,
-        actorCapabilities: { collegeId: 'c1', positions: [{ level: 3 }] },
+        actorCapabilities: { collegeId: 'c1', departmentIds: ['dept-2'], positions: [{ level: 3 }] },
         targetLevel: 4,
         targetPositionType: 'class_tutor',
         targetCollegeId: 'c1',
+        targetDepartmentId: 'dept-1',
       }),
-      positionAccountInvitationService.PositionInvitationLevelNotSupportedError,
+      positionAccountInvitationService.PositionInvitationForbiddenError,
     );
   });
 
-  await t.test('plain Level 4 (no position_type) is also not supported — no invite flow exists for plain staff', () => {
+  await t.test('an actor with no Level 3 position is forbidden, even with a matching departmentIds entry', () => {
+    assert.throws(
+      () => assertCanInvite({
+        actorIsPlatformAdmin: false,
+        actorCapabilities: { collegeId: 'c1', departmentIds: ['dept-1'], positions: [{ level: 2 }] },
+        targetLevel: 4,
+        targetPositionType: 'class_tutor',
+        targetCollegeId: 'c1',
+        targetDepartmentId: 'dept-1',
+      }),
+      positionAccountInvitationService.PositionInvitationForbiddenError,
+    );
+  });
+
+  await t.test('a Platform Admin cannot invite a Class Tutor — that is a tenant-actor-only rule', () => {
+    assert.throws(
+      () => assertCanInvite({
+        actorIsPlatformAdmin: true,
+        actorCapabilities: null,
+        targetLevel: 4,
+        targetPositionType: 'class_tutor',
+        targetCollegeId: 'c1',
+        targetDepartmentId: 'dept-1',
+      }),
+      positionAccountInvitationService.PositionInvitationForbiddenError,
+    );
+  });
+
+  await t.test('plain Level 4 (no position_type) is still not supported — no invite flow exists for plain staff', () => {
     assert.throws(
       () => assertCanInvite({
         actorIsPlatformAdmin: true, actorCapabilities: null, targetLevel: 4, targetCollegeId: 'c1',

@@ -5,9 +5,10 @@
 // scope — Level 1/2/3. Step 7 adds the orchestration routes actually
 // need: inviteToPosition (idempotent position provisioning + the
 // invitation row + email) and acceptInvitation (credential bootstrap).
-// Class Tutor's 'ownDepartmentOnly' rule and its own provisioning are
-// explicitly NOT this file's job yet — they land once group (b)'s
-// class-assignment schema exists (plan step 10).
+// Step 10 extends the guard with Class Tutor's 'ownDepartmentOnly' rule
+// and adds ensureClassTutorPositionForInvite — both isolated (not yet
+// wired into inviteToPosition, which still only branches on LEVEL3;
+// that wiring is plan step 18).
 //
 // level/position_type are the two things that decide who may invite
 // whom — never a role string, never req.jwtClaims.role. Level 1/2's
@@ -52,10 +53,14 @@ class PositionInvitationForbiddenError extends Error {}
 // "you're not allowed."
 class PositionInvitationLevelNotSupportedError extends Error {}
 
+const STAFF_LEVEL = 4;
+const CLASS_TUTOR_TYPE = 'class_tutor';
+
 const RECURSIVE_INVITERS = {
   1: { scopeCheck: 'platform_admin' },
   2: { scopeCheck: 'platform_admin' },
   3: { requiredActorLevel: LEVEL2, scopeCheck: 'sameCollegeAnyDept' },
+  [CLASS_TUTOR_TYPE]: { requiredActorLevel: LEVEL3, scopeCheck: 'ownDepartmentOnly' },
 };
 
 function inviterKeyFor({ level, positionType }) {
@@ -70,7 +75,7 @@ function inviterKeyFor({ level, positionType }) {
 // "the guard fails loudly" convention every other assert* function in
 // this codebase follows (e.g. assertLevelAllowsPositionLogin).
 function assertCanInvite({
-  actorIsPlatformAdmin, actorCapabilities, targetLevel, targetPositionType, targetCollegeId,
+  actorIsPlatformAdmin, actorCapabilities, targetLevel, targetPositionType, targetCollegeId, targetDepartmentId,
 }) {
   const key = inviterKeyFor({ level: targetLevel, positionType: targetPositionType });
   const rule = RECURSIVE_INVITERS[key];
@@ -107,13 +112,19 @@ function assertCanInvite({
     return;
   }
 
-  // 'ownDepartmentOnly' (Class Tutor) isn't implemented until step 10
-  // extends this guard — reaching here means inviterKeyFor already
-  // matched 'class_tutor' but RECURSIVE_INVITERS doesn't define it
-  // yet, which can't currently happen (the map above has no
-  // 'class_tutor' entry, so inviterKeyFor would already have hit the
-  // !rule branch first) — kept as an explicit guard, not a silent
-  // fallthrough, for when that entry is added.
+  // 'ownDepartmentOnly' (Class Tutor, step 10): the inviting HOD's own
+  // resolved department scope (actorCapabilities.departmentIds — their
+  // ordinary PERSONAL login, per this file's own top-of-file note, not
+  // a Position Account session) must include the target class's
+  // department. Reuses the same departmentIds the visibility resolver
+  // already computes for an HOD rather than re-deriving it here.
+  if (rule.scopeCheck === 'ownDepartmentOnly') {
+    if (!Array.isArray(actorCapabilities.departmentIds) || !actorCapabilities.departmentIds.includes(targetDepartmentId)) {
+      throw new PositionInvitationForbiddenError('actor is not the HOD of the target class\'s department');
+    }
+    return;
+  }
+
   throw new PositionInvitationLevelNotSupportedError(`scopeCheck ${JSON.stringify(rule.scopeCheck)} not implemented yet`);
 }
 
@@ -174,6 +185,26 @@ async function ensureHodPositionForInvite(client, { collegeId, departmentId, cre
   });
   await positionRepository.createPositionDepartmentAssignment(client, {
     collegeId, positionId: position.id, departmentId, assignedBy: createdBy,
+  });
+  return position;
+}
+
+// Class Tutor's own idempotent find-or-create, keyed by class — mirrors
+// ensureHodPositionForInvite exactly, one level down (department ->
+// class). Isolated at this step (not yet called from inviteToPosition,
+// which still only branches on LEVEL3 — wiring Class Tutor invites
+// through this is plan step 18, once assignClassTutor/routes/classes.js
+// migration lands).
+async function ensureClassTutorPositionForInvite(client, { collegeId, classId, createdBy }) {
+  const existingAssignment = await positionRepository.findActiveClassAssignment(client, classId);
+  if (existingAssignment) {
+    return positionRepository.findPositionById(client, existingAssignment.position_id);
+  }
+  const position = await positionRepository.createPosition(client, {
+    collegeId, level: STAFF_LEVEL, title: 'Class Tutor', createdBy, positionType: CLASS_TUTOR_TYPE,
+  });
+  await positionRepository.createPositionClassAssignment(client, {
+    collegeId, positionId: position.id, classId, assignedBy: createdBy,
   });
   return position;
 }
@@ -316,6 +347,7 @@ module.exports = {
   PositionInvitationValidationError,
   RECURSIVE_INVITERS,
   assertCanInvite,
+  ensureClassTutorPositionForInvite,
   inviteToPosition,
   lookupPendingInvitation,
   acceptInvitation,

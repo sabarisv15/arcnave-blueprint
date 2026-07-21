@@ -14,13 +14,13 @@
 // kept as one file across five tables only because nothing outside
 // constraint tests consumes any of this yet.
 async function createPosition(client, {
-  collegeId, level, title, createdBy,
+  collegeId, level, title, createdBy, positionType,
 }) {
   const result = await client.query(
-    `INSERT INTO positions (college_id, level, title, created_by)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO positions (college_id, level, title, created_by, position_type)
+     VALUES ($1, $2, $3, $4, $5)
      RETURNING *`,
-    [collegeId, level, title, createdBy],
+    [collegeId, level, title, createdBy, positionType || null],
   );
   return result.rows[0];
 }
