@@ -7,6 +7,7 @@ const { requestContextMiddleware } = require('./middleware/requestContext');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
 const { sessionRevocationMiddleware } = require('./middleware/sessionRevocation');
+const { identityMiddleware } = require('./middleware/identity');
 const errorHandler = require('./middleware/errorHandler');
 const createAuthRouter = require('./routes/auth');
 const createConfigurationsRouter = require('./routes/configurations');
@@ -99,6 +100,10 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   // middleware/sessionRevocation.js's own docstring for why this
   // ordering is load-bearing, not incidental.
   app.use(asyncHandler(sessionRevocationMiddleware));
+  // Phase 1 (Capability Resolver integration): resolves
+  // req.capabilities exactly once per request, after revocation has
+  // already rejected a stale session — see middleware/identity.js.
+  app.use(asyncHandler(identityMiddleware));
 
   // Proves the whole resolve -> set_tenant_context -> route-handler
   // pipeline actually reaches Postgres: reads current_setting() back

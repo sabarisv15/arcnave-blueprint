@@ -82,13 +82,21 @@ function requireRole(...allowedRoles) {
 // generic primitive requirePermission is built on, not a competing
 // mechanism, and rbac.test.js still exercises it directly against a
 // throwaway test route.
+//
+// Phase 1 (Capability Resolver integration): reads
+// req.capabilities.effectiveRole (resolved once per request by
+// middleware/identity.js, mounted before any route) instead of
+// req.jwtClaims.role directly — Authorization is one of the four
+// consumers this phase moves onto the Position model as the single
+// source of truth. Stays synchronous: no DB call happens here, the
+// resolution already happened upstream.
 function requirePermission(permission) {
   return (req, res, next) => {
     if (!isValidAccessClaims(req.jwtClaims)) {
       res.status(401).json({ detail: 'Authentication required' });
       return;
     }
-    if (!roleHasPermission(req.jwtClaims.role, permission)) {
+    if (!roleHasPermission(req.capabilities.effectiveRole, permission)) {
       res.status(403).json({ detail: 'Insufficient role' });
       return;
     }

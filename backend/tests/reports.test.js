@@ -17,6 +17,7 @@ const nodePath = require('node:path');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const { seedPrincipalPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 const config = require('../src/config');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
@@ -105,6 +106,7 @@ async function seedTenant(adminPool, label) {
     );
     userIds[username] = result.rows[0].id;
   }
+  await seedPrincipalPosition(adminPool, { collegeId: college.collegeId, userId: userIds.principaluser, passwordHash });
   await adminPool.query(
     `INSERT INTO students (college_id, roll_no, full_name) VALUES ($1, 'R001', 'Alice')`,
     [college.collegeId],
@@ -114,6 +116,7 @@ async function seedTenant(adminPool, label) {
 
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
+  await cleanupPositionRows(adminPool, college.collegeId);
   await adminPool.query('DELETE FROM generated_reports WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM documents WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM students WHERE college_id = $1', [college.collegeId]);

@@ -7,6 +7,7 @@ const http = require('node:http');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const { seedPrincipalPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PASSWORD = 'BackgroundJobsTestPass123!';
@@ -55,14 +56,17 @@ async function seedTenant(adminPool) {
     [collegeId, subdomain],
   );
   const passwordHash = await security.hashPassword(PASSWORD);
+  const userIds = {};
   for (const [username, role] of [['principaluser', 'principal'], ['staffuser', 'staff']]) {
     // eslint-disable-next-line no-await-in-loop
-    await adminPool.query(
+    const result = await adminPool.query(
       `INSERT INTO users (college_id, username, email, password_hash, role, is_active)
-       VALUES ($1, $2, $3, $4, $5, true)`,
+       VALUES ($1, $2, $3, $4, $5, true) RETURNING id`,
       [collegeId, username, `${username}@example.com`, passwordHash, role],
     );
+    userIds[username] = result.rows[0].id;
   }
+  await seedPrincipalPosition(adminPool, { collegeId, userId: userIds.principaluser, passwordHash });
   return { collegeId, subdomain };
 }
 
@@ -70,6 +74,7 @@ async function cleanupTenant(adminPool, college) {
   // audit_log.user_id FKs users(id) — must go before the users delete
   // below (task #17's login audit logging).
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
+  await cleanupPositionRows(adminPool, college.collegeId);
   await adminPool.query('DELETE FROM background_jobs WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [college.collegeId]);

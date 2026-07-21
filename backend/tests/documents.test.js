@@ -17,6 +17,7 @@ const path = require('node:path');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const { seedPrincipalPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 const config = require('../src/config');
 const fileStorage = require('../src/storage/fileStorage');
 
@@ -127,6 +128,7 @@ async function seedTenant(adminPool, label) {
     `INSERT INTO staff (college_id, user_id, full_name) VALUES ($1, $2, 'Documents API Test Principal')`,
     [college.collegeId, userIds.principaluser],
   );
+  await seedPrincipalPosition(adminPool, { collegeId: college.collegeId, userId: userIds.principaluser, passwordHash });
 
   const student = await adminPool.query(
     `INSERT INTO students (college_id, roll_no, full_name) VALUES ($1, $2, $3) RETURNING id`,
@@ -138,6 +140,7 @@ async function seedTenant(adminPool, label) {
 
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
+  await cleanupPositionRows(adminPool, college.collegeId);
   await adminPool.query('DELETE FROM ocr_results WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM documents WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM students WHERE college_id = $1', [college.collegeId]);
