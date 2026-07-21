@@ -473,11 +473,16 @@ merely unbuilt.
   position/account/occupant data. No AI tool reads Position Account
   data or resolves capabilities from this model today.
 - **Workflow enforcement** — every AI action requiring human approval
-  still routes through the same approval mechanism, keyed on the
-  Current Model's role labels. Nothing about this identity model has
-  changed how AI actions are gated — the gate itself is unchanged; only
-  the source of truth for *who's asking* has not yet moved from the
-  Current Model to the Target Model described above.
+  still routes through the same approval mechanism, keyed on the raw
+  JWT role claim. Nothing about this identity model has changed how AI
+  actions are gated — the gate itself is unchanged; only the source of
+  truth for *who's asking* has not yet moved to either identity
+  context described above.
+- **Planned, separate phase**: migrating AI's Policy Gate onto the
+  active identity context (Personal or Institutional) once both are
+  stable is scoped as its own post-Phase-2 work item, not folded into
+  Phase 2 itself — see
+  `docs/architecture/Phase3-AI-Identity-Context-Integration.md`.
 
 ## 14. Current vs Target Architecture
 This table is the authoritative summary of implementation status. The

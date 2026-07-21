@@ -455,6 +455,15 @@ sites/scenarios) — tackle before the single-assertion files.
   implementation time, not guessed here.
 - A cache layer for `resolveCapabilitiesForPosition` (ADR-022 defers
   the equivalent for `resolveCapabilities` too — same treatment).
+- **AI Identity Context Integration** — migrating AI's Policy Gate
+  (`routes/ai.js`/`aiToolRegistry.js`, currently keyed on raw
+  `req.jwtClaims.role`) onto the active identity context (Personal or
+  Institutional) is explicitly a separate, post-Phase-2 work item, not
+  part of this phase's delivery — Phase 2's job is only to expose
+  `resolveCapabilitiesForPosition` as a stable API; consuming it from
+  AI is its own body of work (tool routing, prompt context,
+  tool-scoping). See
+  `docs/architecture/Phase3-AI-Identity-Context-Integration.md`.
 
 ## Verification
 

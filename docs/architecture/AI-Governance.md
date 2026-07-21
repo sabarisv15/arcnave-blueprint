@@ -182,6 +182,23 @@ or workflow-submitting alike):
   scope-resolution path every tool's handler uses — never a bespoke
   per-tool lookup.
 
+## 8a. Planned: identity-context-aware authorization (not yet built)
+
+Today, every check in §8 below (`allowedRoles`, `permittedClassifications`)
+resolves against `req.jwtClaims.role` — a raw JWT claim — read directly
+in `routes/ai.js`/`services/aiToolRegistry.js`, independent of the
+identity-context resolution the rest of the platform uses
+(`identityService.resolveCapabilities` for authorization/workflow/
+visibility/audit since Phase 1). This is a deliberate, tracked gap, not
+an oversight: AI should become **identity-context-centric**, not
+office-centric — the AI itself doesn't change, only which identity
+context it reads changes based on how the person is logged in (personal
+login → Personal Identity Context; Position Account login → Institutional
+Identity Context, scoped to exactly that office). Scoped as its own
+post-Phase-2 work item — see
+`docs/architecture/Phase3-AI-Identity-Context-Integration.md` — not
+started yet.
+
 ## 8. Role-aware ERP Copilot tool registry (this slice)
 
 Every tool below follows §7. All are Internal classification unless
