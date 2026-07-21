@@ -29,15 +29,23 @@ const { roleHasPermission } = require('./permissions');
 // re-derive *why* a token was untrustworthy, only that it was.
 
 function isValidAccessClaims(claims) {
-  // Checks type === 'access' explicitly, not just presence of a role
-  // — belt-and-suspenders against a platform-admin token ever working
-  // here even in a hypothetical future where jwtSecretKey and
-  // platformJwtSecretKey were accidentally set to the same value. A
-  // platform token has no role claim at all, so it would already fail
-  // requireRole's allowed-set check without this — but being explicit
-  // here means that's not the only thing standing between the two
-  // token types, same reasoning the deleted Python require_role had.
-  return claims !== null && claims.type === 'access';
+  // Checks type is a real tenant-side access claim explicitly, not
+  // just presence of a role — belt-and-suspenders against a
+  // platform-admin token ever working here even in a hypothetical
+  // future where jwtSecretKey and platformJwtSecretKey were
+  // accidentally set to the same value. A platform token has no role
+  // claim at all, so it would already fail requireRole's allowed-set
+  // check without this — but being explicit here means that's not the
+  // only thing standing between the two token types, same reasoning
+  // the deleted Python require_role had.
+  //
+  // Phase 2: 'position_access' (a Position Account session) is a
+  // second, equally valid tenant-side claim type — it carries no
+  // `role` at all (requireRole's own allowed-set check already denies
+  // it, correctly, for any role-string-based route), but
+  // requirePermission's effectiveRole check below must still run for
+  // it rather than 401 before ever reaching that check.
+  return claims !== null && (claims.type === 'access' || claims.type === 'position_access');
 }
 
 // Any authenticated tenant user, role irrelevant — for routes that

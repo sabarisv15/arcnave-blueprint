@@ -188,6 +188,14 @@ async function revoke(client, rawRefreshToken) {
   }
 }
 
+// middleware/sessionRevocation.js's Position Account counterpart to
+// authService.getCurrentTokenVersion — same "kept here, not a direct
+// repository call from the middleware" shape, same null-for-unknown-id
+// fail-closed behavior.
+async function getCurrentPositionAccountTokenVersion(client, positionAccountId) {
+  return positionRepository.getPositionAccountTokenVersion(client, positionAccountId);
+}
+
 module.exports = {
   PositionAuthError,
   PositionRefreshTokenReuseError,
@@ -195,4 +203,5 @@ module.exports = {
   login,
   refresh,
   revoke,
+  getCurrentPositionAccountTokenVersion,
 };

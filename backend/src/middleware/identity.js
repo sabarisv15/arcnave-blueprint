@@ -27,15 +27,24 @@ const { getRequestContext } = require('../logging/context');
 
 async function identityMiddleware(req, res, next) {
   const claims = req.jwtClaims;
-  if (!claims || claims.type !== 'access') {
+  if (!claims || (claims.type !== 'access' && claims.type !== 'position_access')) {
     next();
     return;
   }
 
-  req.capabilities = await identityService.resolveCapabilities(req.dbClient, {
-    userId: claims.sub,
-    collegeId: req.collegeId,
-  });
+  // Phase 2 decision 4: a 'position_access' token (claims.sub IS the
+  // position_account_id, never a userId) resolves through the
+  // Institutional Identity Context, never resolveCapabilities — there
+  // is structurally no userId in this claim to accidentally union
+  // against whatever else the current occupant personally holds.
+  req.capabilities = claims.type === 'position_access'
+    ? await identityService.resolveCapabilitiesForPosition(req.dbClient, {
+      positionAccountId: claims.sub,
+    })
+    : await identityService.resolveCapabilities(req.dbClient, {
+      userId: claims.sub,
+      collegeId: req.collegeId,
+    });
 
   // Same "mutate the existing AsyncLocalStorage store in place" pattern
   // db/tenantTransaction.js already uses for req.collegeId — this is

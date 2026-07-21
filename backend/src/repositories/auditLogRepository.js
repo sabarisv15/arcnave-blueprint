@@ -27,7 +27,21 @@ const { getRequestContext } = require('../logging/context');
 // to it.
 function ambientPosition() {
   const context = getRequestContext();
-  const positions = context && context.capabilities ? context.capabilities.positions : null;
+  const capabilities = context ? context.capabilities : null;
+  if (!capabilities) {
+    return { positionAccountId: null, positionId: null };
+  }
+
+  // Phase 2: a Position Account session's capabilities (identityService.
+  // resolveCapabilitiesForPosition) carry positionAccountId/positionId
+  // directly — there is no `.positions` array, unlike a personal-login
+  // session's resolveCapabilities shape below, since exactly one
+  // position is ever in scope for that session.
+  if (capabilities.positionAccountId !== undefined) {
+    return { positionAccountId: capabilities.positionAccountId, positionId: capabilities.positionId };
+  }
+
+  const positions = capabilities.positions;
   if (!positions || positions.length === 0) {
     return { positionAccountId: null, positionId: null };
   }

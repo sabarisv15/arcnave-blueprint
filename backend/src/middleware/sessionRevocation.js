@@ -19,15 +19,23 @@
 // more rejection reason for a token that WAS structurally valid but
 // names a now-stale token_version (e.g. after a password reset).
 const authService = require('../services/authService');
+const positionAccountAuthService = require('../services/positionAccountAuthService');
 
 async function sessionRevocationMiddleware(req, res, next) {
   const claims = req.jwtClaims;
-  if (!claims || claims.type !== 'access' || typeof claims.token_version !== 'number') {
+  const isPositionAccess = claims && claims.type === 'position_access';
+  if (!claims || (claims.type !== 'access' && !isPositionAccess) || typeof claims.token_version !== 'number') {
     next();
     return;
   }
 
-  const currentVersion = await authService.getCurrentTokenVersion(req.dbClient, claims.sub);
+  // Phase 2: a 'position_access' token's revocation state lives on
+  // position_accounts.token_version, entirely independent of the same
+  // occupant's own users.token_version — resetting one never affects
+  // the other's live sessions.
+  const currentVersion = isPositionAccess
+    ? await positionAccountAuthService.getCurrentPositionAccountTokenVersion(req.dbClient, claims.sub)
+    : await authService.getCurrentTokenVersion(req.dbClient, claims.sub);
   if (currentVersion === null || currentVersion !== claims.token_version) {
     res.status(401).json({ detail: 'Session has been revoked' });
     return;
