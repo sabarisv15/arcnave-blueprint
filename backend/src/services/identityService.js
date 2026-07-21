@@ -122,6 +122,7 @@ async function resolveCapabilities(client, { userId, collegeId }) {
     userId,
     positions,
     resolveDepartmentIds: (positionId) => departmentResolver.resolveMappedDepartments(client, positionId),
+    resolveActiveClassTutorClassId: () => resolveActiveClassTutorPosition(client, { userId, collegeId }),
   });
 
   return {

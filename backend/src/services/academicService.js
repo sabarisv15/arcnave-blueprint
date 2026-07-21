@@ -74,6 +74,7 @@ const workflowChainService = require('./workflowChainService');
 const importService = require('./importService');
 const staffService = require('./staffService');
 const notificationService = require('./notificationService');
+const identityService = require('./identityService');
 const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
 
 // resolveClassId: mirrors studentService.resolveStudentId/
@@ -114,20 +115,24 @@ class ClassTimetableStatusError extends Error {}
 // same discipline as StaffCodeConflictError.
 class ClassNameConflictError extends Error {}
 
-// UNIQUE (tutor_user_id) violated (Postgres 23505,
-// classes_tutor_user_id_key) — this user is already the tutor of
-// another class. BusinessRules.md Staff: "Class Tutor is assigned only
-// by HOD, for one class at a time" — this is that rule's DB-level
-// enforcement surfacing as a domain error instead of a raw pg one.
+// A class already has an active Class Tutor — thrown by
+// classTutorService.assignClassTutor (Phase 2 step 18) when called on
+// a class that already has one (use reassignClassTutor instead).
+// BusinessRules.md Staff: "Class Tutor is assigned only by HOD, for one
+// class at a time" — this is that rule's enforcement, previously the
+// classes_tutor_user_id_key UNIQUE violation's domain error before the
+// Position/Account/Occupant model replaced classes.tutor_user_id
+// entirely; same error class and HTTP mapping (409) reused from the new
+// call site so routes/classes.js's mapAcademicServiceError needs no
+// change.
 class ClassTutorConflictError extends Error {}
 
-// classes_tutor_user_id_fkey (classes.tutor_user_id -> users.id)
-// violated (Postgres 23503) — the given tutorUserId doesn't exist in
-// users. Follows StaffUserNotFoundError's precedent: tutor_user_id is
-// the only FK a caller could violate via createClass/updateClass's
-// inputs (college_id comes from the tenant-scoped request context, not
-// caller-supplied free text), so any 23503 here unambiguously means
-// this.
+// newTutorUserId doesn't exist in users — thrown by
+// classTutorService.assignClassTutor/reassignClassTutor (Phase 2 step
+// 18) on a position_occupants_user_id_fkey violation. Previously the
+// classes_tutor_user_id_fkey violation's domain error before the
+// Position/Account/Occupant model replaced classes.tutor_user_id
+// entirely; same error class and HTTP mapping (404) reused.
 class ClassTutorNotFoundError extends Error {}
 
 // classes_department_id_fkey (classes.department_id -> departments.id)
@@ -276,13 +281,15 @@ const VALID_TIMETABLE_STATUSES = [
 // whitelist to be the only line of defense — same defense-in-depth
 // reasoning as studentService.js/staffService.js's own ALLOWED_FIELDS.
 // collegeId is excluded: a class's tenant is set once at creation and
-// never moves via update, same as students/staff.
+// never moves via update, same as students/staff. tutorUserId dropped
+// in Phase 2 step 18 — classTutorService.assignClassTutor/
+// reassignClassTutor supersede createClass/updateClass's former
+// implicit tutorUserId mutation entirely.
 const ALLOWED_FIELDS = [
   'className',
   'department',
   'departmentId',
   'semester',
-  'tutorUserId',
   'timetableStatus',
   'timetableData',
   'timetableRemarks',
@@ -298,6 +305,21 @@ function pickClassFields(source) {
   return result;
 }
 
+// Phase 2 step 18: tutorUserId is no longer accepted by createClass/
+// updateClass at all — a caller-supplied value is now an explicit 400,
+// not a silent no-op (dropping it via ALLOWED_FIELDS alone would look
+// like it worked). Use classTutorService.assignClassTutor/
+// reassignClassTutor (routed through POST/PUT /classes/:id/tutor)
+// instead — a genuinely different actor set (HOD-only, own-department)
+// than the rest of this file's principal-only create/update.
+function assertNoTutorUserIdInFields(fields) {
+  if (fields.tutorUserId !== undefined) {
+    throw new ClassValidationError(
+      'tutorUserId can no longer be set via this endpoint — use POST /classes/:id/tutor (assign) or PUT /classes/:id/tutor (reassign) instead',
+    );
+  }
+}
+
 function assertValidTimetableStatus(timetableStatus) {
   if (timetableStatus !== undefined && !VALID_TIMETABLE_STATUSES.includes(timetableStatus)) {
     throw new ClassTimetableStatusError(
@@ -310,6 +332,7 @@ async function createClass(client, { collegeId, className, ...rest }, { actorUse
   if (!className) {
     throw new ClassValidationError('className is required');
   }
+  assertNoTutorUserIdInFields(rest);
   assertValidTimetableStatus(rest.timetableStatus);
 
   let cls;
@@ -322,12 +345,6 @@ async function createClass(client, { collegeId, className, ...rest }, { actorUse
   } catch (err) {
     if (err.code === '23505' && err.constraint === 'classes_college_id_class_name_key') {
       throw new ClassNameConflictError(`className ${JSON.stringify(className)} already exists for this college`);
-    }
-    if (err.code === '23505' && err.constraint === 'classes_tutor_user_id_key') {
-      throw new ClassTutorConflictError(`tutorUserId ${JSON.stringify(rest.tutorUserId)} is already tutoring another class`);
-    }
-    if (err.code === '23503' && err.constraint === 'classes_tutor_user_id_fkey') {
-      throw new ClassTutorNotFoundError(`tutorUserId ${JSON.stringify(rest.tutorUserId)} does not exist`);
     }
     if (err.code === '23503' && err.constraint === 'classes_department_id_fkey') {
       throw new ClassDepartmentNotFoundError(`departmentId ${JSON.stringify(rest.departmentId)} does not exist`);
@@ -356,6 +373,7 @@ async function getClass(client, id) {
 const WORKFLOW_MANAGED_TIMETABLE_STATUSES = ['Pending HOD', 'Pending Principal', 'Approved', 'Rejected'];
 
 async function updateClass(client, id, fields, { userId }) {
+  assertNoTutorUserIdInFields(fields);
   const patch = pickClassFields(fields);
   assertValidTimetableStatus(patch.timetableStatus);
   if (WORKFLOW_MANAGED_TIMETABLE_STATUSES.includes(patch.timetableStatus)) {
@@ -371,12 +389,6 @@ async function updateClass(client, id, fields, { userId }) {
   } catch (err) {
     if (err.code === '23505' && err.constraint === 'classes_college_id_class_name_key') {
       throw new ClassNameConflictError(`className ${JSON.stringify(patch.className)} already exists for this college`);
-    }
-    if (err.code === '23505' && err.constraint === 'classes_tutor_user_id_key') {
-      throw new ClassTutorConflictError(`tutorUserId ${JSON.stringify(patch.tutorUserId)} is already tutoring another class`);
-    }
-    if (err.code === '23503' && err.constraint === 'classes_tutor_user_id_fkey') {
-      throw new ClassTutorNotFoundError(`tutorUserId ${JSON.stringify(patch.tutorUserId)} does not exist`);
     }
     if (err.code === '23503' && err.constraint === 'classes_department_id_fkey') {
       throw new ClassDepartmentNotFoundError(`departmentId ${JSON.stringify(patch.departmentId)} does not exist`);
@@ -1163,7 +1175,13 @@ async function sendClassAlert(client, classId, body, { actorUserId } = {}) {
   if (cls === null) {
     throw new ClassSendAlertValidationError(`class ${JSON.stringify(classId)} does not exist`);
   }
-  if (cls.tutor_user_id !== actorUserId) {
+  // Phase 2 step 13: classes.tutor_user_id -> the Position/Account/
+  // Occupant model, same swap workflowChainService's 'tutor' resolution
+  // already made (step 11) — identityService.resolvePositionOccupant's
+  // {classId} overload (Phase 2 step 9) is the one entry point, never a
+  // direct positionRepository/resolver call of this file's own.
+  const tutorUserId = await identityService.resolvePositionOccupant(client, { collegeId: cls.college_id, classId });
+  if (tutorUserId !== actorUserId) {
     throw new ClassSendAlertNotTutorError(`user ${JSON.stringify(actorUserId)} is not the tutor of class ${JSON.stringify(classId)}`);
   }
 

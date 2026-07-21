@@ -3,7 +3,11 @@
 // Unit tests for ExaminationService — no live Postgres needed:
 // classRepository/documentService/examTimetableVersionRepository/
 // auditLogRepository are stubbed via node:test's built-in mock, same
-// technique as every other *-service.test.js file in this suite.
+// technique as every other *-service.test.js file in this suite. The
+// tutor gate itself (assertIsTutor) moved off classes.tutor_user_id
+// onto identityService.resolvePositionOccupant's {classId} overload in
+// Phase 2 step 14 — mocked here rather than the class row carrying
+// tutor_user_id.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -11,6 +15,7 @@ const classRepository = require('../src/repositories/classRepository');
 const documentService = require('../src/services/documentService');
 const examTimetableVersionRepository = require('../src/repositories/examTimetableVersionRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
+const identityService = require('../src/services/identityService');
 const examinationService = require('../src/services/examinationService');
 
 test('uploadExamDocument', async (t) => {
@@ -24,8 +29,12 @@ test('uploadExamDocument', async (t) => {
   });
 
   await t.test('rejects an actor who is not the class tutor', async () => {
-    const findClassMock = t.mock.method(classRepository, 'findById', async () => ({ id: 'class-1', tutor_user_id: 'tutor-1' }));
-    t.after(() => findClassMock.mock.restore());
+    const findClassMock = t.mock.method(classRepository, 'findById', async () => ({ id: 'class-1' }));
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'tutor-1');
+    t.after(() => {
+      findClassMock.mock.restore();
+      resolveTutorMock.mock.restore();
+    });
     await assert.rejects(
       () => examinationService.uploadExamDocument({}, 'class-1', {}, { actorUserId: 'someone-else' }),
       examinationService.ExaminationNotTutorError,
@@ -33,10 +42,12 @@ test('uploadExamDocument', async (t) => {
   });
 
   await t.test('uploads through documentService with the class id attached', async () => {
-    const findClassMock = t.mock.method(classRepository, 'findById', async () => ({ id: 'class-1', college_id: 'c1', tutor_user_id: 'tutor-1' }));
+    const findClassMock = t.mock.method(classRepository, 'findById', async () => ({ id: 'class-1', college_id: 'c1' }));
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'tutor-1');
     const uploadMock = t.mock.method(documentService, 'uploadDocument', async (client, fields) => ({ id: 'doc-1', ...fields }));
     t.after(() => {
       findClassMock.mock.restore();
+      resolveTutorMock.mock.restore();
       uploadMock.mock.restore();
     });
     const result = await examinationService.uploadExamDocument({}, 'class-1', {
@@ -49,15 +60,19 @@ test('uploadExamDocument', async (t) => {
 
 test('publishExamTimetableVersion', async (t) => {
   function mockTutorAndDoc(t, { document = { id: 'doc-1', class_id: 'class-1' } } = {}) {
-    const findClassMock = t.mock.method(classRepository, 'findById', async () => ({ id: 'class-1', college_id: 'c1', tutor_user_id: 'tutor-1' }));
+    const findClassMock = t.mock.method(classRepository, 'findById', async () => ({ id: 'class-1', college_id: 'c1' }));
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'tutor-1');
     const getDocumentMock = t.mock.method(documentService, 'getDocument', async () => document);
-    return { findClassMock, getDocumentMock };
+    return {
+      findClassMock, resolveTutorMock, getDocumentMock,
+    };
   }
 
   await t.test('rejects a nonexistent document', async () => {
-    const { findClassMock, getDocumentMock } = mockTutorAndDoc(t, { document: null });
+    const { findClassMock, resolveTutorMock, getDocumentMock } = mockTutorAndDoc(t, { document: null });
     t.after(() => {
       findClassMock.mock.restore();
+      resolveTutorMock.mock.restore();
       getDocumentMock.mock.restore();
     });
     await assert.rejects(
@@ -67,9 +82,10 @@ test('publishExamTimetableVersion', async (t) => {
   });
 
   await t.test('rejects a document belonging to a different class', async () => {
-    const { findClassMock, getDocumentMock } = mockTutorAndDoc(t, { document: { id: 'doc-1', class_id: 'other-class' } });
+    const { findClassMock, resolveTutorMock, getDocumentMock } = mockTutorAndDoc(t, { document: { id: 'doc-1', class_id: 'other-class' } });
     t.after(() => {
       findClassMock.mock.restore();
+      resolveTutorMock.mock.restore();
       getDocumentMock.mock.restore();
     });
     await assert.rejects(
@@ -79,13 +95,14 @@ test('publishExamTimetableVersion', async (t) => {
   });
 
   await t.test('clears the previous current-official version, numbers the new one, and audits it', async () => {
-    const { findClassMock, getDocumentMock } = mockTutorAndDoc(t);
+    const { findClassMock, resolveTutorMock, getDocumentMock } = mockTutorAndDoc(t);
     const clearMock = t.mock.method(examTimetableVersionRepository, 'clearCurrentOfficialForClass', async () => {});
     const countMock = t.mock.method(examTimetableVersionRepository, 'countForClass', async () => 1);
     const createMock = t.mock.method(examTimetableVersionRepository, 'create', async (client, fields) => ({ id: 'ver-2', ...fields }));
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
       findClassMock.mock.restore();
+      resolveTutorMock.mock.restore();
       getDocumentMock.mock.restore();
       clearMock.mock.restore();
       countMock.mock.restore();

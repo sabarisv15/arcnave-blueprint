@@ -50,10 +50,10 @@ const auditLogRepository = require('../repositories/auditLogRepository');
 const hodInChargeRepository = require('../repositories/hodInChargeRepository');
 const positionRepository = require('../repositories/positionRepository');
 const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
-const classRepository = require('../repositories/classRepository');
 const workflowService = require('./workflowService');
 const authService = require('./authService');
 const notificationService = require('./notificationService');
+const identityService = require('./identityService');
 const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
 
 // Missing userId or fullName — staff.user_id and staff.full_name are
@@ -533,10 +533,15 @@ async function deactivateStaff(client, staffId, { actorUserId } = {}) {
       `staff ${JSON.stringify(staffId)} still has ${activeAllocations.length} active faculty allocation(s) — reassign or remove them first`,
     );
   }
-  const tutoredClass = await classRepository.findByTutorUserId(client, staff.user_id);
-  if (tutoredClass !== null) {
+  // Phase 2 step 17: classes.tutor_user_id -> the Position/Account/
+  // Occupant model, same reverse (user -> tutored class) direction
+  // studentService's two sites already moved onto (step 16) —
+  // identityService.resolveActiveClassTutorPosition, never a direct
+  // classRepository/positionRepository call of this file's own.
+  const tutoredClassId = await identityService.resolveActiveClassTutorPosition(client, { userId: staff.user_id, collegeId: staff.college_id });
+  if (tutoredClassId !== null) {
     throw new StaffDeactivationHasActiveDutiesError(
-      `staff ${JSON.stringify(staffId)} is still the tutor of class ${JSON.stringify(tutoredClass.id)} — reassign the Class Tutor duty first`,
+      `staff ${JSON.stringify(staffId)} is still the tutor of class ${JSON.stringify(tutoredClassId)} — reassign the Class Tutor duty first`,
     );
   }
 

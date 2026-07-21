@@ -24,6 +24,7 @@ const visibilityService = require('./visibilityService');
 const workflowService = require('./workflowService');
 const configurationService = require('./configurationService');
 const studentLifecycleEventRepository = require('../repositories/studentLifecycleEventRepository');
+const identityService = require('./identityService');
 const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
 
 // Missing roll_no or full_name — StudentEditorModal.jsx marks both
@@ -225,11 +226,18 @@ async function createStudent(client, {
     throw new StudentValidationError('rollNo and fullName are required');
   }
 
-  const tutorClass = await classRepository.findByTutorUserId(client, userId);
-  if (tutorClass === null) {
+  // Phase 2 step 16: the reverse (user -> their tutored class) lookup
+  // moved off classRepository.findByTutorUserId onto
+  // identityService.resolveActiveClassTutorPosition (Phase 2 step 9) —
+  // the riskiest of the 8 tutor-reading call sites to migrate, since
+  // this direction can't reuse resolvePositionOccupant's {classId}
+  // overload unchanged (that resolves slot -> occupant, not
+  // occupant -> slot).
+  const tutorClassId = await identityService.resolveActiveClassTutorPosition(client, { userId, collegeId });
+  if (tutorClassId === null) {
     throw new StudentNotClassTutorError(`user ${JSON.stringify(userId)} is not the tutor of any class`);
   }
-  if (assertedClassId !== undefined && assertedClassId !== null && assertedClassId !== tutorClass.id) {
+  if (assertedClassId !== undefined && assertedClassId !== null && assertedClassId !== tutorClassId) {
     throw new StudentClassMismatchError(`classId ${JSON.stringify(assertedClassId)} is not a class user ${JSON.stringify(userId)} tutors`);
   }
 
@@ -239,7 +247,7 @@ async function createStudent(client, {
       collegeId,
       rollNo,
       fullName,
-      classId: tutorClass.id,
+      classId: tutorClassId,
       ...pickStudentFields(rest),
     });
   } catch (err) {
@@ -247,7 +255,7 @@ async function createStudent(client, {
       throw new StudentRollNoConflictError(`roll_no ${JSON.stringify(rollNo)} already exists for this college`);
     }
     if (err.code === '23503' && err.constraint === 'students_class_id_fkey') {
-      throw new StudentClassNotFoundError(`classId ${JSON.stringify(tutorClass.id)} does not exist`);
+      throw new StudentClassNotFoundError(`classId ${JSON.stringify(tutorClassId)} does not exist`);
     }
     throw err;
   }
@@ -362,9 +370,12 @@ async function assertCanModifyStudent(client, student, targetClassId, { actorUse
   const sourceClassId = student.class_id;
 
   if (actorRole === 'staff') {
-    const tutorClass = await classRepository.findByTutorUserId(client, actorUserId);
-    if (tutorClass === null || sourceClassId !== tutorClass.id
-      || (targetClassId !== undefined && targetClassId !== tutorClass.id)) {
+    // Phase 2 step 16: same swap as createStudent above —
+    // identityService.resolveActiveClassTutorPosition, never
+    // classRepository.findByTutorUserId directly.
+    const tutorClassId = await identityService.resolveActiveClassTutorPosition(client, { userId: actorUserId, collegeId: student.college_id });
+    if (tutorClassId === null || sourceClassId !== tutorClassId
+      || (targetClassId !== undefined && targetClassId !== tutorClassId)) {
       throw new StudentNotAuthorizedError(`user ${JSON.stringify(actorUserId)} does not tutor student ${JSON.stringify(student.id)}'s class`);
     }
     return;
@@ -549,7 +560,15 @@ async function listStudents(client, { limit = 50, offset = 0 } = {}, { actorUser
     // implementation, not a copy here). A student belongs to exactly
     // one class, so merging distinct classIds' rosters can never
     // produce a duplicate student row.
-    const classIds = await visibilityService.getVisibleClassIds(client, { actorUserId, actorRole });
+    // Phase 2 step 19: collegeId must be forwarded here — since step 12
+    // moved the underlying tutor-of-record lookup onto
+    // identityService.resolveActiveClassTutorPosition (which filters
+    // positions by college_id), a missing collegeId silently resolves
+    // to zero positions found, not an error. Latent since step 12,
+    // surfaced now that a real Position fixture (not
+    // classes.tutor_user_id, which needed no collegeId) is what proves
+    // this path end to end.
+    const classIds = await visibilityService.getVisibleClassIds(client, { actorUserId, actorRole, collegeId });
     if (classIds.length === 0) {
       return [];
     }

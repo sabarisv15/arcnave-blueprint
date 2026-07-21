@@ -5,6 +5,10 @@
 // Postgres needed: classRepository/substituteAssignmentRepository/
 // auditLogRepository are stubbed via node:test's built-in mock, same
 // technique as every other *-service.test.js file in this suite.
+// assertCanMark's tutor check moved off classes.tutor_user_id onto
+// identityService.resolvePositionOccupant's {classId} overload in
+// Phase 2 step 15 — mocked here rather than the class row carrying
+// tutor_user_id.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -13,6 +17,7 @@ const substituteAssignmentRepository = require('../src/repositories/substituteAs
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const academicService = require('../src/services/academicService');
 const attendanceRepository = require('../src/repositories/attendanceRepository');
+const identityService = require('../src/services/identityService');
 const attendanceService = require('../src/services/attendanceService');
 
 test('academicService.assignSubstitute', async (t) => {
@@ -87,10 +92,11 @@ test('academicService.assignSubstitute', async (t) => {
 
 test('attendanceService.assertCanMark recognizes an authorized substitute', async (t) => {
   const CLASS_ROW = {
-    id: 'class-1', college_id: 'c1', tutor_user_id: 'tutor-1', timetable_status: 'Approved',
+    id: 'class-1', college_id: 'c1', timetable_status: 'Approved',
   };
 
   await t.test('a substitute assigned for this exact (period, date) may mark attendance', async () => {
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'tutor-1');
     const periodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => ({ id: 'period-1' }));
     const allocationMock = t.mock.method(academicService, 'getFacultyAllocationForClassAndPeriod', async () => null);
     const subMock = t.mock.method(academicService, 'getSubstituteAssignment', async () => ({ substitute_staff_user_id: 'sub-teacher-1' }));
@@ -98,6 +104,7 @@ test('attendanceService.assertCanMark recognizes an authorized substitute', asyn
     const createMock = t.mock.method(attendanceRepository, 'create', async (client, fields) => ({ id: 'sess-1', ...fields }));
     const auditMock = t.mock.method(require('../src/repositories/auditLogRepository'), 'createAuditLogEntry', async () => {});
     t.after(() => {
+      resolveTutorMock.mock.restore();
       periodMock.mock.restore();
       allocationMock.mock.restore();
       subMock.mock.restore();
@@ -115,11 +122,13 @@ test('attendanceService.assertCanMark recognizes an authorized substitute', asyn
   });
 
   await t.test('a different staff member (not tutor/hod/scheduled/substitute) is rejected', async () => {
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'tutor-1');
     const periodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => ({ id: 'period-1' }));
     const allocationMock = t.mock.method(academicService, 'getFacultyAllocationForClassAndPeriod', async () => null);
     const subMock = t.mock.method(academicService, 'getSubstituteAssignment', async () => ({ substitute_staff_user_id: 'sub-teacher-1' }));
     const getClassMock = t.mock.method(academicService, 'getClass', async () => CLASS_ROW);
     t.after(() => {
+      resolveTutorMock.mock.restore();
       periodMock.mock.restore();
       allocationMock.mock.restore();
       subMock.mock.restore();

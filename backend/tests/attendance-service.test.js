@@ -23,14 +23,25 @@ const assert = require('node:assert/strict');
 const attendanceRepository = require('../src/repositories/attendanceRepository');
 const academicService = require('../src/services/academicService');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
+const identityService = require('../src/services/identityService');
 const attendanceService = require('../src/services/attendanceService');
 
 const APPROVED_CLASS = {
   id: 'class-1',
   college_id: 'c1',
-  tutor_user_id: 'tutor-user',
   timetable_status: 'Approved',
 };
+
+// Phase 2 step 15: assertCanMark's tutor check moved off
+// classes.tutor_user_id onto identityService.resolvePositionOccupant's
+// {classId} overload — mocked per-test below (tutor-user is the
+// conceptual tutor of APPROVED_CLASS everywhere except where a test
+// overrides it) rather than the class row carrying tutor_user_id.
+function mockTutor(t, userId) {
+  const mock = t.mock.method(identityService, 'resolvePositionOccupant', async () => userId);
+  t.after(() => mock.mock.restore());
+  return mock;
+}
 
 test('AttendanceService validation, authorization, and audit logging (no DB)', async (t) => {
   await t.test('markAttendance rejects a missing classId without touching the DB', async () => {
@@ -96,6 +107,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance rejects an actor who is neither the tutor, an HOD, nor scheduled for the period', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    mockTutor(t, 'tutor-user');
     const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => null);
     t.after(() => {
       getClassMock.mock.restore();
@@ -113,7 +125,8 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
   });
 
   await t.test('markAttendance rejects a class with no tutor assigned when actor is not HOD or scheduled', async () => {
-    const getClassMock = t.mock.method(academicService, 'getClass', async () => ({ ...APPROVED_CLASS, tutor_user_id: null }));
+    const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    mockTutor(t, null);
     const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => null);
     t.after(() => {
       getClassMock.mock.restore();
@@ -132,6 +145,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance rejects when a period exists but this class has no allocation for it', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    mockTutor(t, 'tutor-user');
     const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => ({ id: 'period-1' }));
     const getAllocMock = t.mock.method(academicService, 'getFacultyAllocationForClassAndPeriod', async () => null);
     const getSubMock = t.mock.method(academicService, 'getSubstituteAssignment', async () => null);
@@ -154,6 +168,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance rejects when an allocation exists but for a different staff member', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    mockTutor(t, 'tutor-user');
     const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => ({ id: 'period-1' }));
     const getAllocMock = t.mock.method(academicService, 'getFacultyAllocationForClassAndPeriod', async () => ({ staff_user_id: 'someone-else' }));
     const getSubMock = t.mock.method(academicService, 'getSubstituteAssignment', async () => null);
@@ -175,7 +190,8 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
   });
 
   await t.test('markAttendance allows the staff member genuinely scheduled for that period, even without tutor/HOD status', async () => {
-    const getClassMock = t.mock.method(academicService, 'getClass', async () => ({ ...APPROVED_CLASS, tutor_user_id: 'some-other-tutor' }));
+    const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    mockTutor(t, 'some-other-tutor');
     const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async (client, collegeId, dayOfWeek, hourIndex) => {
       assert.equal(collegeId, 'c1');
       assert.equal(dayOfWeek, 'Saturday'); // 2026-07-04 is a Saturday
@@ -208,6 +224,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance allows the class tutor to create a new session', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    mockTutor(t, 'tutor-user');
     const findMock = t.mock.method(attendanceRepository, 'findByClassSessionAndHour', async () => null);
     const createMock = t.mock.method(attendanceRepository, 'create', async (client, fields) => ({ id: 'session-1', ...fields }));
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
@@ -257,6 +274,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance defaults absentStudentIds to an empty array when omitted', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    mockTutor(t, 'tutor-user');
     const findMock = t.mock.method(attendanceRepository, 'findByClassSessionAndHour', async () => null);
     const createMock = t.mock.method(attendanceRepository, 'create', async (client, fields) => ({ id: 'session-3', ...fields }));
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
@@ -279,6 +297,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance re-marks an existing, unlocked session instead of creating a new one', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    mockTutor(t, 'tutor-user');
     const findMock = t.mock.method(attendanceRepository, 'findByClassSessionAndHour', async () => ({ id: 'session-4', locked_at: null }));
     const updateMock = t.mock.method(attendanceRepository, 'update', async (client, id, fields) => ({ id, ...fields }));
     const createMock = t.mock.method(attendanceRepository, 'create');
@@ -305,6 +324,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance rejects modifying an already-locked session', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    mockTutor(t, 'tutor-user');
     const findMock = t.mock.method(attendanceRepository, 'findByClassSessionAndHour', async () => ({ id: 'session-5', locked_at: '2026-07-04T10:00:00Z' }));
     const updateMock = t.mock.method(attendanceRepository, 'update');
     t.after(() => {
@@ -326,6 +346,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance maps a class_date_hour race to AttendanceSessionConflictError', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    mockTutor(t, 'tutor-user');
     const findMock = t.mock.method(attendanceRepository, 'findByClassSessionAndHour', async () => null);
     const createMock = t.mock.method(attendanceRepository, 'create', async () => {
       const err = new Error('duplicate key value violates unique constraint "attendance_sessions_class_date_hour_key"');
@@ -351,6 +372,7 @@ test('AttendanceService validation, authorization, and audit logging (no DB)', a
 
   await t.test('markAttendance lets a non-conflict repository error pass through unchanged', async () => {
     const getClassMock = t.mock.method(academicService, 'getClass', async () => APPROVED_CLASS);
+    mockTutor(t, 'tutor-user');
     const findMock = t.mock.method(attendanceRepository, 'findByClassSessionAndHour', async () => null);
     const boom = new Error('connection lost');
     const createMock = t.mock.method(attendanceRepository, 'create', async () => { throw boom; });

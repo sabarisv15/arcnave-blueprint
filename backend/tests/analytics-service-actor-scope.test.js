@@ -26,7 +26,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { Pool } = require('pg');
 const analyticsService = require('../src/services/analyticsService');
-const { seedHodPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
+const { seedHodPosition, seedClassTutorPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -79,11 +79,19 @@ async function seedTenant(adminPool) {
   );
 
   const ownClass = await adminPool.query(
-    `INSERT INTO classes (college_id, class_name, timetable_status, tutor_user_id, department_id)
-     VALUES ($1, $2, 'Approved', $3, $4) RETURNING id`,
-    [collegeId, `Own Class ${suffix}`, tutorUserId, departmentId],
+    `INSERT INTO classes (college_id, class_name, timetable_status, department_id)
+     VALUES ($1, $2, 'Approved', $3) RETURNING id`,
+    [collegeId, `Own Class ${suffix}`, departmentId],
   );
   const ownClassId = ownClass.rows[0].id;
+  // Phase 2 step 19: tutorUser's tutor-of-record status moved off
+  // classes.tutor_user_id onto the real Position/Account/Occupant
+  // fixture — the SELF_ASSIGNED scope this test exists to prove now
+  // resolves through identityService.resolveActiveClassTutorPosition,
+  // not this column.
+  await seedClassTutorPosition(adminPool, {
+    collegeId, userId: tutorUserId, classId: ownClassId,
+  });
 
   // A second class in the SAME department the tutor does not tutor —
   // proves the HOD's department scope is broader than the tutor's own

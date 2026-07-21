@@ -2,19 +2,22 @@
 
 // Unit tests for StaffService's deactivation + HOD In-Charge functions
 // — no live Postgres needed: staffRepository/authService/
-// facultyAllocationRepository/classRepository/hodInChargeRepository/
-// auditLogRepository are stubbed via node:test's built-in mock, same
-// technique as every other *-service.test.js file in this suite.
+// facultyAllocationRepository/hodInChargeRepository/auditLogRepository
+// are stubbed via node:test's built-in mock, same technique as every
+// other *-service.test.js file in this suite. deactivateStaff's tutor
+// check moved off classRepository.findByTutorUserId onto
+// identityService.resolveActiveClassTutorPosition in Phase 2 step 17 —
+// mocked here rather than classRepository directly.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const staffRepository = require('../src/repositories/staffRepository');
 const authService = require('../src/services/authService');
 const facultyAllocationRepository = require('../src/repositories/facultyAllocationRepository');
-const classRepository = require('../src/repositories/classRepository');
 const hodInChargeRepository = require('../src/repositories/hodInChargeRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const positionRepository = require('../src/repositories/positionRepository');
+const identityService = require('../src/services/identityService');
 const staffService = require('../src/services/staffService');
 
 // Phase 1 (Capability Resolver integration): appointHodInCharge now
@@ -73,7 +76,7 @@ test('deactivateStaff', async (t) => {
   await t.test('refuses while the staff member is still a class tutor', async () => {
     const findMock = t.mock.method(staffRepository, 'findById', async () => ({ id: 'staff-1', college_id: 'c1', user_id: 'u1' }));
     const findAllocMock = t.mock.method(facultyAllocationRepository, 'findByStaffUserId', async () => []);
-    const findTutorClassMock = t.mock.method(classRepository, 'findByTutorUserId', async () => ({ id: 'class-1' }));
+    const findTutorClassMock = t.mock.method(identityService, 'resolveActiveClassTutorPosition', async () => 'class-1');
     const deactivateMock = t.mock.method(authService, 'deactivateUser');
     t.after(() => {
       findMock.mock.restore();
@@ -91,7 +94,7 @@ test('deactivateStaff', async (t) => {
   await t.test('deactivates a staff member with no active duties, without deleting the staff row', async () => {
     const findMock = t.mock.method(staffRepository, 'findById', async () => ({ id: 'staff-1', college_id: 'c1', user_id: 'u1' }));
     const findAllocMock = t.mock.method(facultyAllocationRepository, 'findByStaffUserId', async () => []);
-    const findTutorClassMock = t.mock.method(classRepository, 'findByTutorUserId', async () => null);
+    const findTutorClassMock = t.mock.method(identityService, 'resolveActiveClassTutorPosition', async () => null);
     const removeMock = t.mock.method(staffRepository, 'remove');
     const deactivateMock = t.mock.method(authService, 'deactivateUser', async (client, userId) => ({ id: userId, is_active: false }));
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});

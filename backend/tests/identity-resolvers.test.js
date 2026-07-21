@@ -243,6 +243,7 @@ test('identity resolvers (Phase 3)', async (t) => {
       userId: staffUserId,
       positions: [],
       resolveDepartmentIds: async () => [],
+      resolveActiveClassTutorClassId: async () => null,
     });
     assert.equal(staffScope.scopeLevel, SCOPE_LEVELS.SELF_ASSIGNED);
     assert.deepEqual(staffScope.assignedClassIds, []);
@@ -264,6 +265,7 @@ test('identity resolvers (Phase 3)', async (t) => {
       userId: level2UserId,
       positions: level2Positions,
       resolveDepartmentIds: (positionId) => departmentResolver.resolveMappedDepartments(pool, positionId),
+      resolveActiveClassTutorClassId: async () => null,
     });
     assert.equal(unconfiguredScope.scopeLevel, SCOPE_LEVELS.SELF_ASSIGNED);
 
@@ -532,5 +534,32 @@ test('identity resolvers (Phase 3)', async (t) => {
 
     const plainStaffResult = await identityService.resolveActiveClassTutorPosition(pool, { userId: plainStaffUserId, collegeId });
     assert.equal(plainStaffResult, null);
+  });
+
+  // Phase 2 step 12 — visibilityResolver.resolveAssignedClassIds' tutor
+  // half now flows through identityService.resolveActiveClassTutorPosition
+  // instead of classRepository.findByTutorUserId/classes.tutor_user_id.
+  // Highest-scrutiny site (ADR-022 names resolveCapabilities' output
+  // frozen) — proven here through the real public entry point, not a
+  // direct visibilityResolver call, so the wiring in identityService's
+  // resolveCapabilities itself is what's actually under test.
+  await t.test('identityService.resolveCapabilities: assignedClassIds reflects an active Class Tutor position, not classes.tutor_user_id', async () => {
+    const collegeId = `idr${suffix}p`;
+    collegeIds.push(collegeId);
+    await insertCollege(pool, collegeId);
+    const tutorUserId = await insertUser(pool, collegeId, 'tutor4', 'staff');
+    const classId = await insertClass(pool, collegeId, 'ECE 5th Year');
+    const { position, account } = await makePosition(pool, {
+      collegeId, level: 4, title: 'Class Tutor', createdBy: tutorUserId,
+    });
+    await pool.query("UPDATE positions SET position_type = 'class_tutor' WHERE id = $1", [position.id]);
+    await occupy(pool, { collegeId, accountId: account.id, userId: tutorUserId });
+    await positionRepository.createPositionClassAssignment(pool, {
+      collegeId, positionId: position.id, classId, assignedBy: tutorUserId,
+    });
+
+    const capabilities = await identityService.resolveCapabilities(pool, { userId: tutorUserId, collegeId });
+    assert.equal(capabilities.scopeLevel, SCOPE_LEVELS.SELF_ASSIGNED);
+    assert.deepEqual(capabilities.assignedClassIds, [classId]);
   });
 });

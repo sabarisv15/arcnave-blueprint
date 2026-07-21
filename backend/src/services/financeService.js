@@ -60,6 +60,7 @@ const staffService = require('./staffService');
 const studentService = require('./studentService');
 const classRepository = require('../repositories/classRepository');
 const configurationService = require('./configurationService');
+const identityService = require('./identityService');
 
 // Missing academicYear, classId, feeCategory, or amount — fee_structures'
 // own NOT NULL columns (aside from college_id, which always comes from
@@ -579,8 +580,15 @@ async function recordScholarshipDecision(client, studentId, {
   if (student === null) {
     throw new ScholarshipStudentNotFoundError(`student ${JSON.stringify(studentId)} does not exist`);
   }
+  // Phase 2 step 14: classes.tutor_user_id -> the Position/Account/
+  // Occupant model, same swap examinationService.assertIsTutor/
+  // academicService.sendClassAlert already made (steps 13/14) —
+  // identityService.resolvePositionOccupant's {classId} overload is the
+  // one entry point, never a direct positionRepository/resolver call of
+  // this file's own.
   const cls = student.class_id ? await classRepository.findById(client, student.class_id) : null;
-  if (cls === null || cls.tutor_user_id !== actorUserId) {
+  const tutorUserId = cls ? await identityService.resolvePositionOccupant(client, { collegeId: cls.college_id, classId: cls.id }) : null;
+  if (cls === null || tutorUserId !== actorUserId) {
     throw new ScholarshipDecisionNotTutorError(
       `user ${JSON.stringify(actorUserId)} is not the class tutor for student ${JSON.stringify(studentId)}`,
     );

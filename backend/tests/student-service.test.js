@@ -42,16 +42,22 @@ function mockStaffCapabilities(t, assignedClassIds) {
   return m;
 }
 
-// createStudent now always resolves the actor's own class via
-// classRepository.findByTutorUserId before touching studentRepository
-// at all (student creation is tutor-only, own-class-only — this
-// session's own task) — every createStudent test below mocks that
-// lookup, defaulting to "actor tutors class-1" unless a test is
-// specifically exercising the not-a-tutor/mismatch paths.
-function mockTutorClass(t, classRow = { id: 'class-1', college_id: 'c1', tutor_user_id: 'u1' }) {
-  const findClassMock = t.mock.method(classRepository, 'findByTutorUserId', async () => classRow);
-  t.after(() => findClassMock.mock.restore());
-  return findClassMock;
+// createStudent/assertCanModifyStudent's staff branch both always
+// resolve the actor's own tutored class before touching
+// studentRepository at all (student creation/modification is
+// tutor-only, own-class-only — this session's own task) — every test
+// below mocks that lookup, defaulting to "actor tutors class-1" unless
+// a test is specifically exercising the not-a-tutor/mismatch paths.
+// Phase 2 step 16: the lookup itself moved off
+// classRepository.findByTutorUserId onto
+// identityService.resolveActiveClassTutorPosition (Phase 2 step 9) —
+// this helper keeps accepting a class-row-shaped object (existing call
+// sites pass CLASS_1/CLASS_2 with more fields than just id) but mocks
+// the new resolver, returning just the resolved classId.
+function mockTutorClass(t, classRow = { id: 'class-1', college_id: 'c1' }) {
+  const resolveMock = t.mock.method(identityService, 'resolveActiveClassTutorPosition', async () => (classRow ? classRow.id : null));
+  t.after(() => resolveMock.mock.restore());
+  return resolveMock;
 }
 
 test('StudentService validation and audit logging (no DB)', async (t) => {
@@ -289,7 +295,7 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
 
   await t.test('updateStudent against a nonexistent id returns null without touching update or authorization', async () => {
     const findMock = t.mock.method(studentRepository, 'findById', async () => null);
-    const tutorMock = t.mock.method(classRepository, 'findByTutorUserId');
+    const tutorMock = t.mock.method(identityService, 'resolveActiveClassTutorPosition');
     const updateMock = t.mock.method(studentRepository, 'update');
     t.after(() => {
       findMock.mock.restore();

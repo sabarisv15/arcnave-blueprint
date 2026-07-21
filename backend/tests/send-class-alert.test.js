@@ -5,7 +5,11 @@
 // through WorkflowService). No live Postgres: classRepository/
 // studentRepository/notificationService/auditLogRepository mocked via
 // node:test's built-in mock, same technique academic-service.test.js
-// already uses for this file's other functions.
+// already uses for this file's other functions. The tutor gate itself
+// moved off classes.tutor_user_id onto
+// identityService.resolvePositionOccupant's {classId} overload in
+// Phase 2 step 13 — mocked here rather than the class row carrying
+// tutor_user_id.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -13,6 +17,7 @@ const classRepository = require('../src/repositories/classRepository');
 const studentRepository = require('../src/repositories/studentRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const notificationService = require('../src/services/notificationService');
+const identityService = require('../src/services/identityService');
 const academicService = require('../src/services/academicService');
 
 test('academicService.sendClassAlert', async (t) => {
@@ -39,9 +44,13 @@ test('academicService.sendClassAlert', async (t) => {
 
   await t.test('throws ClassSendAlertNotTutorError when the actor is not this class\'s tutor', async () => {
     const findMock = t.mock.method(classRepository, 'findById', async () => ({
-      id: 'class-1', college_id: 'c1', tutor_user_id: 'real-tutor',
+      id: 'class-1', college_id: 'c1',
     }));
-    t.after(() => findMock.mock.restore());
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'real-tutor');
+    t.after(() => {
+      findMock.mock.restore();
+      resolveTutorMock.mock.restore();
+    });
 
     await assert.rejects(
       () => academicService.sendClassAlert({}, 'class-1', 'hello', { actorUserId: 'someone-else' }),
@@ -51,8 +60,9 @@ test('academicService.sendClassAlert', async (t) => {
 
   await t.test('sends to each student\'s verified phone and verified parent_phone, skips unverified numbers, and audit-logs a summary', async () => {
     const findClassMock = t.mock.method(classRepository, 'findById', async () => ({
-      id: 'class-1', college_id: 'c1', tutor_user_id: 'tutor-1',
+      id: 'class-1', college_id: 'c1',
     }));
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'tutor-1');
     const findStudentsMock = t.mock.method(studentRepository, 'findByClassId', async () => [
       {
         id: 'student-1', phone: '+15551111111', phone_verified: true, parent_phone: '+15552222222', parent_phone_verified: true,
@@ -70,6 +80,7 @@ test('academicService.sendClassAlert', async (t) => {
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
       findClassMock.mock.restore();
+      resolveTutorMock.mock.restore();
       findStudentsMock.mock.restore();
       sendMock.mock.restore();
       auditMock.mock.restore();
@@ -95,8 +106,9 @@ test('academicService.sendClassAlert', async (t) => {
 
   await t.test('returns an empty result list (still audit-logged) when no student in the class has any verified number', async () => {
     const findClassMock = t.mock.method(classRepository, 'findById', async () => ({
-      id: 'class-1', college_id: 'c1', tutor_user_id: 'tutor-1',
+      id: 'class-1', college_id: 'c1',
     }));
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'tutor-1');
     const findStudentsMock = t.mock.method(studentRepository, 'findByClassId', async () => [
       {
         id: 'student-1', phone: '+15551111111', phone_verified: false, parent_phone: null, parent_phone_verified: false,
@@ -106,6 +118,7 @@ test('academicService.sendClassAlert', async (t) => {
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
       findClassMock.mock.restore();
+      resolveTutorMock.mock.restore();
       findStudentsMock.mock.restore();
       sendMock.mock.restore();
       auditMock.mock.restore();

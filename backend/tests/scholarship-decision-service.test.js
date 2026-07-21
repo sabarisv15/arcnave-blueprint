@@ -4,7 +4,10 @@
 // listScholarshipDecisionsForStudent — no live Postgres needed:
 // studentService/classRepository/scholarshipDecisionRepository/
 // auditLogRepository are stubbed via node:test's built-in mock, same
-// technique as finance-service.test.js.
+// technique as finance-service.test.js. The tutor gate itself moved off
+// classes.tutor_user_id onto identityService.resolvePositionOccupant's
+// {classId} overload in Phase 2 step 14 — mocked here rather than the
+// class row carrying tutor_user_id.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -12,6 +15,7 @@ const studentService = require('../src/services/studentService');
 const classRepository = require('../src/repositories/classRepository');
 const scholarshipDecisionRepository = require('../src/repositories/scholarshipDecisionRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
+const identityService = require('../src/services/identityService');
 const financeService = require('../src/services/financeService');
 
 test('recordScholarshipDecision', async (t) => {
@@ -40,10 +44,12 @@ test('recordScholarshipDecision', async (t) => {
 
   await t.test('rejects an actor who is not the student\'s class tutor', async () => {
     const getStudentMock = t.mock.method(studentService, 'getStudent', async () => ({ id: 's1', college_id: 'c1', class_id: 'class-1' }));
-    const findClassMock = t.mock.method(classRepository, 'findById', async () => ({ id: 'class-1', tutor_user_id: 'tutor-1' }));
+    const findClassMock = t.mock.method(classRepository, 'findById', async () => ({ id: 'class-1' }));
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'tutor-1');
     t.after(() => {
       getStudentMock.mock.restore();
       findClassMock.mock.restore();
+      resolveTutorMock.mock.restore();
     });
     await assert.rejects(
       () => financeService.recordScholarshipDecision({}, 's1', { schemeName: 'Merit', eligible: true }, { actorUserId: 'someone-else' }),
@@ -53,12 +59,14 @@ test('recordScholarshipDecision', async (t) => {
 
   await t.test('records the decision and audit-logs it when the actor is the real class tutor', async () => {
     const getStudentMock = t.mock.method(studentService, 'getStudent', async () => ({ id: 's1', college_id: 'c1', class_id: 'class-1' }));
-    const findClassMock = t.mock.method(classRepository, 'findById', async () => ({ id: 'class-1', tutor_user_id: 'tutor-1' }));
+    const findClassMock = t.mock.method(classRepository, 'findById', async () => ({ id: 'class-1' }));
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'tutor-1');
     const createMock = t.mock.method(scholarshipDecisionRepository, 'create', async (client, fields) => ({ id: 'decision-1', ...fields }));
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
       getStudentMock.mock.restore();
       findClassMock.mock.restore();
+      resolveTutorMock.mock.restore();
       createMock.mock.restore();
       auditMock.mock.restore();
     });

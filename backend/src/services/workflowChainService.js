@@ -40,7 +40,6 @@
 
 const configurationService = require('./configurationService');
 const identityService = require('./identityService');
-const classRepository = require('../repositories/classRepository');
 const workflowDelegationRepository = require('../repositories/workflowDelegationRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 
@@ -104,11 +103,15 @@ async function resolveRoleUserId(client, role, { collegeId, classId, departmentI
     if (!classId) {
       throw new WorkflowChainMissingContextError('classId is required to resolve a "tutor" chain step');
     }
-    const cls = await classRepository.findById(client, classId);
-    if (cls === null || !cls.tutor_user_id) {
+    // Phase 2 step 11: classes.tutor_user_id -> the Position/Account/
+    // Occupant model, same swap resolveRoleUserId already made for
+    // 'principal'/'hod' in Phase 1 — classRepository is no longer
+    // consulted for this role at all.
+    const userId = await identityService.resolvePositionOccupant(client, { collegeId, classId });
+    if (userId === null) {
       throw new WorkflowChainMissingContextError(`class ${JSON.stringify(classId)} has no tutor assigned to resolve a "tutor" chain step`);
     }
-    return cls.tutor_user_id;
+    return userId;
   }
   throw new WorkflowChainUnknownRoleError(`role ${JSON.stringify(role)} is not a known chain role (${KNOWN_ROLES.join(', ')})`);
 }

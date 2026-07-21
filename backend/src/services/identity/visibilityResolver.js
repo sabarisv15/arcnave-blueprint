@@ -30,11 +30,10 @@
 //   row at all in v1, so "no position found" IS the staff case, not an
 //   error) — assignedClassIds computed exactly as
 //   actorContextService.resolveAssignedClassIds does (tutor-of-record
-//   class + faculty-allocated classes), since that data is genuinely
-//   person-centric (classRepository/facultyAllocationRepository key on
-//   user_id, not on any position) and out of scope for the position
-//   model per ADR-021's own "Level 4 ... not part of this account
-//   model" line.
+//   class + faculty-allocated classes) — faculty-allocated classes stay
+//   genuinely person-centric (facultyAllocationRepository keys on
+//   user_id, not any position); tutor-of-record moved onto the Position
+//   model in Phase 2 step 12 (see resolveAssignedClassIds below).
 //
 // Level 2 positions have no fixed scope-level the way Level 1/3 do —
 // v1's domain model leaves them Principal-configurable (Identity-
@@ -47,7 +46,6 @@
 // through to the ordinary staff/SELF_ASSIGNED default below — never a
 // hardcoded Level 2-specific scope.
 
-const classRepository = require('../../repositories/classRepository');
 const facultyAllocationRepository = require('../../repositories/facultyAllocationRepository');
 const { SCOPE_LEVELS } = require('../../constants/scopeLevels');
 
@@ -61,11 +59,24 @@ const LEVEL_2 = 2;
 // imported: actorContextService is the LEGACY comparison target, not a
 // dependency of the new model — importing it here would make any
 // future comparison compare identityService against itself.
-async function resolveAssignedClassIds(client, userId) {
+//
+// Phase 2 step 12: the tutor-of-record half moved off
+// classRepository.findByTutorUserId (classes.tutor_user_id) onto the
+// Position/Account/Occupant model — resolveActiveClassTutorClassId is
+// injected (a () => Promise<string|null> thunk) rather than this
+// module requiring positionRepository/classResolver directly, same
+// "resolvers never call another resolver module, only identityService
+// composes them" reasoning resolveDepartmentIds below already follows
+// (identityService.resolveActiveClassTutorPosition is itself built on
+// positionRepository + classResolver — this is the highest-scrutiny
+// call site since it's a named resolveCapabilities internal consumer,
+// ADR-022 — so the injection keeps this module's own layering rule
+// intact rather than reaching around it for one convenient exception).
+async function resolveAssignedClassIds(client, userId, { resolveActiveClassTutorClassId }) {
   const classIds = new Set();
-  const tutorClass = await classRepository.findByTutorUserId(client, userId);
-  if (tutorClass !== null) {
-    classIds.add(tutorClass.id);
+  const tutorClassId = await resolveActiveClassTutorClassId();
+  if (tutorClassId !== null) {
+    classIds.add(tutorClassId);
   }
   const allocations = await facultyAllocationRepository.findByStaffUserId(client, userId);
   for (const allocation of allocations) {
@@ -81,7 +92,9 @@ async function resolveAssignedClassIds(client, userId) {
 // departmentResolver.resolveMappedDepartments, injected rather than
 // required directly so this module never calls another resolver module
 // itself (identityService is the only thing allowed to compose them).
-async function resolveVisibilityScope(client, { userId, positions, resolveDepartmentIds }) {
+async function resolveVisibilityScope(client, {
+  userId, positions, resolveDepartmentIds, resolveActiveClassTutorClassId,
+}) {
   const principalPosition = positions.find((p) => p.level === PRINCIPAL_LEVEL);
   if (principalPosition) {
     return { scopeLevel: SCOPE_LEVELS.COLLEGE, departmentIds: [], assignedClassIds: [] };
@@ -101,7 +114,7 @@ async function resolveVisibilityScope(client, { userId, positions, resolveDepart
     }
   }
 
-  const assignedClassIds = await resolveAssignedClassIds(client, userId);
+  const assignedClassIds = await resolveAssignedClassIds(client, userId, { resolveActiveClassTutorClassId });
   return { scopeLevel: SCOPE_LEVELS.SELF_ASSIGNED, departmentIds: [], assignedClassIds };
 }
 
