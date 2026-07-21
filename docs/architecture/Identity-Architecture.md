@@ -492,8 +492,8 @@ the corresponding section notes must be updated together.
 | Resolution layer | Personal Identity Context (`resolveCapabilities`) live — called from authorization, workflow routing, visibility, and audit (Phase 1, `35092a2`..`231a5cc`) | Institutional Identity Context (`resolveCapabilitiesForPosition`) added alongside it, scoped per-office, never merged with Personal |
 | Authentication | Personal Identity Context: User-record based, live for every level | Institutional Identity Context: Position Account authentication, coexisting with (not replacing) the User-record path |
 | Session revocation | Enforced unconditionally, but only against the User record today; the Position Account's session-version counter exists unused | Position Account session-version counter checked once its authentication path exists |
-| Authorization | Static role→permission table keyed on legacy role labels | Position-derived effective role feeding the same table, or its successor |
-| Workflow routing | Keyed on the User record's role label | Consumes resolved capabilities, per the resolution layer's stated intent |
+| Authorization | Personal Identity Context feeds the permission table's role input live (`req.capabilities.effectiveRole`); the table itself is still static/legacy-role-shaped | Institutional Identity Context authorization for Position Account sessions, via its own position-scoped resolver |
+| Workflow routing | Resolves 'principal'/'hod' via `identityService.resolvePositionOccupant`, not a stored role label | Unchanged — already consumes resolved capabilities |
 | Reassignment lifecycle | Specified, not implemented by any component | A real, atomic reassignment operation exists and is callable |
 | Audit identity | Only the Actor is recorded | Acting Position Account and Position recorded alongside the Actor |
 | Migration/backfill tooling | Removed — no live institution predates this schema | N/A unless a real live migration need arises |
