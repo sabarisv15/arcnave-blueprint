@@ -10,11 +10,13 @@
 // role can rewrite or erase isn't an audit trail, so
 // createAuditLogEntry is the only write this file offers.
 
-async function createAuditLogEntry(client, { collegeId, userId, action, entity, entityId, metadata }) {
+async function createAuditLogEntry(client, {
+  collegeId, userId, action, entity, entityId, metadata, positionAccountId = null, positionId = null,
+}) {
   await client.query(
-    `INSERT INTO audit_log (college_id, user_id, action, entity, entity_id, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [collegeId, userId, action, entity, entityId, JSON.stringify(metadata)],
+    `INSERT INTO audit_log (college_id, user_id, action, entity, entity_id, metadata, position_account_id, position_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [collegeId, userId, action, entity, entityId, JSON.stringify(metadata), positionAccountId, positionId],
   );
 }
 
