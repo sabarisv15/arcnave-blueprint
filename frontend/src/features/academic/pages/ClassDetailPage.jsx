@@ -22,9 +22,64 @@ import { classesApi } from '@/api/classes';
 import { timetablePeriodsApi } from '@/api/timetablePeriods';
 import { facultyAllocationApi } from '@/api/facultyAllocation';
 import { ApiError } from '@/api/client';
-import { facultyAllocationFormSchema, substituteAssignmentFormSchema } from '@/features/academic/schemas';
+import { facultyAllocationFormSchema, substituteAssignmentFormSchema, classTutorFormSchema } from '@/features/academic/schemas';
 import { ExaminationTab } from '@/features/academic/components/ExaminationTab';
 import { AssessmentTab } from '@/features/academic/components/AssessmentTab';
+
+// HOD-only, own-department (this class's department). No GET endpoint
+// exists yet to read back "who currently tutors this class" (Phase 2
+// backend work exposed assign/reassign only) — so this is a
+// write-only "set the Class Tutor" action, not a display of current
+// state. assignTutor is tried first (first-time assignment); a 409
+// ("already has one") falls back to reassignTutor automatically, so
+// the HOD doesn't need to know the class's current assignment state
+// up front.
+function ClassTutorCard({ id }) {
+  const form = useForm({
+    resolver: zodResolver(classTutorFormSchema),
+    defaultValues: { newTutorUserId: '' },
+  });
+
+  const setTutorMutation = useMutation({
+    mutationFn: async ({ newTutorUserId }) => {
+      try {
+        return await classesApi.assignTutor(id, newTutorUserId);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          return classesApi.reassignTutor(id, newTutorUserId);
+        }
+        throw err;
+      }
+    },
+    onSuccess: () => { toast.success('Class Tutor set'); form.reset(); },
+    onError: (err) => toast.error(err instanceof ApiError ? err.detail : 'Could not set Class Tutor'),
+  });
+
+  return (
+    <Card>
+      <CardHeader><CardTitle className="text-base">Class Tutor</CardTitle></CardHeader>
+      <CardContent>
+        <RoleGate
+          permission="classes.assign_tutor"
+          fallback={<p className="text-sm text-muted-foreground">Only this class's department HOD may assign a Class Tutor.</p>}
+        >
+          <Form {...form}>
+            <form onSubmit={form.handleSubmit((v) => setTutorMutation.mutateAsync(v))} className="flex items-end gap-2">
+              <FormField control={form.control} name="newTutorUserId" render={({ field }) => (
+                <FormItem className="flex-1">
+                  <FormLabel>Tutor user ID</FormLabel>
+                  <FormControl><Input {...field} /></FormControl>
+                  <FormMessage />
+                </FormItem>
+              )} />
+              <Button type="submit" size="sm" disabled={setTutorMutation.isPending}>Set Class Tutor</Button>
+            </form>
+          </Form>
+        </RoleGate>
+      </CardContent>
+    </Card>
+  );
+}
 
 function ProfileTab({ cls, id, navigate }) {
   const queryClient = useQueryClient();
@@ -109,6 +164,8 @@ function ProfileTab({ cls, id, navigate }) {
           </Button>
         </CardContent>
       </Card>
+
+      <ClassTutorCard id={id} />
     </div>
   );
 }

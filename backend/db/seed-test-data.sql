@@ -36,7 +36,15 @@
 --   staff.ece        staff       Regular ECE faculty, no tutor duty
 --
 -- WHAT'S SEEDED (one tenant, "demo", across every module built so far)
---   Module 0/2 — 1 college, 5 users, 4 staff profiles
+--   Module 0/2 — 1 college, 5 users, 4 staff profiles, 2 departments
+--   Phase 1/2  — Position/Account/Occupant rows (ADR-021) for
+--                principal (Level 1), hod.cse (Level 3, CSE dept),
+--                tutor.cse3a/tutor.cse3b (Level 4, position_type=
+--                'class_tutor') — every RBAC check
+--                (identityService.resolveCapabilities) and the tutor-
+--                of-record reads (assertCanMark, sendClassAlert, etc.)
+--                resolve through these, not users.role or the long-gone
+--                classes.tutor_user_id column.
 --   Module 3   — 3 classes, 3 shared timetable periods, 3 faculty
 --                allocations, 1 class's timetable_data JSONB grid
 --   Module 1   — 6 students
@@ -60,21 +68,33 @@ BEGIN;
 -- generated_reports and fee_payments both FK into documents
 -- (document_id / receipt_document_id respectively), so both must be
 -- deleted before documents.
+DELETE FROM platform_college_stats WHERE college_id = 'demo';
 DELETE FROM audit_log            WHERE college_id = 'demo';
 DELETE FROM fee_payments         WHERE college_id = 'demo';
 DELETE FROM generated_reports    WHERE college_id = 'demo';
 DELETE FROM documents            WHERE college_id = 'demo';
+DELETE FROM document_categories  WHERE college_id = 'demo';
 DELETE FROM fee_structures       WHERE college_id = 'demo';
 DELETE FROM attendance_sessions  WHERE college_id = 'demo';
 DELETE FROM faculty_allocation   WHERE college_id = 'demo';
 DELETE FROM timetable_periods    WHERE college_id = 'demo';
-DELETE FROM classes              WHERE college_id = 'demo';
-DELETE FROM staff                WHERE college_id = 'demo';
-DELETE FROM students             WHERE college_id = 'demo';
-DELETE FROM refresh_tokens       WHERE college_id = 'demo';
-DELETE FROM users                WHERE college_id = 'demo';
-DELETE FROM configurations       WHERE college_id = 'demo';
-DELETE FROM colleges             WHERE college_id = 'demo';
+-- Position/Account/Occupant rows (ADR-021) FK into classes/departments/
+-- users — deleted before all three. position_occupants/
+-- position_department_assignments/position_class_assignments all FK
+-- into position_accounts/positions, so those go first.
+DELETE FROM position_occupants              WHERE college_id = 'demo';
+DELETE FROM position_department_assignments WHERE college_id = 'demo';
+DELETE FROM position_class_assignments      WHERE college_id = 'demo';
+DELETE FROM position_accounts               WHERE college_id = 'demo';
+DELETE FROM positions                       WHERE college_id = 'demo';
+DELETE FROM classes               WHERE college_id = 'demo';
+DELETE FROM departments           WHERE college_id = 'demo';
+DELETE FROM staff                 WHERE college_id = 'demo';
+DELETE FROM students              WHERE college_id = 'demo';
+DELETE FROM refresh_tokens        WHERE college_id = 'demo';
+DELETE FROM users                 WHERE college_id = 'demo';
+DELETE FROM configurations        WHERE college_id = 'demo';
+DELETE FROM colleges              WHERE college_id = 'demo';
 
 -- --- Module 0: college ---
 
@@ -104,6 +124,15 @@ INSERT INTO staff (college_id, user_id, staff_code, full_name, gender, phone, de
   ('demo', '315a5a18-d4e6-4c81-b3fa-323b6e0c4839', 'CSE-051',    'Ravi Shankar',          'Male',   '9886712340', 'CSE', 'Assistant Professor', 'M.Tech CSE',            false, '1-45239220', 2019),
   ('demo', '076885d8-61c3-4fd3-ba1a-99cd587bd51b', 'ECE-018',    'Karthik Subramaniam',   'Male',   '9900123456', 'ECE', 'Assistant Professor', 'M.E. Electronics',      false, '1-33221100', 2020);
 
+-- --- Module 0: departments ---
+-- Real department rows (position_department_assignments/classes.
+-- department_id both FK here) — matches the free-text 'CSE'/'ECE'
+-- classes.department values already used below and in staff's own
+-- free-text department column, now given a real id both can reference.
+INSERT INTO departments (id, college_id, name) VALUES
+  ('6c342b99-5d3a-4d4b-8add-6376087773ab', 'demo', 'CSE'),
+  ('5c3edb39-247c-4872-9145-244fac4dc5da', 'demo', 'ECE');
+
 -- --- Module 3: classes, timetable periods, faculty allocation ---
 
 -- CSE-3A: tutor assigned, timetable Approved (the one class Attendance
@@ -114,11 +143,53 @@ INSERT INTO staff (college_id, user_id, staff_code, full_name, gender, phone, de
 -- one class so the still-prototype timetable display has something
 -- real-looking to render; CSE-3B/ECE-5A are left null on purpose,
 -- matching their own "not there yet" narrative (Pending HOD / No Tutor).
-INSERT INTO classes (id, college_id, class_name, department, semester, tutor_user_id, timetable_status, timetable_data) VALUES
-  ('32b5f155-c1a2-4054-b4b3-80bd8c4b3058', 'demo', '3rd Sem · CSE-A', 'CSE', '3rd Sem', 'fca0f803-f3fa-4f9d-a398-fe13fc235264', 'Approved',
+-- Class Tutor is no longer a classes.tutor_user_id column (Phase 2) —
+-- see the Position/Account/Occupant block below for CSE-3A/CSE-3B's
+-- real Class Tutor assignment.
+INSERT INTO classes (id, college_id, class_name, department, department_id, semester, timetable_status, timetable_data) VALUES
+  ('32b5f155-c1a2-4054-b4b3-80bd8c4b3058', 'demo', '3rd Sem · CSE-A', 'CSE', '6c342b99-5d3a-4d4b-8add-6376087773ab', '3rd Sem', 'Approved',
    '{"headers": ["Day", "09:00 - 10:00", "10:00 - 11:00"], "rows": [["Monday", "Data Structures (Ananya Rao)", "Operating Systems (Ravi Shankar)"], ["Tuesday", "Database Systems (Ananya Rao)", "Free"]]}'::jsonb),
-  ('f1302262-9b80-45ad-a0a7-adde9dcee2d0', 'demo', '3rd Sem · CSE-B', 'CSE', '3rd Sem', '315a5a18-d4e6-4c81-b3fa-323b6e0c4839', 'Pending HOD', NULL),
-  ('720f6755-0d08-4af5-a2cb-3f0732a8c550', 'demo', '5th Sem · ECE-A', 'ECE', '5th Sem', NULL,                                      'No Tutor',    NULL);
+  ('f1302262-9b80-45ad-a0a7-adde9dcee2d0', 'demo', '3rd Sem · CSE-B', 'CSE', '6c342b99-5d3a-4d4b-8add-6376087773ab', '3rd Sem', 'Pending HOD', NULL),
+  ('720f6755-0d08-4af5-a2cb-3f0732a8c550', 'demo', '5th Sem · ECE-A', 'ECE', '5c3edb39-247c-4872-9145-244fac4dc5da', '5th Sem', 'No Tutor',    NULL);
+
+-- --- Position/Account/Occupant (ADR-021) ---
+-- Every role RBAC (requirePermission) actually checks now resolves
+-- through identityService.resolveCapabilities against these rows, not
+-- users.role directly (Phase 1: Capability Resolver integration) — a
+-- seeded principal/hod/tutor with no Position row resolves as plain,
+-- no-position staff. principal (Level 1, college-wide), hod.cse
+-- (Level 3, CSE department), tutor.cse3a/tutor.cse3b (Level 4,
+-- position_type='class_tutor', one per class) — mirrors exactly what
+-- authService.provisionLevel1PositionForNewPrincipal/
+-- staffService.ensureHodPosition/classTutorService.assignClassTutor
+-- each provision for real in the running app.
+INSERT INTO positions (id, college_id, level, title, created_by, position_type) VALUES
+  ('1a3f22a4-1b90-4356-9df3-972b6384ac16', 'demo', 1, 'Principal',    '32b4721e-e58a-4aa1-9c7d-81d5865be9b2', NULL),
+  ('e60a55c5-2fb4-4a19-8121-297e6e5eeeff', 'demo', 3, 'HOD',          '32b4721e-e58a-4aa1-9c7d-81d5865be9b2', NULL),
+  ('445b1f3b-392b-4a20-8ef1-4d32b04ce215', 'demo', 4, 'Class Tutor',  '6812023b-8a16-421a-b72f-095e8d565c52', 'class_tutor'),
+  ('b5c199f4-935d-436f-83e1-0c5b8b7335bc', 'demo', 4, 'Class Tutor',  '6812023b-8a16-421a-b72f-095e8d565c52', 'class_tutor');
+
+INSERT INTO position_accounts (id, college_id, position_id, official_email, password_hash) VALUES
+  ('4f5b2bb9-4f54-4a66-9a0b-2ad06ced8699', 'demo', '1a3f22a4-1b90-4356-9df3-972b6384ac16', 'principal-position@demo.positions.internal',   '$argon2id$v=19$m=65536,t=3,p=4$Go6udh/r+CqLjGaxzDa48g$iQU/4UvtsY9sYyCHaSfwY1UJ7qmEuZFwQ26ly/ohS3g'),
+  ('925d0986-bd1d-4ba0-8337-e27f2f289820', 'demo', 'e60a55c5-2fb4-4a19-8121-297e6e5eeeff', 'hod-cse-position@demo.positions.internal',      '$argon2id$v=19$m=65536,t=3,p=4$Go6udh/r+CqLjGaxzDa48g$iQU/4UvtsY9sYyCHaSfwY1UJ7qmEuZFwQ26ly/ohS3g'),
+  ('40966ff8-f36c-466d-ac04-33cbe3a161a8', 'demo', '445b1f3b-392b-4a20-8ef1-4d32b04ce215', 'class-tutor-cse3a-position@demo.positions.internal', '$argon2id$v=19$m=65536,t=3,p=4$Go6udh/r+CqLjGaxzDa48g$iQU/4UvtsY9sYyCHaSfwY1UJ7qmEuZFwQ26ly/ohS3g'),
+  ('f0e2bc6b-d7fe-46b7-886c-405c8cbb00dd', 'demo', 'b5c199f4-935d-436f-83e1-0c5b8b7335bc', 'class-tutor-cse3b-position@demo.positions.internal', '$argon2id$v=19$m=65536,t=3,p=4$Go6udh/r+CqLjGaxzDa48g$iQU/4UvtsY9sYyCHaSfwY1UJ7qmEuZFwQ26ly/ohS3g');
+
+INSERT INTO position_department_assignments (college_id, position_id, department_id, assigned_by) VALUES
+  ('demo', 'e60a55c5-2fb4-4a19-8121-297e6e5eeeff', '6c342b99-5d3a-4d4b-8add-6376087773ab', '32b4721e-e58a-4aa1-9c7d-81d5865be9b2');
+
+-- BusinessRules.md Staff: "Class Tutor is assigned only by HOD" —
+-- assigned_by is hod.cse, not the principal, matching
+-- classTutorService.assignClassTutor's own actor.
+INSERT INTO position_class_assignments (college_id, position_id, class_id, assigned_by) VALUES
+  ('demo', '445b1f3b-392b-4a20-8ef1-4d32b04ce215', '32b5f155-c1a2-4054-b4b3-80bd8c4b3058', '6812023b-8a16-421a-b72f-095e8d565c52'),
+  ('demo', 'b5c199f4-935d-436f-83e1-0c5b8b7335bc', 'f1302262-9b80-45ad-a0a7-adde9dcee2d0', '6812023b-8a16-421a-b72f-095e8d565c52');
+
+INSERT INTO position_occupants (college_id, position_account_id, user_id, assigned_by) VALUES
+  ('demo', '4f5b2bb9-4f54-4a66-9a0b-2ad06ced8699', '32b4721e-e58a-4aa1-9c7d-81d5865be9b2', '32b4721e-e58a-4aa1-9c7d-81d5865be9b2'),
+  ('demo', '925d0986-bd1d-4ba0-8337-e27f2f289820', '6812023b-8a16-421a-b72f-095e8d565c52', '32b4721e-e58a-4aa1-9c7d-81d5865be9b2'),
+  ('demo', '40966ff8-f36c-466d-ac04-33cbe3a161a8', 'fca0f803-f3fa-4f9d-a398-fe13fc235264', '6812023b-8a16-421a-b72f-095e8d565c52'),
+  ('demo', 'f0e2bc6b-d7fe-46b7-886c-405c8cbb00dd', '315a5a18-d4e6-4c81-b3fa-323b6e0c4839', '6812023b-8a16-421a-b72f-095e8d565c52');
 
 -- Shared, college-wide bell schedule (Module 3's own timetable-
 -- normalization slice — one row per (day_of_week, hour_index), not per

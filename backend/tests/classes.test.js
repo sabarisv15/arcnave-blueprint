@@ -235,13 +235,16 @@ test('classes', async (t) => {
     assert.equal(resp.status, 400);
   });
 
-  await t.test('create does not require a tutor_user_id', async () => {
+  // Phase 2 step 20: classes.tutor_user_id is gone entirely (dropped
+  // by migration) — a class is created with no tutor concept at all
+  // now, not "tutor_user_id: null".
+  await t.test('create does not require a tutor and the response carries no tutor_user_id field', async () => {
     const token = await login(collegeA, 'principaluser');
     const resp = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, token), {
       class_name: 'No Tutor Yet Class',
     });
     assert.equal(resp.status, 201);
-    assert.equal(resp.body.tutor_user_id, null);
+    assert.equal('tutor_user_id' in resp.body, false);
   });
 
   await t.test('create on a duplicate class_name within the same tenant is a real 409, from a real DB constraint', async () => {

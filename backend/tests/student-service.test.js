@@ -23,6 +23,7 @@ const facultyAllocationRepository = require('../src/repositories/facultyAllocati
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const staffService = require('../src/services/staffService');
 const identityService = require('../src/services/identityService');
+const visibilityService = require('../src/services/visibilityService');
 const studentService = require('../src/services/studentService');
 
 // getStudent/listStudents' 'staff' scoping goes through
@@ -652,15 +653,15 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
 
   await t.test('getStudent returns null for a missing id without running any authorization check', async () => {
     const findMock = t.mock.method(studentRepository, 'findById', async () => null);
-    const tutorMock = t.mock.method(classRepository, 'findByTutorUserId');
+    const assertCanViewMock = t.mock.method(visibilityService, 'assertCanViewStudent');
     t.after(() => {
       findMock.mock.restore();
-      tutorMock.mock.restore();
+      assertCanViewMock.mock.restore();
     });
 
     const result = await studentService.getStudent({}, 'missing-id', { actorUserId: 'tutor-u1', actorRole: 'staff' });
     assert.equal(result, null);
-    assert.equal(tutorMock.mock.callCount(), 0);
+    assert.equal(assertCanViewMock.mock.callCount(), 0);
   });
 
   await t.test('listStudents with no actor context (internal system call, e.g. reportService) is unscoped', async () => {

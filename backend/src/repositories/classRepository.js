@@ -7,14 +7,11 @@
 // Module 3 migration), same as studentRepository.js's findById and
 // staffRepository.js's findById.
 //
-// findByTutorUserId has no explicit college_id filter beyond RLS:
-// tutor_user_id is globally unique (UNIQUE (tutor_user_id), FK to
-// users(id)), unlike class_name which is only unique per
-// (college_id, class_name) — there is no second tenant that could
-// share a tutor_user_id to disambiguate against, so an explicit
-// filter would be redundant, not defense in depth. Same reasoning
-// staffRepository.js's findByUserId documents for its own
-// UNIQUE (user_id) column.
+// classes.tutor_user_id (and this file's own findByTutorUserId) is
+// gone as of Phase 2 step 20 — Class Tutor is a Position/Account/
+// Occupant now (position_class_assignments), resolved through
+// identityService.resolvePositionOccupant/resolveActiveClassTutorPosition,
+// never this repository directly (steps 11-19).
 //
 // findByCollegeAndClassName filters on college_id explicitly in
 // addition to RLS, same as staffRepository.js's findByStaffCode and
@@ -34,7 +31,6 @@ const COLUMNS = [
   ['department', 'department'],
   ['departmentId', 'department_id'],
   ['semester', 'semester'],
-  ['tutorUserId', 'tutor_user_id'],
   ['timetableStatus', 'timetable_status'],
   ['timetableData', 'timetable_data'],
   ['timetableRemarks', 'timetable_remarks'],
@@ -63,14 +59,6 @@ async function create(client, fields) {
 
 async function findById(client, id) {
   const result = await client.query('SELECT * FROM classes WHERE id = $1', [id]);
-  return result.rows[0] || null;
-}
-
-async function findByTutorUserId(client, tutorUserId) {
-  const result = await client.query(
-    'SELECT * FROM classes WHERE tutor_user_id = $1',
-    [tutorUserId],
-  );
   return result.rows[0] || null;
 }
 
@@ -128,7 +116,6 @@ async function list(client, { limit = 50, offset = 0 } = {}) {
 module.exports = {
   create,
   findById,
-  findByTutorUserId,
   findByCollegeAndClassName,
   findByDepartmentId,
   update,

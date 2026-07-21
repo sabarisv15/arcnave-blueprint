@@ -33,13 +33,15 @@ export function ClassesPanel() {
 
   const form = useForm({
     resolver: zodResolver(classFormSchema),
-    defaultValues: { className: '', department: '', departmentId: '', semester: '', tutorUserId: '' },
+    defaultValues: { className: '', department: '', departmentId: '', semester: '' },
   });
 
   const createMutation = useMutation({
     // Blank optional fields must be omitted, not sent as '' — same
-    // lesson as StaffFormDialog: departmentId/tutorUserId are typed
-    // uuid columns server-side and reject ''.
+    // lesson as StaffFormDialog: departmentId is a typed uuid column
+    // server-side and rejects ''. Class Tutor is assigned separately,
+    // from the class detail page (ClassDetailPage's ProfileTab) —
+    // createClass/updateClass reject tutorUserId outright now.
     mutationFn: (values) => {
       const payload = { ...values };
       for (const key of Object.keys(payload)) {
@@ -106,9 +108,6 @@ export function ClassesPanel() {
               )} />
               <FormField control={form.control} name="semester" render={({ field }) => (
                 <FormItem><FormLabel>Semester</FormLabel><FormControl><Input {...field} /></FormControl><FormMessage /></FormItem>
-              )} />
-              <FormField control={form.control} name="tutorUserId" render={({ field }) => (
-                <FormItem><FormLabel>Tutor user ID (optional)</FormLabel><FormControl><Input {...field} /></FormControl><FormMessage /></FormItem>
               )} />
               <DialogFooter>
                 <Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
