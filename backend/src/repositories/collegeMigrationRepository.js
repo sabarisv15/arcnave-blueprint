@@ -54,6 +54,27 @@ async function setMigrationState(client, collegeId, { from, to }) {
   return result.rows[0] || null;
 }
 
+// Identity-Migration-Plan.md Phase 3 (identityService, shadow mode):
+// a plain, no-lock read of one college's current migration_state —
+// unlike lockCollege above (which is Phase 2's backfill-only,
+// SELECT ... FOR UPDATE gate meant to run inside a write transaction
+// against MIGRATION_DATABASE_URL), this is a read-only lookup the
+// runtime request path calls on every request through the ordinary
+// tenant-scoped req.dbClient connection, to decide whether the
+// requesting user's college is eligible for shadow-mode enrollment
+// (BACKFILLED or later — never LEGACY, per the plan's explicit
+// sequencing fix). arcnave_app already holds a table-level SELECT
+// grant on `colleges` (1751500000000's own GRANT), colleges carries no
+// RLS policy of its own (it IS the tenant registry, not tenant data),
+// so this is safe to call from either connection role.
+async function getMigrationState(client, collegeId) {
+  const result = await client.query(
+    'SELECT migration_state FROM colleges WHERE college_id = $1',
+    [collegeId],
+  );
+  return result.rows[0] ? result.rows[0].migration_state : null;
+}
+
 async function findActivePrincipal(client, collegeId) {
   const result = await client.query(
     `SELECT * FROM users
@@ -96,6 +117,7 @@ module.exports = {
   findCollegesByMigrationState,
   lockCollege,
   setMigrationState,
+  getMigrationState,
   findActivePrincipal,
   findDepartments,
   findActiveHodUser,

@@ -155,6 +155,60 @@ async function findActiveOccupant(client, positionAccountId) {
   return result.rows[0] || null;
 }
 
+// Identity-Migration-Plan.md Phase 3 (identityService, shadow mode) —
+// query mechanics for the five internal resolvers. Still pure query
+// mechanics only, no resolution/comparison logic (that lives in
+// services/identity/*Resolver.js and identityService.js) — same split
+// this file already keeps for Phase 1/2.
+//
+// positionResolver's core lookup: every position this user actively
+// occupies, in this college, right now — joins occupant -> account ->
+// position, filtered on revoked_at IS NULL. A user can (in principle)
+// occupy more than one active position; the resolver, not this query,
+// decides how to combine multiple results (e.g. "highest level wins").
+async function findActivePositionsForUser(client, { collegeId, userId }) {
+  const result = await client.query(
+    `SELECT p.id AS position_id, p.level, p.title, pa.id AS position_account_id
+     FROM position_occupants po
+     JOIN position_accounts pa ON pa.id = po.position_account_id
+     JOIN positions p ON p.id = pa.position_id
+     WHERE p.college_id = $1 AND po.user_id = $2 AND po.revoked_at IS NULL
+     ORDER BY p.level ASC`,
+    [collegeId, userId],
+  );
+  return result.rows;
+}
+
+// moduleResolver's core lookup: every module a position currently owns
+// (active assignments only) — position_module_assignments already
+// enforces "one active assignment per college+module" at the DB level
+// (Phase 1's exclusive lock), so a position can own zero or more
+// distinct modules, but no two positions can share one at the same
+// time.
+async function findActiveModuleAssignmentsForPosition(client, positionId) {
+  const result = await client.query(
+    `SELECT * FROM position_module_assignments
+     WHERE position_id = $1 AND revoked_at IS NULL
+     ORDER BY module_key`,
+    [positionId],
+  );
+  return result.rows;
+}
+
+// departmentResolver's core lookup: every department currently mapped
+// to a position (active assignments only) — mirrors
+// findActiveModuleAssignmentsForPosition above, same shape, different
+// table.
+async function findActiveDepartmentAssignmentsForPosition(client, positionId) {
+  const result = await client.query(
+    `SELECT * FROM position_department_assignments
+     WHERE position_id = $1 AND revoked_at IS NULL
+     ORDER BY department_id`,
+    [positionId],
+  );
+  return result.rows;
+}
+
 async function revokePositionOccupant(client, id, { revokedBy }) {
   const result = await client.query(
     `UPDATE position_occupants SET revoked_at = now(), revoked_by = $2
@@ -261,4 +315,7 @@ module.exports = {
   findActiveOccupancyForUserAtLevel,
   deleteByMigrationBatch,
   findCollegeIdsForMigrationBatch,
+  findActivePositionsForUser,
+  findActiveModuleAssignmentsForPosition,
+  findActiveDepartmentAssignmentsForPosition,
 };
