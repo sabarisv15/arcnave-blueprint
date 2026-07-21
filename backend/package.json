@@ -8,8 +8,6 @@
     "start": "node src/index.js",
     "migrate": "node scripts/migrate.js up",
     "migrate:down": "node scripts/migrate.js down",
-    "backfill-positions": "node scripts/backfillPositions.js",
-    "unbackfill-positions": "node scripts/unbackfillPositions.js",
     "test": "node --test tests/"
   },
   "dependencies": {

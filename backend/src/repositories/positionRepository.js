@@ -1,39 +1,26 @@
 'use strict';
 
-// Query mechanics ONLY for the Phase 1 (Identity-Migration-Plan.md /
-// ADR-021) tables: positions, position_accounts, position_occupants,
-// position_module_assignments, position_department_assignments.
-// Deliberately minimal — no business logic, no resolver, no
-// identityService (that's Phase 3+, out of scope for this slice).
-// This exists solely so this migration's own constraint invariants
-// (one position_accounts row per position, one active occupant per
-// account, one active module/department assignment) can be exercised
-// by a real test, same reasoning every other *Repository.js in this
-// codebase keeps query mechanics separate from the service that would
-// eventually own them. No table here calls into another table's own
-// repository (none exists yet) — kept as one file across five tables
-// only because nothing outside constraint tests consumes any of this
-// yet; a real per-table split can happen once Phase 3's identityService
-// actually needs one.
-//
-// Phase 2 (ADR-025 backfill) additions: createPosition/
-// createPositionAccount/createPositionOccupant now accept an optional
-// migrationBatchId (nullable column, added by
-// 1757000000000_migration-state-and-backfill-tagging.js) —
-// find/revoke/module/department query shapes are unchanged.
-// findActiveOccupancyForUserAtLevel and deleteByMigrationBatch exist
-// solely for positionBackfillService's idempotency check and the
-// unbackfill script; still query mechanics only, no batching/
-// transaction/dry-run decisions made here.
-
+// Query mechanics ONLY for the ADR-021 tables: positions,
+// position_accounts, position_occupants, position_module_assignments,
+// position_department_assignments. Deliberately minimal — no business
+// logic, no resolver, no identityService (that's identityService.js's
+// job, not this repository's). This exists solely so this schema's
+// own constraint invariants (one position_accounts row per position,
+// one active occupant per account, one active module/department
+// assignment) can be exercised by a real test, same reasoning every
+// other *Repository.js in this codebase keeps query mechanics
+// separate from the service that would eventually own them. No table
+// here calls into another table's own repository (none exists yet) —
+// kept as one file across five tables only because nothing outside
+// constraint tests consumes any of this yet.
 async function createPosition(client, {
-  collegeId, level, title, createdBy, migrationBatchId,
+  collegeId, level, title, createdBy,
 }) {
   const result = await client.query(
-    `INSERT INTO positions (college_id, level, title, created_by, migration_batch_id)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO positions (college_id, level, title, created_by)
+     VALUES ($1, $2, $3, $4)
      RETURNING *`,
-    [collegeId, level, title, createdBy, migrationBatchId || null],
+    [collegeId, level, title, createdBy],
   );
   return result.rows[0];
 }
@@ -43,19 +30,15 @@ async function findPositionById(client, id) {
   return result.rows[0] || null;
 }
 
-// Identity-Migration-Plan.md Phase 4 — authService.acceptInvitation's
-// idempotency guard: is there already a position at this level for this
-// college (from a prior accept through this same path, or from Phase
-// 2's backfill for a college that already had one before Phase 4's
-// flag was ever turned on)? Positions has no unique constraint on
-// (college_id, level) — nothing before Phase 4 needed one, since Phase
-// 2's backfill and Phase 4's provisioning were never expected to race
-// against each other for the same college — so this is the one place
-// that has to check before inserting, same "let the caller decide, the
-// schema doesn't enforce this for you" reasoning positionBackfillService
-// already applies via findActiveOccupancyForUserAtLevel. Oldest first
-// (there should only ever be one) so a bug that somehow created two
-// resolves deterministically to the first-created one.
+// authService.acceptInvitation's idempotency guard: is there already a
+// position at this level for this college (e.g. a principal was
+// already re-invited/accepted once through this same path)? Positions
+// has no unique constraint on (college_id, level) — provisioning
+// checks before inserting instead, same "let the caller decide, the
+// schema doesn't enforce this for you" reasoning
+// findActiveOccupancyForUserAtLevel below already applies. Oldest
+// first (there should only ever be one) so a bug that somehow created
+// two resolves deterministically to the first-created one.
 async function findActivePositionByCollegeAndLevel(client, collegeId, level) {
   const result = await client.query(
     'SELECT * FROM positions WHERE college_id = $1 AND level = $2 ORDER BY created_at ASC LIMIT 1',
@@ -65,13 +48,13 @@ async function findActivePositionByCollegeAndLevel(client, collegeId, level) {
 }
 
 async function createPositionAccount(client, {
-  collegeId, positionId, officialEmail, passwordHash, migrationBatchId,
+  collegeId, positionId, officialEmail, passwordHash,
 }) {
   const result = await client.query(
-    `INSERT INTO position_accounts (college_id, position_id, official_email, password_hash, migration_batch_id)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO position_accounts (college_id, position_id, official_email, password_hash)
+     VALUES ($1, $2, $3, $4)
      RETURNING *`,
-    [collegeId, positionId, officialEmail, passwordHash, migrationBatchId || null],
+    [collegeId, positionId, officialEmail, passwordHash],
   );
   return result.rows[0];
 }
@@ -85,24 +68,22 @@ async function findPositionAccountByPositionId(client, positionId) {
 }
 
 async function createPositionOccupant(client, {
-  collegeId, positionAccountId, userId, assignedBy, migrationBatchId,
+  collegeId, positionAccountId, userId, assignedBy,
 }) {
   const result = await client.query(
-    `INSERT INTO position_occupants (college_id, position_account_id, user_id, assigned_by, migration_batch_id)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO position_occupants (college_id, position_account_id, user_id, assigned_by)
+     VALUES ($1, $2, $3, $4)
      RETURNING *`,
-    [collegeId, positionAccountId, userId, assignedBy, migrationBatchId || null],
+    [collegeId, positionAccountId, userId, assignedBy],
   );
   return result.rows[0];
 }
 
-// Phase 2 backfill idempotency check (ADR-025's "find-or-create,
-// keyed on the legacy source row"): is this person already the active
-// occupant of a position at this level for this college? Used before
-// creating a Level 1/Level 3 position so re-running the backfill (or
-// running it again after a partial manual intervention) never creates
-// a second position for the same legacy Principal/HOD — it just finds
-// the one already there and moves on.
+// Idempotency check: is this person already the active occupant of a
+// position at this level for this college? Used before creating a
+// Level 1/Level 3 position so re-provisioning never creates a second
+// position for the same person — it just finds the one already there
+// and moves on.
 async function findActiveOccupancyForUserAtLevel(client, { collegeId, level, userId }) {
   const result = await client.query(
     `SELECT po.* FROM position_occupants po
@@ -115,37 +96,6 @@ async function findActiveOccupancyForUserAtLevel(client, { collegeId, level, use
   return result.rows[0] || null;
 }
 
-// Unbackfill (ADR-025): delete only rows tagged with this exact batch
-// id, in FK-safe order (occupants -> accounts -> positions). Never a
-// blind delete by college_id — a batch id is the only thing that can
-// distinguish backfill-created rows from anything created afterward
-// (e.g. Phase 4's Create/Edit College UI) for the same college.
-async function deleteByMigrationBatch(client, migrationBatchId) {
-  const occupants = await client.query(
-    'DELETE FROM position_occupants WHERE migration_batch_id = $1 RETURNING college_id',
-    [migrationBatchId],
-  );
-  const accounts = await client.query(
-    'DELETE FROM position_accounts WHERE migration_batch_id = $1 RETURNING college_id',
-    [migrationBatchId],
-  );
-  const positions = await client.query(
-    'DELETE FROM positions WHERE migration_batch_id = $1 RETURNING college_id',
-    [migrationBatchId],
-  );
-  const collegeIds = new Set([
-    ...occupants.rows.map((r) => r.college_id),
-    ...accounts.rows.map((r) => r.college_id),
-    ...positions.rows.map((r) => r.college_id),
-  ]);
-  return {
-    occupantsDeleted: occupants.rowCount,
-    accountsDeleted: accounts.rowCount,
-    positionsDeleted: positions.rowCount,
-    collegeIds: [...collegeIds],
-  };
-}
-
 async function findActiveOccupant(client, positionAccountId) {
   const result = await client.query(
     `SELECT * FROM position_occupants
@@ -155,11 +105,10 @@ async function findActiveOccupant(client, positionAccountId) {
   return result.rows[0] || null;
 }
 
-// Identity-Migration-Plan.md Phase 3 (identityService, shadow mode) —
-// query mechanics for the five internal resolvers. Still pure query
-// mechanics only, no resolution/comparison logic (that lives in
-// services/identity/*Resolver.js and identityService.js) — same split
-// this file already keeps for Phase 1/2.
+// identityService.js's resolvers — query mechanics for the five
+// internal lookups. Still pure query mechanics only, no resolution/
+// comparison logic (that lives in services/identity/*Resolver.js and
+// identityService.js) — same split this file already keeps above.
 //
 // positionResolver's core lookup: every position this user actively
 // occupies, in this college, right now — joins occupant -> account ->
@@ -281,22 +230,6 @@ async function revokePositionDepartmentAssignment(client, id, { revokedBy }) {
   return result.rows[0] || null;
 }
 
-// All distinct colleges that have at least one row tagged with this
-// batch id, across all three taggable tables — used by the unbackfill
-// script to know which colleges' migration_state to check/revert
-// before it deletes anything.
-async function findCollegeIdsForMigrationBatch(client, migrationBatchId) {
-  const result = await client.query(
-    `SELECT college_id FROM positions WHERE migration_batch_id = $1
-     UNION
-     SELECT college_id FROM position_accounts WHERE migration_batch_id = $1
-     UNION
-     SELECT college_id FROM position_occupants WHERE migration_batch_id = $1`,
-    [migrationBatchId],
-  );
-  return result.rows.map((r) => r.college_id);
-}
-
 module.exports = {
   createPosition,
   findPositionById,
@@ -313,8 +246,6 @@ module.exports = {
   findActiveDepartmentAssignment,
   revokePositionDepartmentAssignment,
   findActiveOccupancyForUserAtLevel,
-  deleteByMigrationBatch,
-  findCollegeIdsForMigrationBatch,
   findActivePositionsForUser,
   findActiveModuleAssignmentsForPosition,
   findActiveDepartmentAssignmentsForPosition,
