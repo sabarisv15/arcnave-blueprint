@@ -3,6 +3,7 @@
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requirePermission } = require('../middleware/rbac');
+const { shadowCompare } = require('../middleware/identityShadow');
 const collegeProfileService = require('../services/collegeProfileService');
 
 function requireResolvedTenant(req, res) {
@@ -40,7 +41,12 @@ function bodyToFields(body, fieldMap) {
 function createCollegeProfileRouter() {
   const router = express.Router();
 
-  router.get('/college-profile', requirePermission('college_profile.read'), asyncHandler(async (req, res) => {
+  // Identity-Migration-Plan.md Phase 3 — one of the low-risk GET routes
+  // this phase enrolls in shadow-mode comparison. shadowCompare runs
+  // AFTER requirePermission (so it only ever runs for a request the
+  // legacy check already allowed) and never affects this route's
+  // response — see middleware/identityShadow.js.
+  router.get('/college-profile', requirePermission('college_profile.read'), shadowCompare('college_profile.read'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const profile = await collegeProfileService.getProfile(req.dbClient, req.collegeId);
     if (profile === null) {

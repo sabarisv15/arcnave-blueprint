@@ -3,6 +3,7 @@
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requirePermission } = require('../middleware/rbac');
+const { shadowCompare } = require('../middleware/identityShadow');
 const backgroundJobService = require('../services/backgroundJobService');
 
 function requireResolvedTenant(req, res) {
@@ -27,7 +28,10 @@ function createBackgroundJobsRouter() {
     res.status(202).json(job);
   }));
 
-  router.get('/background-jobs', requirePermission('background_jobs.read'), asyncHandler(async (req, res) => {
+  // Identity-Migration-Plan.md Phase 3 — enrolled in shadow-mode
+  // comparison (the list route only, not the by-id lookup, to keep
+  // this phase's blast radius small — see middleware/identityShadow.js).
+  router.get('/background-jobs', requirePermission('background_jobs.read'), shadowCompare('background_jobs.read'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     res.json(await backgroundJobService.list(req.dbClient));
   }));

@@ -79,6 +79,20 @@ module.exports = {
   // shape that hasn't been trusted at scale yet.
   newCollegeOnboardingEnabled: process.env.NEW_COLLEGE_ONBOARDING_ENABLED === 'true',
 
+  // Identity-Migration-Plan.md Phase 3 (identityService, shadow mode):
+  // gates middleware/identityShadow.js's compare-and-log pipeline on
+  // the handful of routes this phase enrolls. Default OFF — with this
+  // unset/false, identityService is never called from the request path
+  // at all, zero behavior change and zero added latency (see the
+  // plan's own "Feature flag: IDENTITY_SHADOW_MODE ... Rollback:
+  // disable flag, zero production impact either way"). Even with this
+  // ON, a college is only actually compared if its own
+  // migration_state is BACKFILLED or later — see
+  // identityShadowService.isCollegeEnrollable, the plan's explicit
+  // sequencing fix against false-positive mismatches for un-backfilled
+  // (LEGACY) colleges.
+  identityShadowModeEnabled: process.env.IDENTITY_SHADOW_MODE === 'true',
+
   // Signs/verifies platform-admin access JWTs. Deliberately a
   // DIFFERENT secret from jwtSecretKey, required, no fallback to it:
   // a platform token and a tenant token must never verify against the

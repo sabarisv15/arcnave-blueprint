@@ -10,6 +10,7 @@
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requirePermission } = require('../middleware/rbac');
+const { shadowCompare } = require('../middleware/identityShadow');
 const configurationService = require('../services/configurationService');
 const aiProviders = require('../services/aiProviders');
 
@@ -36,7 +37,9 @@ function mapAiConfigError(err, res) {
 function createAiConfigRouter() {
   const router = express.Router();
 
-  router.get('/ai-config', requirePermission('ai_config.read'), asyncHandler(async (req, res) => {
+  // Identity-Migration-Plan.md Phase 3 — enrolled in shadow-mode
+  // comparison (see middleware/identityShadow.js).
+  router.get('/ai-config', requirePermission('ai_config.read'), shadowCompare('ai_config.read'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const { provider, config } = await configurationService.getAiConfig(req.dbClient, req.collegeId);
     res.json({
