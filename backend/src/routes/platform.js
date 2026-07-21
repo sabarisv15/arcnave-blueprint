@@ -4,6 +4,7 @@ const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requirePlatformAdmin } = require('../middleware/platformAuth');
 const platformService = require('../services/platformService');
+const platformAuditService = require('../services/platformAuditService');
 const positionAccountInvitationService = require('../services/positionAccountInvitationService');
 const { platformPool } = require('../db/pool');
 const { openTenantTransaction } = require('../db/tenantTransaction');
@@ -254,7 +255,7 @@ function createPlatformRouter() {
     await openTenantTransaction(req, res, req.params.college_id);
 
     try {
-      const { invitation } = await positionAccountInvitationService.inviteToPosition(req.dbClient, {
+      const { invitation, position } = await positionAccountInvitationService.inviteToPosition(req.dbClient, {
         collegeId: req.params.college_id,
         level: Number(level),
         title,
@@ -263,6 +264,26 @@ function createPlatformRouter() {
         actorCapabilities: null,
         invitedBy: req.platformClaims.sub,
       });
+
+      // The human-visible record of this action: platform_audit_log
+      // (not the tenant-side audit_log — that table has no listing
+      // route/UI yet, this one does, see AuditLogsPage.jsx). actor_admin_id
+      // is a real platform_admins.id, so the listing query's own
+      // `LEFT JOIN platform_admins` resolves it to the admin's actual
+      // username — never blank, never falls back to the UI's "system"
+      // placeholder (that placeholder is only ever for actor_admin_id
+      // IS NULL, which this write never produces).
+      await platformAuditService.record(platformPool, {
+        actorAdminId: req.platformClaims.sub,
+        action: 'position_account.invited',
+        entity: 'position',
+        entityId: position.id,
+        ipAddress: req.ip,
+        metadata: {
+          collegeId: req.params.college_id, level: Number(level), email,
+        },
+      });
+
       res.status(201).json({
         invitation_id: invitation.id,
         college_id: invitation.college_id,

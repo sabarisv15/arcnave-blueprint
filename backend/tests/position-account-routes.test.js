@@ -155,6 +155,19 @@ test('Position Account routes (Phase 2 step 7)', async (t) => {
     assert.equal('token' in inviteResp.body, false);
     assert.ok(inviteResp.rawToken);
 
+    // Human-visible provenance: platform_audit_log records the real
+    // admin as actor (never blank) — the same table/join
+    // AuditLogsPage.jsx renders as `entry.actor_username`.
+    const auditRow = await adminPool.query(
+      `SELECT l.actor_admin_id, a.username AS actor_username, l.action, l.entity_id
+       FROM platform_audit_log l JOIN platform_admins a ON a.id = l.actor_admin_id
+       WHERE l.action = 'position_account.invited' AND l.entity_id = $1`,
+      [inviteResp.body.position_id],
+    );
+    assert.equal(auditRow.rows.length, 1);
+    assert.equal(auditRow.rows[0].actor_admin_id, adminId);
+    assert.equal(auditRow.rows[0].actor_username, adminUsername);
+
     const acceptResp = await acceptPositionInvite(inviteResp.rawToken);
     assert.equal(acceptResp.status, 201);
     assert.equal(acceptResp.body.official_email, 'dean@example.edu');
