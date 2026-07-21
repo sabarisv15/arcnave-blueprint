@@ -6,8 +6,15 @@
 // auditLogRepository are stubbed via node:test's built-in mock, same
 // technique as every other *-service.test.js file in this suite.
 // 'principal'/'hod' resolution moved off staffService onto
-// positionRepository in Phase 1 (Capability Resolver integration) —
-// see workflowChainService.js's resolveRoleUserId/resolveOccupantForPosition.
+// identityService.resolvePositionOccupant in Phase 1 (Capability
+// Resolver integration) — see workflowChainService.js's
+// resolveRoleUserId. Mocking positionRepository directly (rather than
+// identityService itself) still works and is deliberate here: it
+// proves the real resolution chain (workflowChainService ->
+// identityService -> positionSlotResolver/assignmentResolver ->
+// positionRepository) end to end, the same way identity-resolvers.test.js
+// exercises those resolvers against real data — just against
+// repository-level stubs instead of a live database.
 
 function mockPrincipalPosition(t, { userId = 'principal-1' } = {}) {
   const findLevel1Mock = t.mock.method(positionRepository, 'findActivePositionByCollegeAndLevel', async () => ({ id: 'principal-pos-1' }));

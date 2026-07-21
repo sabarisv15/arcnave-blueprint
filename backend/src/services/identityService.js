@@ -2,27 +2,36 @@
 
 // The single public façade over the Position/Institutional Position
 // Account/Occupant model (ADR-021). PositionResolver / ModuleResolver
-// / DepartmentResolver / AssignmentResolver / VisibilityResolver live
-// as plain-function internal modules under services/identity/*, never
-// exposed to routes or AI tools directly, never calling each other —
-// only this façade composes them. Routes/AI tools/workflowChainService
-// must only ever require THIS file, never services/identity/* directly
-// (mirrors CLAUDE.md rule 1 — "every AI tool calls a Business
+// / DepartmentResolver / AssignmentResolver / VisibilityResolver /
+// PositionSlotResolver live as plain-function internal modules under
+// services/identity/*, never exposed to routes or AI tools directly,
+// never calling each other — only this façade composes them.
+// Routes/AI tools/workflowChainService must only ever require THIS
+// file, never services/identity/* or repositories/positionRepository.js
+// directly (mirrors CLAUDE.md rule 1 — "every AI tool calls a Business
 // Service" — one layer down: identityService is that Business Service
 // for identity/capability questions).
 //
-// Not yet wired into any enforcement path (routes/permissions.js/
-// aiToolRegistry.js are untouched) — this module's public contract is
-// frozen (see docs/adr/ADR-022-Identity-Resolver-Contract.md) so that
-// future consumers (workflowChainService, RBAC/AI tool cutover) can
-// build directly on resolveCapabilities()'s return shape without
-// reshaping it independently once they land.
+// Wired into Authorization (middleware/rbac.js, via
+// middleware/identity.js), Workflow Routing (workflowChainService.js),
+// Visibility/Data Scope (actorContextService.js), and Audit Identity
+// (auditLogRepository.js) as of Phase 1. resolveCapabilities()'s return
+// shape is frozen (see docs/adr/ADR-022-Identity-Resolver-Contract.md)
+// — consumers build directly on it without reshaping it independently.
+// resolvePositionOccupant() below is a second, later public entry
+// point added in Phase 1's own conformance pass, once workflowChainService's
+// actual need (a reverse, slot -> occupant lookup — resolveCapabilities
+// only ever resolves the forward, user -> capabilities direction) turned
+// out not to be covered by the frozen contract; adding it here keeps
+// this file the sole owner of Position/Account/Occupant reads without
+// touching resolveCapabilities()'s own shape at all.
 
 const positionResolver = require('./identity/positionResolver');
 const moduleResolver = require('./identity/moduleResolver');
 const departmentResolver = require('./identity/departmentResolver');
 const assignmentResolver = require('./identity/assignmentResolver');
 const visibilityResolver = require('./identity/visibilityResolver');
+const positionSlotResolver = require('./identity/positionSlotResolver');
 
 const PRINCIPAL_LEVEL = 1;
 const HOD_LEVEL = 3;
@@ -113,4 +122,24 @@ async function resolveCapabilities(client, { userId, collegeId }) {
   };
 }
 
-module.exports = { resolveCapabilities };
+// Generic, identity-focused reverse lookup: given a structural slot —
+// a college-wide level (e.g. { collegeId, level: 1 } for "this
+// college's Principal") or a department (e.g. { collegeId,
+// departmentId } for "whoever currently owns this department," Level
+// 3 or a Principal-configured Level 2 alike, per Identity-
+// Architecture.md §5.2) — who currently occupies it? Not
+// workflow-specific: any consumer needing "who holds this position
+// right now" belongs on this same entry point, never a direct
+// positionRepository/resolver call of its own. Returns null for a
+// vacant slot (no position provisioned yet, or no active occupant) —
+// the ordinary case, not an error, same convention resolveCapabilities
+// itself follows for "no active position."
+async function resolvePositionOccupant(client, { collegeId, level, departmentId }) {
+  const position = await positionSlotResolver.resolvePositionForSlot(client, { collegeId, level, departmentId });
+  if (position === null) {
+    return null;
+  }
+  return assignmentResolver.resolveCurrentOccupantUserId(client, position.positionAccountId);
+}
+
+module.exports = { resolveCapabilities, resolvePositionOccupant };

@@ -39,7 +39,7 @@
 // gets identical behavior to today, not a behavior change by omission.
 
 const configurationService = require('./configurationService');
-const positionRepository = require('../repositories/positionRepository');
+const identityService = require('./identityService');
 const classRepository = require('../repositories/classRepository');
 const workflowDelegationRepository = require('../repositories/workflowDelegationRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
@@ -59,6 +59,7 @@ const DEFAULT_CHAINS = {
 };
 
 const KNOWN_ROLES = ['principal', 'hod', 'tutor'];
+const PRINCIPAL_LEVEL = 1;
 
 class WorkflowChainValidationError extends Error {}
 class WorkflowChainUnknownEntityTypeError extends Error {}
@@ -69,44 +70,35 @@ class WorkflowChainUnknownRoleError extends Error {}
 // is a caller bug (missing context), not a business-data problem.
 class WorkflowChainMissingContextError extends Error {}
 
-async function resolveOccupantForPosition(client, positionId) {
-  const account = await positionRepository.findPositionAccountByPositionId(client, positionId);
-  if (account === null) {
-    return null;
-  }
-  return positionRepository.findActiveOccupant(client, account.id);
-}
-
-// Resolves 'principal'/'hod' via the Capability Resolver's own data
-// (positionRepository — Position/Position Account/Occupant, ADR-021)
-// instead of staffService's users.role-based lookups: workflow routing
-// is one of the four consumers Phase 1 moves onto the Position model
-// as the single source of truth, so this must not keep its own
-// parallel "who is the HOD/Principal" logic once that model owns the
-// answer. staffService.ensureHodPosition/swapHodOccupant (staffService.js)
-// keep a department's Level 3 occupant in sync on every HOD/Acting-HOD
-// change, so an active HOD In-Charge appointee is simply the current
-// occupant here too — no separate in-charge fallback needed, unlike
-// the staffService.findHodForDepartment lookup this replaces.
+// Resolves 'principal'/'hod' via identityService.resolvePositionOccupant
+// (ADR-022) instead of staffService's users.role-based lookups or any
+// direct positionRepository/resolver access of this file's own —
+// workflow routing is one of the four consumers Phase 1 moves onto the
+// Position model as the single source of truth, and identityService is
+// its sole entry point, never a second, parallel "who is the HOD/
+// Principal" implementation. staffService.ensureHodPosition/
+// swapHodOccupant (staffService.js) keep a department's Level 3
+// occupant in sync on every HOD/Acting-HOD change, so an active HOD
+// In-Charge appointee is simply the current occupant here too — no
+// separate in-charge fallback needed, unlike the
+// staffService.findHodForDepartment lookup this replaces.
 async function resolveRoleUserId(client, role, { collegeId, classId, departmentId }) {
   if (role === 'principal') {
-    const position = await positionRepository.findActivePositionByCollegeAndLevel(client, collegeId, 1);
-    const occupant = position && await resolveOccupantForPosition(client, position.id);
-    if (occupant === null || occupant === undefined) {
+    const userId = await identityService.resolvePositionOccupant(client, { collegeId, level: PRINCIPAL_LEVEL });
+    if (userId === null) {
       throw new WorkflowChainMissingContextError(`college ${JSON.stringify(collegeId)} has no active Principal to resolve a "principal" chain step`);
     }
-    return occupant.user_id;
+    return userId;
   }
   if (role === 'hod') {
     if (!departmentId) {
       throw new WorkflowChainMissingContextError('departmentId is required to resolve an "hod" chain step');
     }
-    const assignment = await positionRepository.findActiveDepartmentAssignment(client, departmentId);
-    const occupant = assignment && await resolveOccupantForPosition(client, assignment.position_id);
-    if (occupant === null || occupant === undefined) {
+    const userId = await identityService.resolvePositionOccupant(client, { collegeId, departmentId });
+    if (userId === null) {
       throw new WorkflowChainMissingContextError(`department ${JSON.stringify(departmentId)} has no active HOD (permanent or acting) to resolve an "hod" chain step`);
     }
-    return occupant.user_id;
+    return userId;
   }
   if (role === 'tutor') {
     if (!classId) {

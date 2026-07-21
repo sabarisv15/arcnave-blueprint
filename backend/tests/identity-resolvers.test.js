@@ -286,4 +286,45 @@ test('identity resolvers (Phase 3)', async (t) => {
     assert.equal(capabilities.scopeLevel, SCOPE_LEVELS.SELF_ASSIGNED);
     assert.deepEqual(capabilities.positions, []);
   });
+
+  await t.test('identityService.resolvePositionOccupant: resolves a college-level slot and a department slot to their real occupants', async () => {
+    const collegeId = `idr${suffix}h`;
+    collegeIds.push(collegeId);
+    await insertCollege(pool, collegeId);
+
+    const principalUserId = await insertUser(pool, collegeId, 'principal4', 'principal');
+    const principalPosition = await makePosition(pool, {
+      collegeId, level: 1, title: 'Principal', createdBy: principalUserId,
+    });
+    await occupy(pool, { collegeId, accountId: principalPosition.account.id, userId: principalUserId });
+
+    const hodUserId = await insertUser(pool, collegeId, 'hod3', 'hod');
+    const deptId = await insertDepartment(pool, collegeId, 'Mechanical');
+    const hodPosition = await makePosition(pool, {
+      collegeId, level: 3, title: 'HOD Mechanical', createdBy: hodUserId,
+    });
+    await occupy(pool, { collegeId, accountId: hodPosition.account.id, userId: hodUserId });
+    await positionRepository.createPositionDepartmentAssignment(pool, {
+      collegeId, positionId: hodPosition.position.id, departmentId: deptId, assignedBy: hodUserId,
+    });
+
+    const principalOccupant = await identityService.resolvePositionOccupant(pool, { collegeId, level: 1 });
+    assert.equal(principalOccupant, principalUserId);
+
+    const hodOccupant = await identityService.resolvePositionOccupant(pool, { collegeId, departmentId: deptId });
+    assert.equal(hodOccupant, hodUserId);
+  });
+
+  await t.test('identityService.resolvePositionOccupant: returns null for a vacant/unprovisioned slot, never throws', async () => {
+    const collegeId = `idr${suffix}i`;
+    collegeIds.push(collegeId);
+    await insertCollege(pool, collegeId);
+    const deptId = await insertDepartment(pool, collegeId, 'Vacant Dept');
+
+    const noPrincipal = await identityService.resolvePositionOccupant(pool, { collegeId, level: 1 });
+    assert.equal(noPrincipal, null);
+
+    const noHod = await identityService.resolvePositionOccupant(pool, { collegeId, departmentId: deptId });
+    assert.equal(noHod, null);
+  });
 });
