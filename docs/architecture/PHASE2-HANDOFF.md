@@ -38,14 +38,25 @@ nothing reads or writes them.
 
 ## 2. What's NOT done — Phase 2, planning only, nothing implemented
 
-`docs/architecture/Phase2-Position-Account-Auth-Plan.md` (uncommitted,
-same folder as this file) has been **fully revised and is now current**
-— it incorporates both corrections below (office-scoped authorization,
-Class Tutor as a full Position replacement). It's a complete,
-23-step, 6-group delivery plan with a Definition of Done. Nothing in it
-has been implemented yet — read it in full before writing any code, and
-get the user's explicit go-ahead on it first (they wanted to review
-before Step 1 even for the first draft).
+`docs/architecture/Phase2-Position-Account-Auth-Plan.md` — **committed**
+(commits `590e30e`, `7842899`, `8c738ac`, `55cf5f1` — doc-only, no code
+changes in any of them) and fully revised/current — it incorporates
+both corrections below (office-scoped authorization, Class Tutor as a
+full Position replacement). It's a complete, 23-step, 6-group delivery
+plan with a Definition of Done. Nothing in it has been implemented
+yet — read it in full before writing any code, and get the user's
+explicit go-ahead on it first (they wanted to review before Step 1
+even for the first draft, and that hadn't happened as of this handoff).
+
+Also committed, same commits: `docs/architecture/Identity-Architecture.md`
+(now uses "Personal Identity Context"/"Institutional Identity Context"
+as the canonical terminology — Phase 1 = Personal, Phase 2 = Institutional)
+and a new, separate, explicitly-not-part-of-Phase-2 work item:
+`docs/architecture/Phase3-AI-Identity-Context-Integration.md` — AI's
+Policy Gate still authorizes off the raw JWT role claim, never migrated
+onto either identity context by Phase 1 or Phase 2; scoped but not
+planned in detail, gated on Phase 2 shipping first. Read it if asked
+about AI + identity, but it is not this session's job to start it.
 
 ### 2a. The core mental model (get this exactly right — user's own words)
 
