@@ -210,3 +210,92 @@ test('position schema constraints (Phase 1)', async (t) => {
     assert.ok(mappingB.id);
   });
 });
+
+// Phase 2 (Position Account Auth) step 2 — the login/credential/
+// session-revocation query mechanics added to positionRepository.js
+// (mirrors of authRepository.js's users/refresh_tokens functions).
+test('position account auth repository additions (Phase 2 step 2)', async (t) => {
+  const pool = new Pool({ connectionString: MIGRATION_DATABASE_URL });
+  const fixtures = await seedFixtures(pool);
+
+  t.after(async () => {
+    await pool.query('DELETE FROM position_account_refresh_tokens WHERE college_id = $1', [fixtures.collegeId]);
+    await cleanupFixtures(pool, fixtures.collegeId);
+    await pool.end();
+  });
+
+  const position = await positionRepository.createPosition(pool, {
+    collegeId: fixtures.collegeId, level: 1, title: 'Principal', createdBy: fixtures.createdBy,
+  });
+  const account = await positionRepository.createPositionAccount(pool, {
+    collegeId: fixtures.collegeId,
+    positionId: position.id,
+    officialEmail: 'principal@example.edu',
+    passwordHash: 'hash-1',
+  });
+
+  await t.test('findPositionAccountByOfficialEmail / findPositionAccountById', async () => {
+    const byEmail = await positionRepository.findPositionAccountByOfficialEmail(
+      pool, fixtures.collegeId, 'principal@example.edu',
+    );
+    assert.equal(byEmail.id, account.id);
+
+    const byId = await positionRepository.findPositionAccountById(pool, account.id);
+    assert.equal(byId.id, account.id);
+
+    const missing = await positionRepository.findPositionAccountByOfficialEmail(
+      pool, fixtures.collegeId, 'nobody@example.edu',
+    );
+    assert.equal(missing, null);
+  });
+
+  await t.test('updatePositionAccountCredentials replaces the password hash', async () => {
+    await positionRepository.updatePositionAccountCredentials(pool, account.id, 'hash-2');
+    const updated = await positionRepository.findPositionAccountById(pool, account.id);
+    assert.equal(updated.password_hash, 'hash-2');
+  });
+
+  await t.test('incrementPositionAccountTokenVersion bumps by exactly one', async () => {
+    const before = await positionRepository.getPositionAccountTokenVersion(pool, account.id);
+    const after = await positionRepository.incrementPositionAccountTokenVersion(pool, account.id);
+    assert.equal(after, before + 1);
+  });
+
+  await t.test('clearPositionAccountMfaAndRecovery clears all four fields', async () => {
+    await pool.query(
+      `UPDATE position_accounts
+       SET mfa_enabled = true, mfa_secret = 'secret', recovery_email = 'r@example.edu', recovery_phone = '123'
+       WHERE id = $1`,
+      [account.id],
+    );
+    await positionRepository.clearPositionAccountMfaAndRecovery(pool, account.id);
+    const cleared = await positionRepository.findPositionAccountById(pool, account.id);
+    assert.equal(cleared.mfa_enabled, false);
+    assert.equal(cleared.mfa_secret, null);
+    assert.equal(cleared.recovery_email, null);
+    assert.equal(cleared.recovery_phone, null);
+  });
+
+  await t.test('position account refresh token lifecycle: create, find by hash, revoke', async () => {
+    await positionRepository.createPositionAccountRefreshToken(pool, {
+      collegeId: fixtures.collegeId,
+      positionAccountId: account.id,
+      tokenHash: 'token-hash-abc',
+      expiresAt: new Date(Date.now() + 3600_000),
+    });
+
+    const found = await positionRepository.getPositionAccountRefreshTokenByHash(pool, 'token-hash-abc');
+    assert.ok(found.id);
+    assert.equal(found.position_account_id, account.id);
+    assert.equal(found.revoked_at, null);
+
+    await positionRepository.revokePositionAccountRefreshToken(pool, found.id);
+    const revoked = await positionRepository.getPositionAccountRefreshTokenByHash(pool, 'token-hash-abc');
+    assert.ok(revoked.revoked_at);
+  });
+
+  await t.test('getPositionAccountTokenVersion returns null for an unknown id', async () => {
+    const result = await positionRepository.getPositionAccountTokenVersion(pool, crypto.randomUUID());
+    assert.equal(result, null);
+  });
+});

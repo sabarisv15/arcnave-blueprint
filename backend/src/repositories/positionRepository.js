@@ -229,6 +229,81 @@ async function revokePositionDepartmentAssignment(client, id, { revokedBy }) {
   return result.rows[0] || null;
 }
 
+// Phase 2 (Position Account Auth) additions below — query mechanics
+// for position_accounts login/credential/session-revocation state and
+// position_account_refresh_tokens, mirroring authRepository.js's
+// users/refresh_tokens functions exactly, table-for-table.
+
+async function findPositionAccountByOfficialEmail(client, collegeId, officialEmail) {
+  const result = await client.query(
+    `SELECT * FROM position_accounts WHERE college_id = $1 AND official_email = $2`,
+    [collegeId, officialEmail],
+  );
+  return result.rows[0] || null;
+}
+
+async function findPositionAccountById(client, id) {
+  const result = await client.query('SELECT * FROM position_accounts WHERE id = $1', [id]);
+  return result.rows[0] || null;
+}
+
+async function updatePositionAccountCredentials(client, id, passwordHash) {
+  await client.query('UPDATE position_accounts SET password_hash = $1 WHERE id = $2', [passwordHash, id]);
+}
+
+// Same "bump by exactly one, never a blind SET" reasoning as
+// authRepository.incrementTokenVersion — this is what revokes every
+// access token already issued for this Position Account.
+async function incrementPositionAccountTokenVersion(client, id) {
+  const result = await client.query(
+    'UPDATE position_accounts SET token_version = token_version + 1 WHERE id = $1 RETURNING token_version',
+    [id],
+  );
+  return result.rows[0] ? result.rows[0].token_version : null;
+}
+
+// middleware/sessionRevocation.js's Position Account counterpart to
+// authRepository.getTokenVersion — returns null for an unknown id so
+// the middleware's comparison fails closed rather than throwing.
+async function getPositionAccountTokenVersion(client, id) {
+  const result = await client.query('SELECT token_version FROM position_accounts WHERE id = $1', [id]);
+  return result.rows[0] ? result.rows[0].token_version : null;
+}
+
+// Reassignment lifecycle (ADR-021 §10): clears MFA/recovery state on
+// the outgoing occupant's way out, same moment token_version is bumped.
+async function clearPositionAccountMfaAndRecovery(client, id) {
+  await client.query(
+    `UPDATE position_accounts
+     SET mfa_enabled = false, mfa_secret = NULL, recovery_email = NULL, recovery_phone = NULL
+     WHERE id = $1`,
+    [id],
+  );
+}
+
+async function createPositionAccountRefreshToken(client, {
+  collegeId, positionAccountId, tokenHash, expiresAt,
+}) {
+  await client.query(
+    `INSERT INTO position_account_refresh_tokens (college_id, position_account_id, token_hash, expires_at)
+     VALUES ($1, $2, $3, $4)`,
+    [collegeId, positionAccountId, tokenHash, expiresAt],
+  );
+}
+
+async function getPositionAccountRefreshTokenByHash(client, tokenHash) {
+  const result = await client.query(
+    `SELECT id, college_id, position_account_id, token_hash, issued_at, expires_at, revoked_at
+     FROM position_account_refresh_tokens WHERE token_hash = $1`,
+    [tokenHash],
+  );
+  return result.rows[0] || null;
+}
+
+async function revokePositionAccountRefreshToken(client, tokenId) {
+  await client.query('UPDATE position_account_refresh_tokens SET revoked_at = now() WHERE id = $1', [tokenId]);
+}
+
 module.exports = {
   createPosition,
   findPositionById,
@@ -248,4 +323,13 @@ module.exports = {
   findActivePositionsForUser,
   findActiveModuleAssignmentsForPosition,
   findActiveDepartmentAssignmentsForPosition,
+  findPositionAccountByOfficialEmail,
+  findPositionAccountById,
+  updatePositionAccountCredentials,
+  incrementPositionAccountTokenVersion,
+  getPositionAccountTokenVersion,
+  clearPositionAccountMfaAndRecovery,
+  createPositionAccountRefreshToken,
+  getPositionAccountRefreshTokenByHash,
+  revokePositionAccountRefreshToken,
 };
