@@ -282,6 +282,27 @@ async function findActiveClassAssignmentsForPosition(client, positionId) {
   return result.rows;
 }
 
+// Phase 2 step 9 — the reverse (user -> their Class Tutor position)
+// lookup identityService.resolveActiveClassTutorPosition needs.
+// Deliberately its own query rather than reusing findActivePositionsForUser:
+// that function's SELECT list is part of positionResolver's contract
+// (feeds resolveCapabilities's frozen ADR-022 shape) and stays untouched;
+// this one exists solely to find the single active position_type=
+// 'class_tutor' seat (if any) this user currently occupies, for
+// classResolver to then map to its class.
+async function findActiveClassTutorPositionForUser(client, { collegeId, userId }) {
+  const result = await client.query(
+    `SELECT p.id AS position_id
+     FROM position_occupants po
+     JOIN position_accounts pa ON pa.id = po.position_account_id
+     JOIN positions p ON p.id = pa.position_id
+     WHERE p.college_id = $1 AND po.user_id = $2 AND po.revoked_at IS NULL
+       AND p.position_type = 'class_tutor'`,
+    [collegeId, userId],
+  );
+  return result.rows[0] || null;
+}
+
 // Phase 2 (Position Account Auth) additions below — query mechanics
 // for position_accounts login/credential/session-revocation state and
 // position_account_refresh_tokens, mirroring authRepository.js's
@@ -389,4 +410,5 @@ module.exports = {
   findActiveClassAssignment,
   revokePositionClassAssignment,
   findActiveClassAssignmentsForPosition,
+  findActiveClassTutorPositionForUser,
 };

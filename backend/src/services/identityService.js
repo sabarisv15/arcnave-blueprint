@@ -137,22 +137,47 @@ async function resolveCapabilities(client, { userId, collegeId }) {
 
 // Generic, identity-focused reverse lookup: given a structural slot —
 // a college-wide level (e.g. { collegeId, level: 1 } for "this
-// college's Principal") or a department (e.g. { collegeId,
+// college's Principal"), a department (e.g. { collegeId,
 // departmentId } for "whoever currently owns this department," Level
 // 3 or a Principal-configured Level 2 alike, per Identity-
-// Architecture.md §5.2) — who currently occupies it? Not
-// workflow-specific: any consumer needing "who holds this position
-// right now" belongs on this same entry point, never a direct
-// positionRepository/resolver call of its own. Returns null for a
-// vacant slot (no position provisioned yet, or no active occupant) —
-// the ordinary case, not an error, same convention resolveCapabilities
-// itself follows for "no active position."
-async function resolvePositionOccupant(client, { collegeId, level, departmentId }) {
-  const position = await positionSlotResolver.resolvePositionForSlot(client, { collegeId, level, departmentId });
+// Architecture.md §5.2), or — Phase 2 step 9 — a class (e.g.
+// { collegeId, classId } for "this class's Class Tutor") — who
+// currently occupies it? Not workflow-specific: any consumer needing
+// "who holds this position right now" belongs on this same entry
+// point, never a direct positionRepository/resolver call of its own.
+// Returns null for a vacant slot (no position provisioned yet, or no
+// active occupant) — the ordinary case, not an error, same convention
+// resolveCapabilities itself follows for "no active position."
+async function resolvePositionOccupant(client, {
+  collegeId, level, departmentId, classId,
+}) {
+  const position = await positionSlotResolver.resolvePositionForSlot(client, {
+    collegeId, level, departmentId, classId,
+  });
   if (position === null) {
     return null;
   }
   return assignmentResolver.resolveCurrentOccupantUserId(client, position.positionAccountId);
+}
+
+// Phase 2 step 9 — the *reverse* direction studentService's tutor-reading
+// call sites need (a user asking "which class do I tutor," not "who
+// tutors this class"): filters this user's active positions down to a
+// Class Tutor seat (position_type='class_tutor') and resolves its
+// mapped class via classResolver. A class_tutor position maps to at
+// most one class in practice (position_class_assignments' unique
+// active-per-class index), so this returns a single classId, not a
+// list — matching the semantics of the `classes.tutor_user_id` column
+// it replaces (also a single value, enforced globally UNIQUE). Returns
+// null if the user holds no active Class Tutor position, or holds one
+// with no active class mapped yet — the ordinary case, not an error.
+async function resolveActiveClassTutorPosition(client, { userId, collegeId }) {
+  const position = await positionRepository.findActiveClassTutorPositionForUser(client, { collegeId, userId });
+  if (position === null) {
+    return null;
+  }
+  const classIds = await classResolver.resolveMappedClasses(client, position.position_id);
+  return classIds[0] || null;
 }
 
 // Decision 4 (Phase 2 plan) / the Institutional Identity Context: a
@@ -218,5 +243,6 @@ module.exports = {
   resolveCapabilities,
   resolvePositionOccupant,
   resolveCapabilitiesForPosition,
+  resolveActiveClassTutorPosition,
   PositionAccountNotFoundError,
 };

@@ -477,4 +477,60 @@ test('identity resolvers (Phase 3)', async (t) => {
     assert.deepEqual(hodCapabilities.departmentIds, [deptId]);
     assert.deepEqual(hodCapabilities.moduleKeys, []);
   });
+
+  // Phase 2 step 9 — the {classId} overload on resolvePositionOccupant/
+  // positionSlotResolver, and resolveActiveClassTutorPosition's reverse
+  // (user -> their class) direction. Isolated: not consumed by any real
+  // call site yet (that's group (c)).
+  await t.test('identityService.resolvePositionOccupant: resolves a class slot to its active Class Tutor, null once vacant', async () => {
+    const collegeId = `idr${suffix}n`;
+    collegeIds.push(collegeId);
+    await insertCollege(pool, collegeId);
+    const tutorUserId = await insertUser(pool, collegeId, 'tutor2', 'staff');
+    const classId = await insertClass(pool, collegeId, 'ECE 3rd Year');
+    const { position, account } = await makePosition(pool, {
+      collegeId, level: 4, title: 'Class Tutor', createdBy: tutorUserId,
+    });
+    await pool.query("UPDATE positions SET position_type = 'class_tutor' WHERE id = $1", [position.id]);
+    await occupy(pool, { collegeId, accountId: account.id, userId: tutorUserId });
+
+    const vacantSlot = await identityService.resolvePositionOccupant(pool, { collegeId, classId });
+    assert.equal(vacantSlot, null);
+
+    const classAssignment = await positionRepository.createPositionClassAssignment(pool, {
+      collegeId, positionId: position.id, classId, assignedBy: tutorUserId,
+    });
+    const tutorOccupant = await identityService.resolvePositionOccupant(pool, { collegeId, classId });
+    assert.equal(tutorOccupant, tutorUserId);
+
+    await positionRepository.revokePositionClassAssignment(pool, classAssignment.id, { revokedBy: tutorUserId });
+    const afterRevoke = await identityService.resolvePositionOccupant(pool, { collegeId, classId });
+    assert.equal(afterRevoke, null);
+  });
+
+  await t.test('identityService.resolveActiveClassTutorPosition: resolves a user\'s active Class Tutor seat to its mapped class, null otherwise', async () => {
+    const collegeId = `idr${suffix}o`;
+    collegeIds.push(collegeId);
+    await insertCollege(pool, collegeId);
+    const tutorUserId = await insertUser(pool, collegeId, 'tutor3', 'staff');
+    const plainStaffUserId = await insertUser(pool, collegeId, 'plainstaff1', 'staff');
+    const classId = await insertClass(pool, collegeId, 'ECE 4th Year');
+    const { position, account } = await makePosition(pool, {
+      collegeId, level: 4, title: 'Class Tutor', createdBy: tutorUserId,
+    });
+    await pool.query("UPDATE positions SET position_type = 'class_tutor' WHERE id = $1", [position.id]);
+    await occupy(pool, { collegeId, accountId: account.id, userId: tutorUserId });
+
+    const beforeAssignment = await identityService.resolveActiveClassTutorPosition(pool, { userId: tutorUserId, collegeId });
+    assert.equal(beforeAssignment, null);
+
+    await positionRepository.createPositionClassAssignment(pool, {
+      collegeId, positionId: position.id, classId, assignedBy: tutorUserId,
+    });
+    const afterAssignment = await identityService.resolveActiveClassTutorPosition(pool, { userId: tutorUserId, collegeId });
+    assert.equal(afterAssignment, classId);
+
+    const plainStaffResult = await identityService.resolveActiveClassTutorPosition(pool, { userId: plainStaffUserId, collegeId });
+    assert.equal(plainStaffResult, null);
+  });
 });
