@@ -3,7 +3,6 @@
 const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requirePermission } = require('../middleware/rbac');
-const { shadowCompare } = require('../middleware/identityShadow');
 const collegeProfileService = require('../services/collegeProfileService');
 const staffService = require('../services/staffService');
 
@@ -49,12 +48,7 @@ function mapDepartmentError(err, res) {
 function createDepartmentsRouter() {
   const router = express.Router();
 
-  // Identity-Migration-Plan.md Phase 3 — enrolled in shadow-mode
-  // comparison (see middleware/identityShadow.js / routes/
-  // collegeProfile.js's identical comment on the list route only, not
-  // every departments.* route, to keep this phase's blast radius
-  // small).
-  router.get('/departments', requirePermission('departments.read'), shadowCompare('departments.read'), asyncHandler(async (req, res) => {
+  router.get('/departments', requirePermission('departments.read'), asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
     const departments = await collegeProfileService.listDepartments(req.dbClient, req.collegeId);
     res.json(departments);
