@@ -1,17 +1,13 @@
 'use strict';
 
-// Phase 2 (Position Account Auth) step 6: the recursive invite-guard
-// only, for Group (a)'s scope — Level 1/2/3. One generic, level-
-// parametrized rule table rather than four bespoke invite flows, per
-// the plan's decision 3 ("who invites whom" is a clean recursive
-// pattern): Platform Admin -> Level 1/2. Level 2 -> HOD (Level 3)
-// within their own college, any department. HOD -> Class Tutor within
-// their own department's classes only — that last rule (and the
-// idempotent provisioning/accept/email orchestration around all of
-// this, inviteToPosition/acceptInvitation) is explicitly NOT this
-// step's job; it lands once group (b)'s class-assignment schema exists
-// (plan step 10) and once routes need the full flow (step 7 covers
-// routes for L1/2/3 only, reusing this same guard).
+// Phase 2 (Position Account Auth). Step 6 delivered the recursive
+// invite-guard (assertCanInvite/RECURSIVE_INVITERS) for Group (a)'s
+// scope — Level 1/2/3. Step 7 adds the orchestration routes actually
+// need: inviteToPosition (idempotent position provisioning + the
+// invitation row + email) and acceptInvitation (credential bootstrap).
+// Class Tutor's 'ownDepartmentOnly' rule and its own provisioning are
+// explicitly NOT this file's job yet — they land once group (b)'s
+// class-assignment schema exists (plan step 10).
 //
 // level/position_type are the two things that decide who may invite
 // whom — never a role string, never req.jwtClaims.role. Level 1/2's
@@ -22,8 +18,29 @@
 // users login) — an HOD inviting a Class Tutor, once that lands, acts
 // from their ordinary login too, never a Position Account session
 // inviting another Position Account.
+//
+// Scope note on what inviteToPosition/acceptInvitation do NOT do: this
+// step bootstraps a Position Account's own CREDENTIALS only (its
+// password_hash) — it does not link a position_occupant. Who currently
+// OCCUPIES a position is a separate, already-partially-built concern
+// (staffService.ensureHodPosition/swapHodOccupant,
+// authService.provisionLevel1PositionForNewPrincipal) that the plan's
+// own step 21 (reassignPositionOccupant, uniform across every level)
+// is what unifies — not duplicated ad hoc here. A freshly-accepted
+// Position Account can be occupant-linked through those existing
+// mechanisms exactly as it is today.
 
+const config = require('../config');
+const security = require('../security');
+const positionRepository = require('../repositories/positionRepository');
+const positionAccountInvitationRepository = require('../repositories/positionAccountInvitationRepository');
+const notificationService = require('./notificationService');
+const { logWarn } = require('../logging/logger');
+
+const LEVEL1 = 1;
 const LEVEL2 = 2;
+const LEVEL3 = 3;
+const STRUCTURAL_LEVEL_TITLES = { [LEVEL1]: 'Principal', [LEVEL2]: 'Level 2' };
 
 class PositionInvitationForbiddenError extends Error {}
 
@@ -100,9 +117,206 @@ function assertCanInvite({
   throw new PositionInvitationLevelNotSupportedError(`scopeCheck ${JSON.stringify(rule.scopeCheck)} not implemented yet`);
 }
 
+// inviteToPosition given a position whose position_accounts row
+// already exists — a fresh invite is only for FIRST-time credential
+// bootstrap. Resending credentials to an already-provisioned account,
+// or reassigning it to a new occupant, is the plan's own later step
+// (21/22, reassignPositionOccupant) — deliberately not folded in here.
+class PositionAccountAlreadyProvisionedError extends Error {}
+
+// acceptInvitation given a token with no matching, unrevoked,
+// unaccepted, unexpired position_account_invitations row. One generic
+// message for every case — same don't-let-the-error-message-be-an-
+// oracle reasoning as authService.InvitationInvalidError.
+class PositionInvitationInvalidError extends Error {}
+
+// inviteToPosition/acceptInvitation given a missing required field
+// (departmentId for a Level 3 invite, a password that fails
+// complexity) — raised before any repository call, same "guard first"
+// shape every other service in this codebase uses.
+class PositionInvitationValidationError extends Error {}
+
+const PASSWORD_COMPLEXITY_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}$/;
+
+// Idempotent find-or-create for the ONE structural position a college
+// has at a given level (L1/L2 — mirrors
+// authService.provisionLevel1PositionForNewPrincipal's/
+// positionRepository.findActivePositionByCollegeAndLevel's own
+// idempotency shape). createdBy may be null here (a Platform Admin has
+// no users.id — see the migration relaxing positions.created_by's NOT
+// NULL for exactly this reason); a tenant actor invitation never hits
+// this path (Level 1/2 invites are Platform-Admin-only per
+// RECURSIVE_INVITERS).
+async function ensureStructuralPosition(client, { collegeId, level, title, createdBy }) {
+  const existing = await positionRepository.findActivePositionByCollegeAndLevel(client, collegeId, level);
+  if (existing) return existing;
+  return positionRepository.createPosition(client, {
+    collegeId, level, title: title || STRUCTURAL_LEVEL_TITLES[level] || `Level ${level}`, createdBy,
+  });
+}
+
+// Level 3's own idempotent find-or-create, keyed by department — a
+// position-only counterpart to staffService.ensureHodPosition (that
+// function also creates a placeholder position_accounts row in the
+// same call, which this deliberately does NOT do: this invite flow
+// needs the account's official_email to be the real invitee's email,
+// not ensureHodPosition's fixed internal placeholder domain — the two
+// call sites have genuinely different needs from the same idempotent
+// position lookup, so this isn't a duplicate of that function, it's a
+// narrower one).
+async function ensureHodPositionForInvite(client, { collegeId, departmentId, createdBy }) {
+  const existingAssignment = await positionRepository.findActiveDepartmentAssignment(client, departmentId);
+  if (existingAssignment) {
+    return positionRepository.findPositionById(client, existingAssignment.position_id);
+  }
+  const position = await positionRepository.createPosition(client, {
+    collegeId, level: LEVEL3, title: 'HOD', createdBy,
+  });
+  await positionRepository.createPositionDepartmentAssignment(client, {
+    collegeId, positionId: position.id, departmentId, assignedBy: createdBy,
+  });
+  return position;
+}
+
+// The one thing this step adds beyond the guard: idempotently
+// provisions the target position (never a second row for the same
+// college+level or department), creates its position_accounts row
+// with the REAL invitee email (first-time bootstrap only — see
+// PositionAccountAlreadyProvisionedError above), records the
+// invitation, and emails the raw token. Never returns the raw token —
+// same rule every other invitation flow in this codebase follows.
+async function inviteToPosition(client, {
+  collegeId, level, departmentId, title, email, actorIsPlatformAdmin, actorCapabilities, invitedBy,
+}) {
+  assertCanInvite({
+    actorIsPlatformAdmin, actorCapabilities, targetLevel: level, targetPositionType: null, targetCollegeId: collegeId,
+  });
+
+  // positions.created_by REFERENCES users(id) — a Platform Admin's id
+  // lives in platform_admins, not users, so it can never legally fill
+  // this column (see the migration relaxing this to nullable for
+  // exactly this reason). invitedBy itself (used below for the
+  // invitation row, which has no such FK) still carries the REAL
+  // actor id either way — this null-ing is scoped to the position's
+  // own provenance column only.
+  const positionCreatedBy = actorIsPlatformAdmin ? null : invitedBy;
+
+  let position;
+  if (level === LEVEL3) {
+    if (!departmentId) {
+      throw new PositionInvitationValidationError('departmentId is required for a Level 3 invite');
+    }
+    position = await ensureHodPositionForInvite(client, { collegeId, departmentId, createdBy: positionCreatedBy });
+  } else {
+    position = await ensureStructuralPosition(client, {
+      collegeId, level, title, createdBy: positionCreatedBy,
+    });
+  }
+
+  const existingAccount = await positionRepository.findPositionAccountByPositionId(client, position.id);
+  if (existingAccount) {
+    throw new PositionAccountAlreadyProvisionedError(
+      `position ${JSON.stringify(position.id)} already has a Position Account`,
+    );
+  }
+
+  // A random, never-used placeholder hash — real credentials are set
+  // by acceptInvitation once the invitee presents the token. Same
+  // "placeholder now, real value at the actual moment it's known"
+  // shape staffService.ensureHodPosition already establishes for its
+  // own placeholder password, just generated fresh per invite rather
+  // than a fixed value.
+  const placeholderHash = await security.hashPassword(security.generateTemporaryPassword());
+  const account = await positionRepository.createPositionAccount(client, {
+    collegeId, positionId: position.id, officialEmail: email, passwordHash: placeholderHash,
+  });
+
+  const rawToken = security.generateRefreshToken();
+  const expiresAt = new Date(Date.now() + config.principalInvitationExpireHours * 60 * 60 * 1000);
+  const invitation = await positionAccountInvitationRepository.createInvitation(client, {
+    collegeId,
+    positionId: position.id,
+    level,
+    positionType: position.position_type,
+    email,
+    tokenHash: security.hashRefreshToken(rawToken),
+    createdBy: invitedBy,
+    expiresAt,
+  });
+
+  await notificationService.sendPositionAccountInvitationEmail(client, {
+    to: email, collegeId, positionTitle: position.title, token: rawToken, expiresAt: invitation.expires_at,
+  });
+
+  return { invitation, position, account };
+}
+
+// Pre-transaction lookup — same shape as
+// authService.lookupPendingInvitation: called on a short-lived,
+// un-scoped connection BEFORE the caller knows which collegeId to open
+// a real tenant transaction against (routes/positionAccountInvitations.js's
+// accept route can't rely on tenantMiddleware's normal resolution any
+// more than routes/invitations.js's own accept route can).
+async function lookupPendingInvitation(client, token) {
+  const tokenHash = security.hashRefreshToken(token || '');
+  const invitation = await positionAccountInvitationRepository.getInvitationByTokenHash(client, tokenHash);
+
+  if (invitation === null) {
+    throw new PositionInvitationInvalidError('invitation token does not exist');
+  }
+  if (invitation.revoked_at !== null) {
+    throw new PositionInvitationInvalidError(`invitation ${JSON.stringify(invitation.id)} was revoked`);
+  }
+  if (invitation.accepted_at !== null) {
+    // Possible-theft signal, not a routine rejection — same asymmetry
+    // authService.lookupPendingInvitation's own reuse-detection has.
+    logWarn('position_account_invitation_reuse_detected', {
+      collegeId: invitation.college_id,
+      invitationId: invitation.id,
+      originallyAcceptedAt: invitation.accepted_at,
+    });
+    throw new PositionInvitationInvalidError(`invitation ${JSON.stringify(invitation.id)} was already accepted`);
+  }
+  if (invitation.expires_at.getTime() <= Date.now()) {
+    throw new PositionInvitationInvalidError(`invitation ${JSON.stringify(invitation.id)} has expired`);
+  }
+
+  return invitation;
+}
+
+// The post-transaction half: client is the tenant-scoped transaction
+// already opened against invitation.college_id. Sets the Position
+// Account's real password (it was a random placeholder until now) and
+// marks the invitation accepted — credential bootstrap only, see this
+// file's own scope note at the top for why occupant-linking isn't
+// part of this function.
+async function acceptInvitation(client, invitation, { password }) {
+  if (!PASSWORD_COMPLEXITY_RE.test(password || '')) {
+    throw new PositionInvitationValidationError(
+      'Password must be at least 8 characters and include an uppercase letter, a lowercase letter, a number, and a symbol',
+    );
+  }
+
+  const account = await positionRepository.findPositionAccountByPositionId(client, invitation.position_id);
+  if (account === null) {
+    throw new PositionInvitationInvalidError(`no Position Account exists for invitation ${JSON.stringify(invitation.id)}`);
+  }
+
+  await positionRepository.updatePositionAccountCredentials(client, account.id, await security.hashPassword(password));
+  await positionAccountInvitationRepository.markInvitationAccepted(client, invitation.id);
+
+  return account;
+}
+
 module.exports = {
   PositionInvitationForbiddenError,
   PositionInvitationLevelNotSupportedError,
+  PositionAccountAlreadyProvisionedError,
+  PositionInvitationInvalidError,
+  PositionInvitationValidationError,
   RECURSIVE_INVITERS,
   assertCanInvite,
+  inviteToPosition,
+  lookupPendingInvitation,
+  acceptInvitation,
 };

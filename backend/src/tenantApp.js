@@ -13,6 +13,8 @@ const createAuthRouter = require('./routes/auth');
 const createConfigurationsRouter = require('./routes/configurations');
 const createAiConfigRouter = require('./routes/aiConfig');
 const createInvitationsRouter = require('./routes/invitations');
+const createPositionAccountInvitationsRouter = require('./routes/positionAccountInvitations');
+const createPositionAccountsRouter = require('./routes/positionAccounts');
 const createStudentsRouter = require('./routes/students');
 const createStaffRouter = require('./routes/staff');
 const createClassesRouter = require('./routes/classes');
@@ -86,6 +88,9 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   // routes/invitations.js), not from anything tenantMiddleware would
   // resolve. It never reaches authMiddleware/tenantMiddleware at all.
   app.use(createInvitationsRouter());
+  // POST /position-accounts/invitations/accept — same reasoning as
+  // /invitations/accept above, own separate token/table.
+  app.use(createPositionAccountInvitationsRouter());
 
   // AuthMiddleware before TenantMiddleware — resolveTenant reads
   // req.jwtClaims, which AuthMiddleware sets. Express runs app.use()
@@ -125,6 +130,7 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   // Ordinary tenant-scoped routes, registered after tenantMiddleware
   // like whoami above — not to be confused with AuthMiddleware.
   app.use(createAuthRouter());
+  app.use(createPositionAccountsRouter());
   app.use(createConfigurationsRouter());
   app.use(createAiConfigRouter());
   app.use(createStudentsRouter());

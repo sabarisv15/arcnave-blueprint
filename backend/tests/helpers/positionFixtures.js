@@ -60,6 +60,8 @@ async function seedHodPosition(adminPool, {
 // Run before deleting departments/users/staff — position_occupants and
 // position_department_assignments FK into both.
 async function cleanupPositionRows(adminPool, collegeId) {
+  await adminPool.query('DELETE FROM position_account_invitations WHERE college_id = $1', [collegeId]);
+  await adminPool.query('DELETE FROM position_account_refresh_tokens WHERE college_id = $1', [collegeId]);
   await adminPool.query('DELETE FROM position_occupants WHERE college_id = $1', [collegeId]);
   await adminPool.query('DELETE FROM position_module_assignments WHERE college_id = $1', [collegeId]);
   await adminPool.query('DELETE FROM position_department_assignments WHERE college_id = $1', [collegeId]);
