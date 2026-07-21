@@ -583,40 +583,31 @@ async function lookupPendingInvitation(client, token) {
   return invitation;
 }
 
-// Identity-Migration-Plan.md Phase 4 (ADR-021) — the Level 1
-// "Institutional Position Account" a new college's Principal gets
-// alongside their unchanged legacy `users` row. Only called when
-// config.newCollegeOnboardingEnabled is true (see acceptInvitation
-// below); with the flag off this function is never reached and
-// acceptInvitation behaves exactly as it did before Phase 4.
+// ADR-021 — the Level 1 "Institutional Position Account" a new
+// college's Principal gets alongside their `users` row (see
+// acceptInvitation below — this always runs now, unconditionally).
 //
 // Deferred to accept time rather than college-creation time
 // (platformService.createCollege): positions.created_by and
-// position_occupants.assigned_by are NOT NULL FKs to users(id) — a
-// real hidden assumption Phase 4's own plan section flagged — and at
+// position_occupants.assigned_by are NOT NULL FKs to users(id), and at
 // createCollege time no users row for the eventual principal exists
 // yet (their email isn't even known until invitePrincipal, let alone
 // their chosen username/password, which only exist once accept runs).
 // Attributing creation/assignment to the new principal's own id, the
-// moment that id first exists, mirrors exactly how
-// positionBackfillService.js attributes a backfilled Level 1 position
-// to the existing principal it's built from — same reasoning, applied
-// at the one point in this flow where it's actually possible.
+// moment that id first exists, is the one point in this flow where
+// it's actually possible.
 //
 // Cosmetic Level 1 title ("Principal"/"Director"/etc, per ADR-021) —
 // what a college's positions row gets called when no Platform-Admin-
 // chosen title exists for it (colleges.level1_position_title is null:
 // either the college predates this field, or the admin simply left it
-// blank at createCollege time). Matches positionBackfillService.js's
-// own default, so a college migrated by Phase 2's backfill and one
-// onboarded through this path with no title chosen end up with the
-// identical title either way.
+// blank at createCollege time).
 const DEFAULT_LEVEL1_POSITION_TITLE = 'Principal';
 
 // Idempotency guard: if this college already has a Level 1 position
-// (e.g. it was already migrated via Phase 2's backfill, or a principal
-// was already re-invited/accepted once through this same path), this
-// is a no-op — never a second Level 1 position for one college. The
+// (e.g. a principal was already re-invited/accepted once through this
+// same path), this is a no-op — never a second Level 1 position for
+// one college. The
 // title itself now comes from colleges.level1_position_title — the
 // Platform Admin's own choice at createCollege time
 // (platformService.createCollege), read back here via
@@ -664,13 +655,14 @@ async function provisionLevel1PositionForNewPrincipal(client, collegeId, user, p
 // already proven the token authentic. Every invitation accepted this
 // way creates a 'principal' account — the only role this route has
 // ever granted (see the migration's own file-level comment on
-// principal_invitations' purpose). This legacy `users.role = 'principal'`
-// row is a REQUIRED dual-write, not just historical behavior — every
-// un-migrated permissions.js/aiToolRegistry.js/workflowChainService.js
-// check still reads req.jwtClaims.role directly (Phase 6 hasn't run
-// yet), so a college onboarded here must be indistinguishable from a
-// legacy college to every one of those checks, whether or not Phase
-// 4's new-model provisioning below also runs.
+// principal_invitations' purpose). This `users.role = 'principal'` row
+// is the CURRENT, ACTIVE authentication mechanism — every
+// permissions.js/aiToolRegistry.js/workflowChainService.js check reads
+// req.jwtClaims.role directly, and position_accounts (ADR-021) have no
+// login system wired up yet (that's an unbuilt future phase), so this
+// row is not legacy/compatibility scaffolding to be retired later —
+// it's how a principal actually authenticates today, alongside the
+// Level 1 Institutional Position Account provisioned below.
 async function acceptInvitation(client, invitation, { username, password }) {
   if (!PASSWORD_COMPLEXITY_RE.test(password || '')) {
     throw new PasswordResetValidationError(
@@ -698,16 +690,14 @@ async function acceptInvitation(client, invitation, { username, password }) {
 
   await principalInvitationRepository.markInvitationAccepted(client, invitation.id);
 
-  // Identity-Migration-Plan.md Phase 4 — additive to the dual-write
-  // above, never a replacement for it (see this function's own comment).
-  // Runs in the SAME transaction as the user creation/invitation-accept
-  // above, so the whole accept either fully succeeds (legacy user +
-  // Level 1 position/account/occupant all committed together) or fully
-  // rolls back — never a user with no matching position account, or
-  // vice versa.
-  if (config.newCollegeOnboardingEnabled) {
-    await provisionLevel1PositionForNewPrincipal(client, invitation.college_id, user, passwordHash);
-  }
+  // Additive to the users.role='principal' row above, never a
+  // replacement for it (see this function's own comment). Runs in the
+  // SAME transaction as the user creation/invitation-accept above, so
+  // the whole accept either fully succeeds (users row + Level 1
+  // position/account/occupant all committed together) or fully rolls
+  // back — never a user with no matching position account, or vice
+  // versa.
+  await provisionLevel1PositionForNewPrincipal(client, invitation.college_id, user, passwordHash);
 
   return user;
 }

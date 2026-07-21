@@ -333,14 +333,8 @@ async function listAuditLogs(pool, {
   });
 }
 
-// new_college_onboarding_enabled is merged in from config, not stored
-// in platform_settings — it's an environment-level rollout switch, not
-// a per-platform preference an admin edits via PUT /settings; it's
-// surfaced here purely so the Platform Admin UI can show whether the
-// new onboarding model is active without needing a second endpoint.
 async function getSettings(pool) {
-  const settings = await platformSettingsRepository.getSettings(pool);
-  return { ...settings, new_college_onboarding_enabled: config.newCollegeOnboardingEnabled };
+  return platformSettingsRepository.getSettings(pool);
 }
 
 async function updateSettings(pool, {
