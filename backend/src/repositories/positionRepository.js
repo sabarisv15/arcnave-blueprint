@@ -229,6 +229,59 @@ async function revokePositionDepartmentAssignment(client, id, { revokedBy }) {
   return result.rows[0] || null;
 }
 
+// Phase 2 step 8 — position_class_assignments: exact mirror of the
+// position_department_assignments trio above, FK'd to classes(id)
+// instead of departments(id). Links a Level 4 + position_type=
+// 'class_tutor' position to the one class it tutors.
+async function createPositionClassAssignment(client, {
+  collegeId, positionId, classId, assignedBy,
+}) {
+  const result = await client.query(
+    `INSERT INTO position_class_assignments (college_id, position_id, class_id, assigned_by)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [collegeId, positionId, classId, assignedBy],
+  );
+  return result.rows[0];
+}
+
+async function findActiveClassAssignment(client, classId) {
+  const result = await client.query(
+    `SELECT * FROM position_class_assignments
+     WHERE class_id = $1 AND revoked_at IS NULL`,
+    [classId],
+  );
+  return result.rows[0] || null;
+}
+
+async function revokePositionClassAssignment(client, id, { revokedBy }) {
+  const result = await client.query(
+    `UPDATE position_class_assignments SET revoked_at = now(), revoked_by = $2
+     WHERE id = $1 AND revoked_at IS NULL
+     RETURNING *`,
+    [id, revokedBy],
+  );
+  return result.rows[0] || null;
+}
+
+// classResolver's core lookup: every class currently mapped to a
+// position (active assignments only) — mirrors
+// findActiveDepartmentAssignmentsForPosition exactly, different table.
+// A position CAN own more than one active class assignment in
+// principle (this table doesn't forbid it), even though Class Tutor's
+// own business rule (one tutor per class, enforced by the unique index
+// above) means in practice a class_tutor position maps to exactly one
+// class today.
+async function findActiveClassAssignmentsForPosition(client, positionId) {
+  const result = await client.query(
+    `SELECT * FROM position_class_assignments
+     WHERE position_id = $1 AND revoked_at IS NULL
+     ORDER BY class_id`,
+    [positionId],
+  );
+  return result.rows;
+}
+
 // Phase 2 (Position Account Auth) additions below — query mechanics
 // for position_accounts login/credential/session-revocation state and
 // position_account_refresh_tokens, mirroring authRepository.js's
@@ -332,4 +385,8 @@ module.exports = {
   createPositionAccountRefreshToken,
   getPositionAccountRefreshTokenByHash,
   revokePositionAccountRefreshToken,
+  createPositionClassAssignment,
+  findActiveClassAssignment,
+  revokePositionClassAssignment,
+  findActiveClassAssignmentsForPosition,
 };

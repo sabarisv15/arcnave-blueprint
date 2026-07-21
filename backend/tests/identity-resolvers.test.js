@@ -23,6 +23,7 @@ const positionRepository = require('../src/repositories/positionRepository');
 const positionResolver = require('../src/services/identity/positionResolver');
 const moduleResolver = require('../src/services/identity/moduleResolver');
 const departmentResolver = require('../src/services/identity/departmentResolver');
+const classResolver = require('../src/services/identity/classResolver');
 const assignmentResolver = require('../src/services/identity/assignmentResolver');
 const visibilityResolver = require('../src/services/identity/visibilityResolver');
 const identityService = require('../src/services/identityService');
@@ -48,6 +49,11 @@ async function insertDepartment(pool, collegeId, name) {
   return result.rows[0].id;
 }
 
+async function insertClass(pool, collegeId, className) {
+  const result = await pool.query('INSERT INTO classes (college_id, class_name) VALUES ($1, $2) RETURNING id', [collegeId, className]);
+  return result.rows[0].id;
+}
+
 async function makePosition(pool, { collegeId, level, title, createdBy }) {
   const position = await positionRepository.createPosition(pool, {
     collegeId, level, title, createdBy,
@@ -65,6 +71,7 @@ async function occupy(pool, { collegeId, accountId, userId }) {
 }
 
 async function cleanup(pool, collegeId) {
+  await pool.query('DELETE FROM position_class_assignments WHERE college_id = $1', [collegeId]);
   await pool.query('DELETE FROM position_department_assignments WHERE college_id = $1', [collegeId]);
   await pool.query('DELETE FROM position_module_assignments WHERE college_id = $1', [collegeId]);
   await pool.query('DELETE FROM position_occupants WHERE college_id = $1', [collegeId]);
@@ -149,6 +156,29 @@ test('identity resolvers (Phase 3)', async (t) => {
 
     assert.deepEqual(await moduleResolver.resolveOwnedModules(pool, position.id), []);
     assert.deepEqual(await departmentResolver.resolveMappedDepartments(pool, position.id), []);
+  });
+
+  // Phase 2 step 8 — classResolver mirrors moduleResolver/
+  // departmentResolver exactly, same active-only assignment lifecycle.
+  await t.test('classResolver: resolves only active class assignments for a position', async () => {
+    const collegeId = `idr${suffix}c2`;
+    collegeIds.push(collegeId);
+    await insertCollege(pool, collegeId);
+    const tutorUserId = await insertUser(pool, collegeId, 'tutor1', 'staff');
+    const classId = await insertClass(pool, collegeId, 'ECE 2nd Year');
+    const { position } = await makePosition(pool, {
+      collegeId, level: 4, title: 'Class Tutor', createdBy: tutorUserId,
+    });
+
+    assert.deepEqual(await classResolver.resolveMappedClasses(pool, position.id), []);
+
+    const classAssignment = await positionRepository.createPositionClassAssignment(pool, {
+      collegeId, positionId: position.id, classId, assignedBy: tutorUserId,
+    });
+    assert.deepEqual(await classResolver.resolveMappedClasses(pool, position.id), [classId]);
+
+    await positionRepository.revokePositionClassAssignment(pool, classAssignment.id, { revokedBy: tutorUserId });
+    assert.deepEqual(await classResolver.resolveMappedClasses(pool, position.id), []);
   });
 
   await t.test('assignmentResolver: resolves the current occupant, null once revoked', async () => {
@@ -379,22 +409,26 @@ test('identity resolvers (Phase 3)', async (t) => {
     assert.deepEqual(capabilities.departmentIds, [deptId]);
   });
 
-  await t.test('identityService.resolveCapabilitiesForPosition: Level 4 + position_type=class_tutor -> class_tutor/class, classIds still [] (no classResolver yet)', async () => {
+  await t.test('identityService.resolveCapabilitiesForPosition: Level 4 + position_type=class_tutor -> class_tutor/class, classIds now real (classResolver, Phase 2 step 8)', async () => {
     const collegeId = `idr${suffix}l`;
     collegeIds.push(collegeId);
     await insertCollege(pool, collegeId);
     const tutorUserId = await insertUser(pool, collegeId, 'tutor1', 'staff');
+    const classId = await insertClass(pool, collegeId, 'ECE 2nd Year L');
     const { position, account } = await makePosition(pool, {
       collegeId, level: 4, title: 'Class Tutor', createdBy: tutorUserId,
     });
     await pool.query("UPDATE positions SET position_type = 'class_tutor' WHERE id = $1", [position.id]);
     await occupy(pool, { collegeId, accountId: account.id, userId: tutorUserId });
+    await positionRepository.createPositionClassAssignment(pool, {
+      collegeId, positionId: position.id, classId, assignedBy: tutorUserId,
+    });
 
     const capabilities = await identityService.resolveCapabilitiesForPosition(pool, { positionAccountId: account.id });
     assert.equal(capabilities.positionType, 'class_tutor');
     assert.equal(capabilities.effectiveRole, 'class_tutor');
     assert.equal(capabilities.scopeLevel, 'class');
-    assert.deepEqual(capabilities.classIds, []);
+    assert.deepEqual(capabilities.classIds, [classId]);
   });
 
   await t.test('identityService.resolveCapabilitiesForPosition: throws PositionAccountNotFoundError for an unknown positionAccountId', async () => {

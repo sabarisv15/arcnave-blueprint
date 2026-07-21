@@ -32,6 +32,7 @@ const departmentResolver = require('./identity/departmentResolver');
 const assignmentResolver = require('./identity/assignmentResolver');
 const visibilityResolver = require('./identity/visibilityResolver');
 const positionSlotResolver = require('./identity/positionSlotResolver');
+const classResolver = require('./identity/classResolver');
 const positionRepository = require('../repositories/positionRepository');
 
 const PRINCIPAL_LEVEL = 1;
@@ -159,10 +160,7 @@ async function resolvePositionOccupant(client, { collegeId, level, departmentId 
 // reused — deriveEffectiveRole answers "what does this PERSON's whole
 // set of positions imply," which is exactly the union this function
 // must never produce. Pure function of one position's level +
-// position_type only. classIds/'class_tutor' are wired here as a shape
-// placeholder — a real classResolver lands in Phase 2 group (b); until
-// then a level-4/class_tutor position (none can exist yet — nothing
-// creates one) would resolve with an always-empty classIds.
+// position_type only.
 function deriveEffectiveRoleAndScopeForPosition({ level, positionType }) {
   if (level === PRINCIPAL_LEVEL) return { effectiveRole: 'principal', scopeLevel: 'college' };
   if (level === LEVEL2) return { effectiveRole: 'level2', scopeLevel: 'department' };
@@ -193,6 +191,7 @@ async function resolveCapabilitiesForPosition(client, { positionAccountId }) {
 
   const moduleKeys = await moduleResolver.resolveOwnedModules(client, position.id);
   const departmentIds = await departmentResolver.resolveMappedDepartments(client, position.id);
+  const classIds = await classResolver.resolveMappedClasses(client, position.id);
   const currentOccupantUserId = await assignmentResolver.resolveCurrentOccupantUserId(client, positionAccountId);
 
   const { effectiveRole, scopeLevel } = deriveEffectiveRoleAndScopeForPosition({
@@ -209,7 +208,7 @@ async function resolveCapabilitiesForPosition(client, { positionAccountId }) {
     currentOccupantUserId,
     moduleKeys,
     departmentIds,
-    classIds: [],
+    classIds,
     effectiveRole,
     scopeLevel,
   };

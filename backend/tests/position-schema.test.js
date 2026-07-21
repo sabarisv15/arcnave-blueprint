@@ -46,15 +46,23 @@ async function seedFixtures(pool) {
     'INSERT INTO departments (college_id, name) VALUES ($1, $2) RETURNING id',
     [collegeId, `CSE-${suffix}`],
   );
-  return { collegeId, createdBy: userResult.rows[0].id, departmentId: deptResult.rows[0].id };
+  const classResult = await pool.query(
+    'INSERT INTO classes (college_id, class_name) VALUES ($1, $2) RETURNING id',
+    [collegeId, `ECE-2nd-${suffix}`],
+  );
+  return {
+    collegeId, createdBy: userResult.rows[0].id, departmentId: deptResult.rows[0].id, classId: classResult.rows[0].id,
+  };
 }
 
 async function cleanupFixtures(pool, collegeId) {
+  await pool.query('DELETE FROM position_class_assignments WHERE college_id = $1', [collegeId]);
   await pool.query('DELETE FROM position_department_assignments WHERE college_id = $1', [collegeId]);
   await pool.query('DELETE FROM position_module_assignments WHERE college_id = $1', [collegeId]);
   await pool.query('DELETE FROM position_occupants WHERE college_id = $1', [collegeId]);
   await pool.query('DELETE FROM position_accounts WHERE college_id = $1', [collegeId]);
   await pool.query('DELETE FROM positions WHERE college_id = $1', [collegeId]);
+  await pool.query('DELETE FROM classes WHERE college_id = $1', [collegeId]);
   await pool.query('DELETE FROM departments WHERE college_id = $1', [collegeId]);
   await pool.query('DELETE FROM users WHERE college_id = $1', [collegeId]);
   await pool.query('DELETE FROM colleges WHERE college_id = $1', [collegeId]);
@@ -208,6 +216,43 @@ test('position schema constraints (Phase 1)', async (t) => {
       collegeId: fixtures.collegeId, positionId: positionB.id, departmentId: fixtures.departmentId, assignedBy: fixtures.createdBy,
     });
     assert.ok(mappingB.id);
+  });
+
+  // Phase 2 step 8 (Migration B) — exact mirror of the department test
+  // above, FK'd to classes(id) instead.
+  await t.test('a class can only have one active position mapping at a time', async () => {
+    const positionA = await positionRepository.createPosition(pool, {
+      collegeId: fixtures.collegeId, level: 4, title: 'Class Tutor A', createdBy: fixtures.createdBy,
+    });
+    const positionB = await positionRepository.createPosition(pool, {
+      collegeId: fixtures.collegeId, level: 4, title: 'Class Tutor B', createdBy: fixtures.createdBy,
+    });
+
+    const mappingA = await positionRepository.createPositionClassAssignment(pool, {
+      collegeId: fixtures.collegeId, positionId: positionA.id, classId: fixtures.classId, assignedBy: fixtures.createdBy,
+    });
+    assert.ok(mappingA.id);
+
+    await assert.rejects(
+      () => positionRepository.createPositionClassAssignment(pool, {
+        collegeId: fixtures.collegeId, positionId: positionB.id, classId: fixtures.classId, assignedBy: fixtures.createdBy,
+      }),
+      /duplicate key value violates unique constraint/,
+    );
+
+    const found = await positionRepository.findActiveClassAssignment(pool, fixtures.classId);
+    assert.equal(found.id, mappingA.id);
+
+    await positionRepository.revokePositionClassAssignment(pool, mappingA.id, { revokedBy: fixtures.createdBy });
+    assert.equal(await positionRepository.findActiveClassAssignment(pool, fixtures.classId), null);
+
+    const mappingB = await positionRepository.createPositionClassAssignment(pool, {
+      collegeId: fixtures.collegeId, positionId: positionB.id, classId: fixtures.classId, assignedBy: fixtures.createdBy,
+    });
+    assert.ok(mappingB.id);
+
+    const assignmentsForB = await positionRepository.findActiveClassAssignmentsForPosition(pool, positionB.id);
+    assert.deepEqual(assignmentsForB.map((row) => row.class_id), [fixtures.classId]);
   });
 });
 
