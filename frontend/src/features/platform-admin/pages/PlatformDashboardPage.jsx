@@ -54,7 +54,9 @@ function CreateCollegeCard() {
   const newOnboardingEnabled = useNewOnboardingFlag();
   const form = useForm({
     resolver: zodResolver(collegeFormSchema),
-    defaultValues: { collegeId: '', name: '', subdomain: '' },
+    defaultValues: {
+      collegeId: '', name: '', subdomain: '', level1PositionTitle: '',
+    },
   });
 
   const createMutation = useMutation({
@@ -95,6 +97,15 @@ function CreateCollegeCard() {
             <FormField control={form.control} name="subdomain" render={({ field }) => (
               <FormItem><FormLabel>Subdomain</FormLabel><FormControl><Input placeholder="e.g. abceng" {...field} /></FormControl><FormMessage /></FormItem>
             )} />
+            {newOnboardingEnabled && (
+              <FormField control={form.control} name="level1PositionTitle" render={({ field }) => (
+                <FormItem className="sm:col-span-3">
+                  <FormLabel>Level 1 Position Title (optional)</FormLabel>
+                  <FormControl><Input placeholder="e.g. Principal, Director" {...field} /></FormControl>
+                  <FormMessage />
+                </FormItem>
+              )} />
+            )}
             <div className="sm:col-span-3">
               <Button type="submit" disabled={createMutation.isPending}>
                 {createMutation.isPending ? 'Creating…' : 'Create College'}

@@ -53,7 +53,9 @@ function createPlatformRouter() {
   }));
 
   router.post('/colleges', requirePlatformAdmin, asyncHandler(async (req, res) => {
-    const { college_id: collegeId, name, subdomain } = req.body || {};
+    const {
+      college_id: collegeId, name, subdomain, level1_position_title: level1PositionTitle,
+    } = req.body || {};
     try {
       const college = await platformService.createCollege(platformPool, {
         collegeId,
@@ -61,12 +63,14 @@ function createPlatformRouter() {
         subdomain,
         createdBy: req.platformClaims.sub,
         ipAddress: req.ip,
+        level1PositionTitle,
       });
       res.status(201).json({
         college_id: college.college_id,
         name: college.name,
         subdomain: college.subdomain,
         subscription_status: college.subscription_status,
+        level1_position_title: college.level1_position_title,
       });
     } catch (err) {
       if (err instanceof platformService.DuplicateCollegeError) {

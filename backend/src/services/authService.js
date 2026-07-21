@@ -17,6 +17,7 @@ const config = require('../config');
 const security = require('../security');
 const authRepository = require('../repositories/authRepository');
 const positionRepository = require('../repositories/positionRepository');
+const collegeProfileRepository = require('../repositories/collegeProfileRepository');
 const principalInvitationRepository = require('../repositories/principalInvitationRepository');
 const userMfaOtpRepository = require('../repositories/userMfaOtpRepository');
 const notificationService = require('./notificationService');
@@ -603,28 +604,38 @@ async function lookupPendingInvitation(client, token) {
 // to the existing principal it's built from — same reasoning, applied
 // at the one point in this flow where it's actually possible.
 //
+// Cosmetic Level 1 title ("Principal"/"Director"/etc, per ADR-021) —
+// what a college's positions row gets called when no Platform-Admin-
+// chosen title exists for it (colleges.level1_position_title is null:
+// either the college predates this field, or the admin simply left it
+// blank at createCollege time). Matches positionBackfillService.js's
+// own default, so a college migrated by Phase 2's backfill and one
+// onboarded through this path with no title chosen end up with the
+// identical title either way.
+const DEFAULT_LEVEL1_POSITION_TITLE = 'Principal';
+
 // Idempotency guard: if this college already has a Level 1 position
 // (e.g. it was already migrated via Phase 2's backfill, or a principal
 // was already re-invited/accepted once through this same path), this
 // is a no-op — never a second Level 1 position for one college. The
-// cosmetic Level 1 title ("Principal"/"Director"/etc, per ADR-021) is
-// NOT yet configurable per college through this path: doing so would
-// require persisting an admin-chosen title somewhere across the
-// create-college -> invite -> accept gap, and every table that could
-// hold it (principal_invitations, positions, position_accounts) is
-// either one of Phase 1's frozen five or would need a new column to
-// carry it — exactly the kind of schema change Phase 4's exit criteria
-// says to flag rather than assume. Defaults to "Principal" (matching
-// positionBackfillService.js's own default) until that's explicitly
-// decided.
+// title itself now comes from colleges.level1_position_title — the
+// Platform Admin's own choice at createCollege time
+// (platformService.createCollege), read back here via
+// collegeProfileRepository (tenant-side, SELECT-only, same access shape
+// that repository already uses for the College Admin profile columns) —
+// falling back to DEFAULT_LEVEL1_POSITION_TITLE when null, which is
+// every college created before this field existed, and every college
+// whose admin simply didn't set one.
 async function provisionLevel1PositionForNewPrincipal(client, collegeId, user, passwordHash) {
   const existing = await positionRepository.findActivePositionByCollegeAndLevel(client, collegeId, 1);
   if (existing) {
     return null;
   }
 
+  const chosenTitle = await collegeProfileRepository.getLevel1PositionTitle(client, collegeId);
+
   const position = await positionRepository.createPosition(client, {
-    collegeId, level: 1, title: 'Principal', createdBy: user.id,
+    collegeId, level: 1, title: chosenTitle || DEFAULT_LEVEL1_POSITION_TITLE, createdBy: user.id,
   });
   const account = await positionRepository.createPositionAccount(client, {
     collegeId,

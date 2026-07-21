@@ -37,12 +37,14 @@ async function bootstrapPlatformAdmin(client, { username, email, passwordHash })
   return result.rows[0] || null;
 }
 
-async function createCollege(client, { collegeId, name, subdomain, createdBy }) {
+async function createCollege(client, {
+  collegeId, name, subdomain, createdBy, level1PositionTitle,
+}) {
   const result = await client.query(
-    `INSERT INTO colleges (college_id, name, subdomain, created_by)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id, college_id, name, subdomain, subscription_status, created_at`,
-    [collegeId, name, subdomain, createdBy],
+    `INSERT INTO colleges (college_id, name, subdomain, created_by, level1_position_title)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, college_id, name, subdomain, subscription_status, created_at, level1_position_title`,
+    [collegeId, name, subdomain, createdBy, level1PositionTitle || null],
   );
   return result.rows[0];
 }

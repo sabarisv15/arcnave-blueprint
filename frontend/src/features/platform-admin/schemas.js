@@ -9,6 +9,10 @@ export const collegeFormSchema = z.object({
   collegeId: z.string().min(1, 'College ID is required'),
   name: z.string().min(1, 'Name is required'),
   subdomain: z.string().min(1, 'Subdomain is required'),
+  // Optional — the Level 1 Institutional Position's title (e.g.
+  // "Principal", "Director"). Backend defaults to "Principal" when
+  // omitted, so this is never required.
+  level1PositionTitle: z.string().optional(),
 });
 
 export const invitePrincipalFormSchema = z.object({

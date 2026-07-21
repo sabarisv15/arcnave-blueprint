@@ -22,6 +22,10 @@
 // 3. Idempotency: a college that already has a Level 1 position (e.g.
 //    already migrated via Phase 2's backfill) never gets a second one
 //    through this path.
+// 4. A Platform-Admin-chosen Level 1 title (colleges.level1_position_title,
+//    passed through platformService.createCollege) is honored end-to-end;
+//    a college with none set still gets the "Principal" default (already
+//    exercised by test 2 above, which never sets the field).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -101,11 +105,11 @@ test('Phase 4 new-college onboarding: dual-write consistency', async (t) => {
   const adminId = adminResult.rows[0].id;
 
   const createdColleges = [];
-  async function seedCollege(label) {
+  async function seedCollege(label, { level1PositionTitle } = {}) {
     const cid = `onb${label}${crypto.randomUUID().slice(0, 8)}`;
     await adminPool.query(
-      'INSERT INTO colleges (college_id, name, subdomain) VALUES ($1, $1, $1)',
-      [cid],
+      'INSERT INTO colleges (college_id, name, subdomain, level1_position_title) VALUES ($1, $1, $1, $2)',
+      [cid, level1PositionTitle || null],
     );
     createdColleges.push(cid);
     return cid;
@@ -246,6 +250,35 @@ test('Phase 4 new-college onboarding: dual-write consistency', async (t) => {
     assert.equal(occupant.user_id, user.id);
     assert.equal(occupant.assigned_by, user.id);
     assert.equal(occupant.revoked_at, null, 'the new principal must be the single ACTIVE occupant');
+  });
+
+  await t.test('flag ON: a Platform-Admin-chosen Level 1 title is honored end-to-end (create -> invite -> accept)', async () => {
+    config.newCollegeOnboardingEnabled = true;
+
+    const token = await platformToken();
+    const cid = `onbtitle${crypto.randomUUID().slice(0, 8)}`;
+    const createResp = await post(
+      baseUrl,
+      '/api/v1/platform/colleges',
+      { authorization: `Bearer ${token}` },
+      {
+        college_id: cid, name: cid, subdomain: cid, level1_position_title: 'Director',
+      },
+    );
+    assert.equal(createResp.status, 201);
+    assert.equal(createResp.body.level1_position_title, 'Director');
+    createdColleges.push(cid);
+
+    const email = 'principal-title@example.com';
+    const inviteResp = await invite(token, cid, email);
+    const username = `titleuser${crypto.randomUUID().slice(0, 8)}`;
+
+    const resp = await accept(inviteResp.rawToken, username);
+    assert.equal(resp.status, 201);
+
+    const positions = await adminPool.query('SELECT * FROM positions WHERE college_id = $1', [cid]);
+    assert.equal(positions.rows.length, 1);
+    assert.equal(positions.rows[0].title, 'Director', 'the admin-chosen title must be used, not the "Principal" default');
   });
 
   await t.test('flag ON: never creates a second Level 1 position for a college that already has one', async () => {

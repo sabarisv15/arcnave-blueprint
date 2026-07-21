@@ -38,6 +38,25 @@ async function getByCollegeId(client, collegeId) {
   return result.rows[0] || null;
 }
 
+// Identity-Migration-Plan.md Phase 4 follow-up — the Level 1 position
+// title a Platform Admin chose at createCollege time
+// (platformService.createCollege / platformRepository.createCollege),
+// read back from the tenant side at invite-accept time
+// (authService.provisionLevel1PositionForNewPrincipal). Same
+// SELECT-only, no-RLS access shape getByCollegeId above already relies
+// on; a dedicated single-column function rather than folding this into
+// getByCollegeId's three College-Admin-editable profile columns, since
+// this one is Platform-Admin-owned and read-only from the tenant side —
+// deliberately not exposed through collegeProfileService/
+// routes/collegeProfile.js at all.
+async function getLevel1PositionTitle(client, collegeId) {
+  const result = await client.query(
+    'SELECT level1_position_title FROM colleges WHERE college_id = $1',
+    [collegeId],
+  );
+  return result.rows[0] ? result.rows[0].level1_position_title : null;
+}
+
 async function updateProfile(client, collegeId, fields) {
   const entries = COLUMNS.filter(([key]) => fields[key] !== undefined);
   if (entries.length === 0) {
@@ -56,4 +75,4 @@ async function updateProfile(client, collegeId, fields) {
   return result.rows[0] || null;
 }
 
-module.exports = { getByCollegeId, updateProfile };
+module.exports = { getByCollegeId, updateProfile, getLevel1PositionTitle };
