@@ -38,8 +38,8 @@ async function getByCollegeId(client, collegeId) {
   return result.rows[0] || null;
 }
 
-// Identity-Migration-Plan.md Phase 4 follow-up — the Level 1 position
-// title a Platform Admin chose at createCollege time
+// ADR-021 — the Level 1 position title a Platform Admin chose at
+// createCollege time
 // (platformService.createCollege / platformRepository.createCollege),
 // read back from the tenant side at invite-accept time
 // (authService.provisionLevel1PositionForNewPrincipal). Same

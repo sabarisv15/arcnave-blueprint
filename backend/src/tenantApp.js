@@ -94,9 +94,9 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   // Python/Starlette port).
   app.use(authMiddleware);
   app.use(asyncHandler(tenantMiddleware));
-  // ADR-024/Phase 0: after tenantMiddleware so req.dbClient (the
-  // tenant-scoped transaction) exists to read token_version through —
-  // see middleware/sessionRevocation.js's own docstring for why this
+  // ADR-024: after tenantMiddleware so req.dbClient (the tenant-scoped
+  // transaction) exists to read token_version through — see
+  // middleware/sessionRevocation.js's own docstring for why this
   // ordering is load-bearing, not incidental.
   app.use(asyncHandler(sessionRevocationMiddleware));
 

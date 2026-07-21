@@ -127,8 +127,8 @@ async function login(pool, { username, password }) {
 }
 
 // level1PositionTitle: the Platform Admin's own name for the college's
-// Level 1 position ("Principal", "Director", ...) — Identity-Migration-
-// Plan.md Phase 4 follow-up. Optional; a college created without it
+// Level 1 position ("Principal", "Director", ...) — ADR-021. Optional;
+// a college created without it
 // behaves exactly as every college did before this field existed
 // (positionRepository/authService's own "Principal" default applies at
 // accept time, not here — see provisionLevel1PositionForNewPrincipal's

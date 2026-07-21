@@ -1,17 +1,18 @@
 'use strict';
 
-// Identity-Migration-Plan.md Phase 3 — internal resolver module, only
-// ever required by services/identityService.js (see
-// positionResolver.js's docstring for the full "why internal, why no
-// cross-resolver calls" reasoning — identical here).
+// Internal resolver module, only ever required by
+// services/identityService.js (see positionResolver.js's docstring for
+// the full "why internal, why no cross-resolver calls" reasoning —
+// identical here).
 //
 // Resolves a user's visibility scope (Self/Department/College-wide),
 // matching services/actorContextService.js's existing role-based
 // scope logic (constants/roleScopeLevels.js's ROLE_SCOPE_LEVELS) — but
 // derived from position/department data instead of `users.role`. This
-// is the piece Phase 3's shadow comparison checks against
-// actorContextService's own output for the SAME user, to prove the new
-// model agrees with the old one before Phase 5/6 ever depend on it.
+// output is the reference the new model must continue agreeing with
+// actorContextService's own output on, for the same user, before any
+// future caller (workflowChainService, RBAC/AI tool cutover) depends
+// on it.
 //
 // Mapping (v1 domain model, frozen — Identity-Organization-Model.md):
 // - An active Level 1 position (Principal-equivalent) -> COLLEGE scope,
@@ -39,8 +40,8 @@
 // v1's domain model leaves Level 2 configurable per-college by Level 1
 // (Identity-Organization-Model.md), so there is no single fixed
 // scope-level a Level 2 seat resolves to the way Level 1/3 do; deciding
-// that is real Phase 5/6 policy work, not something this shadow-mode
-// resolver should guess at.
+// that is real future policy work, not something this resolver should
+// guess at.
 
 const classRepository = require('../../repositories/classRepository');
 const facultyAllocationRepository = require('../../repositories/facultyAllocationRepository');
@@ -53,8 +54,8 @@ const HOD_LEVEL = 3;
 // two sources, same de-dup-via-Set, same "tutor class first, then
 // every faculty-allocated class" order. Duplicated rather than
 // imported: actorContextService is the LEGACY comparison target, not a
-// dependency of the new model — importing it here would make the
-// shadow comparison compare identityService against itself.
+// dependency of the new model — importing it here would make any
+// future comparison compare identityService against itself.
 async function resolveAssignedClassIds(client, userId) {
   const classIds = new Set();
   const tutorClass = await classRepository.findByTutorUserId(client, userId);

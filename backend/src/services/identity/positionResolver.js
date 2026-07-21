@@ -1,12 +1,11 @@
 'use strict';
 
-// Identity-Migration-Plan.md Phase 3 — internal resolver module, NOT a
-// separately-callable service (see the plan's "Service architecture
-// decision: identityService, internally split"). Only
-// services/identityService.js may require this file; it must never be
-// required directly by a route, an AI tool, or another resolver
-// module — resolvers never call each other, mirroring CLAUDE.md's
-// "repositories never call other repositories" one layer up.
+// Internal resolver module, NOT a separately-callable service (see
+// ADR-022). Only services/identityService.js may require this file;
+// it must never be required directly by a route, an AI tool, or
+// another resolver module — resolvers never call each other,
+// mirroring CLAUDE.md's "repositories never call other repositories"
+// one layer up.
 //
 // Resolves which position(s) a user actively occupies, in a given
 // college, from position_occupants (ADR-021's append-only occupant
@@ -16,9 +15,9 @@
 const positionRepository = require('../../repositories/positionRepository');
 
 // Returns every position this user currently, actively occupies in
-// this college — normally zero or one (Level 1/Level 3 seats backfilled
-// by Phase 2 each have exactly one active occupant at a time, per the
-// unique-active-per-account index), but the shape is a list because
+// this college — normally zero or one (Level 1/Level 3 seats each have
+// exactly one active occupant at a time, per the unique-active-per-
+// account index), but the shape is a list because
 // nothing in the schema forbids a person from occupying more than one
 // position at once (e.g. a HOD who is also given a Level 2 module-lead
 // seat) — callers that need a single "primary" position should apply

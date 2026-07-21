@@ -131,9 +131,8 @@ async function findActivePositionsForUser(client, { collegeId, userId }) {
 // moduleResolver's core lookup: every module a position currently owns
 // (active assignments only) — position_module_assignments already
 // enforces "one active assignment per college+module" at the DB level
-// (Phase 1's exclusive lock), so a position can own zero or more
-// distinct modules, but no two positions can share one at the same
-// time.
+// (an exclusive lock), so a position can own zero or more distinct
+// modules, but no two positions can share one at the same time.
 async function findActiveModuleAssignmentsForPosition(client, positionId) {
   const result = await client.query(
     `SELECT * FROM position_module_assignments
