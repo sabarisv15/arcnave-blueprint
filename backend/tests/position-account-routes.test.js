@@ -316,6 +316,63 @@ test('Position Account routes (Phase 2 step 7)', async (t) => {
     assert.equal(claims.type, 'position_access');
   });
 
+  // Phase 3 (AI Identity Context Integration), Group (a) step 2 — the
+  // first real exercise of a 'position_access' token against
+  // /api/v1/ai/*. Before this phase, routes/ai.js read req.jwtClaims.role
+  // directly, which doesn't exist on a Position Account token at all
+  // (claims.sub IS the position_account_id — ADR-023) — every AI call
+  // from an Institutional session would have 403'd via
+  // allowedRoles.includes(undefined). Uses an HOD (Level 3) Position
+  // Account specifically because 'hod' is already in get_college_profile's
+  // allowedRoles today — proving Group (a) alone (the identityContext
+  // wiring) without depending on Group (b) (the level2/class_tutor
+  // label gap), which hasn't shipped yet.
+  await t.test('a Position Account (Institutional Identity Context) session can successfully call an AI tool', async () => {
+    const collegeId = await seedCollege('l3ai');
+    const deptResult = await adminPool.query('INSERT INTO departments (college_id, name) VALUES ($1, $2) RETURNING id', [collegeId, 'AI-CSE']);
+    const departmentId = deptResult.rows[0].id;
+    const level2UserId = await seedLevel2Occupant(collegeId);
+    const collegeRow = await adminPool.query('SELECT subdomain FROM colleges WHERE college_id = $1', [collegeId]);
+    const subdomain = collegeRow.rows[0].subdomain;
+
+    lastInvitationToken = null;
+    const inviteResp = await post(
+      baseUrl, `/api/v1/departments/${departmentId}/position-accounts/invite`,
+      { authorization: `Bearer ${await personalToken(collegeId, level2UserId)}`, host: hostFor(subdomain) },
+      { email: 'hod-ai@example.edu' },
+    );
+    assert.equal(inviteResp.status, 201);
+    const acceptResp = await acceptPositionInvite(lastInvitationToken);
+    assert.equal(acceptResp.status, 201);
+
+    const loginResp = await post(
+      baseUrl, '/api/v1/position-accounts/login', { host: hostFor(subdomain) },
+      { official_email: 'hod-ai@example.edu', password: ACCEPT_PASSWORD },
+    );
+    assert.equal(loginResp.status, 200);
+    const claims = security.decodeAccessToken(loginResp.body.access_token);
+    assert.equal(claims.type, 'position_access');
+
+    const toolsResp = await post(
+      baseUrl, '/api/v1/ai/tools/get_college_profile/invoke', { authorization: `Bearer ${loginResp.body.access_token}`, host: hostFor(subdomain) },
+      { params: {} },
+    );
+    assert.equal(toolsResp.status, 200, 'an Institutional Identity Context session with effectiveRole "hod" must be able to call a tool hod is allowed to call');
+    const profile = JSON.parse(toolsResp.body.entries[0].data);
+    assert.equal(profile.college_id, collegeId);
+
+    // The negative side of the same proof: get_college_profile is not
+    // in finance_status_summary's allowedRoles (principal-only) — a
+    // Position Account session must be denied exactly the same way a
+    // Personal session with effectiveRole 'hod' already is, not bypass
+    // the Policy Gate just because it's a different kind of token.
+    const deniedResp = await post(
+      baseUrl, '/api/v1/ai/tools/finance_status_summary/invoke', { authorization: `Bearer ${loginResp.body.access_token}`, host: hostFor(subdomain) },
+      { params: {} },
+    );
+    assert.equal(deniedResp.status, 403);
+  });
+
   await t.test('a plain staff actor (no Level 2 position) cannot invite Level 3', async () => {
     const collegeId = await seedCollege('l3b');
     const deptResult = await adminPool.query('INSERT INTO departments (college_id, name) VALUES ($1, $2) RETURNING id', [collegeId, 'ECE']);

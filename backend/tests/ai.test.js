@@ -19,6 +19,7 @@ const createApp = require('../src/app');
 const security = require('../src/security');
 const aiPromptSafetyLayer = require('../src/services/aiPromptSafetyLayer');
 const config = require('../src/config');
+const { seedPrincipalPosition, seedHodPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PASSWORD = 'AiTestPass123!';
@@ -114,6 +115,25 @@ async function seedTenant(adminPool, label) {
     [college.collegeId, userIds.principaluser],
   );
 
+  // Phase 3 (AI Identity Context Integration): routes/ai.js now reads
+  // req.capabilities.effectiveRole (identityService.resolveCapabilities),
+  // never users.role directly — a bare users.role='principal'/'hod' row
+  // with no active Position resolves as an ordinary, no-position staff
+  // member (effectiveRole 'staff'), same as every other
+  // resolveCapabilities-consuming route already requires. Real
+  // Position/Account/Occupant rows, same fixture helper every other
+  // suite in this repo uses, matching what
+  // authService.acceptInvitation/staffService.provisionHodAccount
+  // actually provision in the real app.
+  const department = await adminPool.query(
+    'INSERT INTO departments (college_id, name) VALUES ($1, $2) RETURNING id',
+    [college.collegeId, `AI Test Dept ${college.collegeId}`],
+  );
+  await seedPrincipalPosition(adminPool, { collegeId: college.collegeId, userId: userIds.principaluser });
+  await seedHodPosition(adminPool, {
+    collegeId: college.collegeId, userId: userIds.hoduser, departmentId: department.rows[0].id,
+  });
+
   return { ...college, userIds };
 }
 
@@ -123,9 +143,11 @@ async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM notifications WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM approval_history WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM workflow_requests WHERE college_id = $1', [college.collegeId]);
+  await cleanupPositionRows(adminPool, college.collegeId);
   await adminPool.query('DELETE FROM staff WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM departments WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM colleges WHERE college_id = $1', [college.collegeId]);
 }
 

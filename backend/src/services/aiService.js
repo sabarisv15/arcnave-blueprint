@@ -107,8 +107,8 @@ function listTools() {
 // Gate has already allowed the call — a rejection throws out of
 // aiToolRegistry.invokeTool before any handler, and before this
 // function's audit-log call, ever runs.
-async function invokeTool(client, toolName, params, { actor } = {}) {
-  const result = await aiToolRegistry.invokeTool(toolName, { client, actor, params });
+async function invokeTool(client, toolName, params, { identityContext } = {}) {
+  const result = await aiToolRegistry.invokeTool(toolName, { client, identityContext, params });
   const tool = aiToolRegistry.getTool(toolName);
 
   const contextEntry = aiContextBuilder.buildToolContext({
@@ -119,8 +119,8 @@ async function invokeTool(client, toolName, params, { actor } = {}) {
   const sanitizedContext = aiPromptSafetyLayer.buildSanitizedContext([contextEntry]);
 
   await auditLogRepository.createAuditLogEntry(client, {
-    collegeId: actor.collegeId,
-    userId: actor.userId,
+    collegeId: identityContext.collegeId,
+    userId: identityContext.userId,
     action: 'ai_tool_invoked',
     entity: 'ai_tools',
     entityId: null,
@@ -128,7 +128,7 @@ async function invokeTool(client, toolName, params, { actor } = {}) {
   });
 
   const presentation = aiExperienceLayer.buildPresentation({
-    sanitizedContext, toolUsed: toolName, tool, actorRole: actor.role,
+    sanitizedContext, toolUsed: toolName, tool, actorRole: identityContext.role,
   });
   return { ...sanitizedContext, presentation };
 }
@@ -140,18 +140,18 @@ async function invokeTool(client, toolName, params, { actor } = {}) {
 // (unconfigured provider, a network error) must not retroactively make
 // the already-completed, already-audited tool invocation look like it
 // never happened.
-async function askAboutTool(client, toolName, params, question, { actor } = {}) {
+async function askAboutTool(client, toolName, params, question, { identityContext } = {}) {
   if (!question || typeof question !== 'string') {
     throw new AiServiceValidationError('question is required and must be a non-empty string');
   }
 
-  const sanitizedContext = await invokeTool(client, toolName, params, { actor });
+  const sanitizedContext = await invokeTool(client, toolName, params, { identityContext });
   const { systemPrompt, userPrompt } = aiPromptSafetyLayer.renderForLlm(sanitizedContext, question);
-  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, actor.collegeId);
+  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, identityContext.collegeId);
   const answer = await adapter.complete(aiConfig, { systemPrompt, userPrompt });
 
   const presentation = aiExperienceLayer.buildPresentation({
-    sanitizedContext, question, answer, toolUsed: toolName, tool: aiToolRegistry.getTool(toolName), actorRole: actor.role,
+    sanitizedContext, question, answer, toolUsed: toolName, tool: aiToolRegistry.getTool(toolName), actorRole: identityContext.role,
   });
   return {
     ...sanitizedContext, question, answer, presentation,
@@ -189,7 +189,7 @@ async function summarizeToolResult(sanitizedContext, question, tool, adapter, ai
 // to special-case (AI-Governance.md §3: tool invocation is only ever
 // triggered by the authenticated user's own request; the LLM's
 // suggestion carries no authority of its own).
-async function askAgent(client, question, { actor } = {}) {
+async function askAgent(client, question, { identityContext } = {}) {
   if (!question || typeof question !== 'string') {
     throw new AiServiceValidationError('question is required and must be a non-empty string');
   }
@@ -203,7 +203,7 @@ async function askAgent(client, question, { actor } = {}) {
   // call the frontend makes only after a user click — a real gate, not
   // just registry metadata a handler could ignore.
   const tools = aiToolRegistry.listTools({ excludeHumanOnly: true });
-  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, actor.collegeId);
+  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, identityContext.collegeId);
   const decision = await adapter.completeWithTools(aiConfig, {
     systemPrompt: AGENT_SYSTEM_PROMPT,
     userPrompt: question,
@@ -211,11 +211,11 @@ async function askAgent(client, question, { actor } = {}) {
   });
 
   if (decision.type === 'tool_call') {
-    const sanitizedContext = await invokeTool(client, decision.toolName, decision.arguments || {}, { actor });
+    const sanitizedContext = await invokeTool(client, decision.toolName, decision.arguments || {}, { identityContext });
     const tool = aiToolRegistry.getTool(decision.toolName);
     const answer = await summarizeToolResult(sanitizedContext, question, tool, adapter, aiConfig);
     const presentation = aiExperienceLayer.buildPresentation({
-      sanitizedContext, question, answer, toolUsed: decision.toolName, tool, actorRole: actor.role,
+      sanitizedContext, question, answer, toolUsed: decision.toolName, tool, actorRole: identityContext.role,
     });
     return {
       ...sanitizedContext, question, toolUsed: decision.toolName, answer, presentation,
@@ -232,7 +232,7 @@ async function askAgent(client, question, { actor } = {}) {
   // on response shape to know whether a tool ran.
   const sanitizedContext = aiPromptSafetyLayer.buildSanitizedContext([]);
   const presentation = aiExperienceLayer.buildPresentation({
-    sanitizedContext, question, answer: decision.text, toolUsed: null, tool: null, actorRole: actor.role,
+    sanitizedContext, question, answer: decision.text, toolUsed: null, tool: null, actorRole: identityContext.role,
   });
   return {
     ...sanitizedContext, question, toolUsed: null, answer: decision.text, presentation,

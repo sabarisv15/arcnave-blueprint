@@ -178,15 +178,15 @@ function getTool(name) {
 // requirement — the whole reason a manifest needs to travel with a
 // request at all — only applies to L3; an L1/L2 call has no approval
 // step for a human to inspect this against.
-function buildActionManifest(tool, actor, params) {
+function buildActionManifest(tool, identityContext, params) {
   return {
     toolName: tool.name,
     actionLevel: tool.level,
     dataClassification: tool.dataClassification,
     riskLevel: tool.riskLevel,
-    actorUserId: actor.userId,
-    actorRole: actor.role,
-    collegeId: actor.collegeId,
+    actorUserId: identityContext.userId,
+    actorRole: identityContext.role,
+    collegeId: identityContext.collegeId,
     params: params || {},
     requestedAt: new Date().toISOString(),
     manifestVersion: 1,
@@ -231,7 +231,7 @@ function listTools({ excludeHumanOnly = false } = {}) {
 // generic "denied" would hide which of four unrelated invariants
 // actually failed, both from a caller and from test coverage (this
 // slice's own verification brief asks for exactly this distinction).
-function assertPolicyAllows(tool, actor, params) {
+function assertPolicyAllows(tool, identityContext, params) {
   if (!SUPPORTED_LEVELS.includes(tool.level)) {
     throw new AiToolLevelNotSupportedError(
       `tool ${JSON.stringify(tool.name)} is level ${JSON.stringify(tool.level)}, which is not a supported `
@@ -239,32 +239,32 @@ function assertPolicyAllows(tool, actor, params) {
     );
   }
 
-  if (params && params.collegeId !== undefined && params.collegeId !== actor.collegeId) {
+  if (params && params.collegeId !== undefined && params.collegeId !== identityContext.collegeId) {
     throw new AiToolTenantMismatchError(
-      `actor's tenant ${JSON.stringify(actor.collegeId)} does not match requested collegeId ${JSON.stringify(params.collegeId)}`,
+      `caller's tenant ${JSON.stringify(identityContext.collegeId)} does not match requested collegeId ${JSON.stringify(params.collegeId)}`,
     );
   }
 
   const allowedRoles = tool.allowedRoles || [];
-  if (!allowedRoles.includes(actor.role)) {
+  if (!allowedRoles.includes(identityContext.role)) {
     throw new AiToolRoleNotPermittedError(
-      `role ${JSON.stringify(actor.role)} is not permitted to invoke tool ${JSON.stringify(tool.name)}`,
+      `role ${JSON.stringify(identityContext.role)} is not permitted to invoke tool ${JSON.stringify(tool.name)}`,
     );
   }
 
-  const permittedClassifications = aiClassificationAccess.permittedClassifications(actor.role);
+  const permittedClassifications = aiClassificationAccess.permittedClassifications(identityContext.role);
   if (!permittedClassifications.includes(tool.dataClassification)) {
     throw new AiToolDataClassificationError(
-      `role ${JSON.stringify(actor.role)} is not permitted to access `
+      `role ${JSON.stringify(identityContext.role)} is not permitted to access `
       + `${JSON.stringify(tool.dataClassification)} data (tool ${JSON.stringify(tool.name)})`,
     );
   }
 
   if (tool.departmentScoped) {
     const departmentId = params && params.departmentId;
-    if (!departmentId || departmentId !== actor.departmentId) {
+    if (!departmentId || departmentId !== identityContext.departmentId) {
       throw new AiToolDepartmentScopeError(
-        `actor's department ${JSON.stringify(actor.departmentId)} does not match requested `
+        `caller's department ${JSON.stringify(identityContext.departmentId)} does not match requested `
         + `departmentId ${JSON.stringify(departmentId)} (tool ${JSON.stringify(tool.name)})`,
       );
     }
@@ -399,17 +399,28 @@ function assertL3ResultNotBypassed(tool, result) {
 // "getTool, then call the handler yourself" — every invocation must
 // pass through assertPolicyAllows, so there is exactly one path into
 // any handler, never a bypass.
-async function invokeTool(name, { client, actor, params } = {}) {
+// Phase 3 (AI Identity Context Integration): identityContext is the
+// one normalized shape routes/ai.js's buildAiIdentityContext produces
+// — regardless of whether the caller is logged in via Personal
+// Identity Context (resolveCapabilities) or Institutional Identity
+// Context (resolveCapabilitiesForPosition, ADR-023), this function and
+// everything it calls reads it the same way, never branching on which
+// resolver produced it. Every existing L1/L2/L3 handler's own local
+// parameter name for the value passed positionally here is still
+// `actor` (unchanged, cosmetic only, ~40 call sites) — renaming this
+// module's own boundary variable does not require renaming every
+// handler's local parameter name too.
+async function invokeTool(name, { client, identityContext, params } = {}) {
   const tool = getTool(name);
   if (tool === null) {
     throw new AiToolNotFoundError(`no AI tool named ${JSON.stringify(name)} is registered`);
   }
   try {
-    assertPolicyAllows(tool, actor, params || {});
+    assertPolicyAllows(tool, identityContext, params || {});
   } catch (err) {
     await auditLogRepository.createAuditLogEntry(client, {
-      collegeId: actor.collegeId,
-      userId: actor.userId,
+      collegeId: identityContext.collegeId,
+      userId: identityContext.userId,
       action: 'ai_tool_denied',
       entity: 'ai_tools',
       entityId: null,
@@ -433,8 +444,8 @@ async function invokeTool(name, { client, actor, params } = {}) {
   // doesn't declare, so this is not a breaking change to any of them;
   // only a handler that explicitly adds a 4th parameter (see
   // request_notification_send below) actually receives and forwards it.
-  const manifest = tool.level === 'L3' ? buildActionManifest(tool, actor, safeParams) : undefined;
-  const result = await tool.handler(client, safeParams, actor, manifest);
+  const manifest = tool.level === 'L3' ? buildActionManifest(tool, identityContext, safeParams) : undefined;
+  const result = await tool.handler(client, safeParams, identityContext, manifest);
 
   // The runtime backstop — see AiToolL3BypassError's own comment.
   // Only meaningful for L3 (submission-only) tools; L1/L2 handlers are
@@ -445,8 +456,8 @@ async function invokeTool(name, { client, actor, params } = {}) {
       assertL3ResultNotBypassed(tool, result);
     } catch (err) {
       await auditLogRepository.createAuditLogEntry(client, {
-        collegeId: actor.collegeId,
-        userId: actor.userId,
+        collegeId: identityContext.collegeId,
+        userId: identityContext.userId,
         action: 'ai_tool_denied',
         entity: 'ai_tools',
         entityId: null,

@@ -98,7 +98,7 @@ test('Action Manifest: invokeTool builds and passes a real manifest to an L3 han
     dataClassification: 'Restricted',
     description: 'test fixture',
     allowedRoles: ['principal'],
-    handler: async (client, params, actor, manifest) => {
+    handler: async (client, params, identityContext, manifest) => {
       capturedL3Manifest = manifest;
       return { ok: 'l3', workflow_request_id: 'wf-manifest-1', status: 'Pending' };
     },
@@ -110,16 +110,16 @@ test('Action Manifest: invokeTool builds and passes a real manifest to an L3 han
     dataClassification: 'Internal',
     description: 'test fixture',
     allowedRoles: ['principal'],
-    handler: async (client, params, actor, manifest) => {
+    handler: async (client, params, identityContext, manifest) => {
       capturedL2Manifest = manifest;
       return { ok: 'l2' };
     },
   });
 
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
 
-  await aiToolRegistry.invokeTool('test_only_l3_manifest_tool', { client, actor, params: { foo: 'bar' } });
+  await aiToolRegistry.invokeTool('test_only_l3_manifest_tool', { client, identityContext, params: { foo: 'bar' } });
   assert.equal(capturedL3Manifest.toolName, 'test_only_l3_manifest_tool');
   assert.equal(capturedL3Manifest.actionLevel, 'L3');
   assert.equal(capturedL3Manifest.dataClassification, 'Restricted');
@@ -131,7 +131,7 @@ test('Action Manifest: invokeTool builds and passes a real manifest to an L3 han
   assert.ok(capturedL3Manifest.requestedAt);
   assert.equal(capturedL3Manifest.manifestVersion, 1);
 
-  await aiToolRegistry.invokeTool('test_only_l2_manifest_tool', { client, actor, params: {} });
+  await aiToolRegistry.invokeTool('test_only_l2_manifest_tool', { client, identityContext, params: {} });
   assert.equal(capturedL2Manifest, undefined, 'an L2 handler must never receive an Action Manifest');
 });
 
@@ -139,7 +139,7 @@ test('aiToolRegistry: invoking an unknown tool throws AiToolNotFoundError and wr
   const client = fakeClient();
   await assert.rejects(
     () => aiToolRegistry.invokeTool('does_not_exist', {
-      client, actor: { userId: 'u1', role: 'principal', collegeId: 'c1' }, params: {},
+      client, identityContext: { userId: 'u1', role: 'principal', collegeId: 'c1' }, params: {},
     }),
     aiToolRegistry.AiToolNotFoundError,
   );
@@ -172,9 +172,9 @@ test('aiToolRegistry: a required param missing entirely throws AiToolInvalidPara
   });
 
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   await assert.rejects(
-    () => aiToolRegistry.invokeTool('test_only_required_array_tool', { client, actor, params: {} }),
+    () => aiToolRegistry.invokeTool('test_only_required_array_tool', { client, identityContext, params: {} }),
     aiToolRegistry.AiToolInvalidParamsError,
   );
   assert.equal(handler.mock.callCount(), 0, 'the handler must never run when a required param is missing');
@@ -200,10 +200,10 @@ test('aiToolRegistry: a required param present but the wrong type (not an array)
   });
 
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   await assert.rejects(
     () => aiToolRegistry.invokeTool('test_only_required_array_tool_wrong_type', {
-      client, actor, params: { absent_roll_numbers: '35' },
+      client, identityContext, params: { absent_roll_numbers: '35' },
     }),
     aiToolRegistry.AiToolInvalidParamsError,
   );
@@ -227,9 +227,9 @@ test('aiToolRegistry: an optional string param sent as "" or a null-ish placehol
   });
 
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   await aiToolRegistry.invokeTool('test_only_optional_date_tool', {
-    client, actor, params: { start_date: '', end_date: 'None' },
+    client, identityContext, params: { start_date: '', end_date: 'None' },
   });
   const [, receivedParams] = handler.mock.calls[0].arguments;
   assert.deepEqual(receivedParams, {}, 'both placeholder values must be stripped, not forwarded as literal strings');
@@ -253,9 +253,9 @@ test('aiToolRegistry: a required param left as an empty string is still rejected
   });
 
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   await assert.rejects(
-    () => aiToolRegistry.invokeTool('test_only_required_string_tool', { client, actor, params: { query: '' } }),
+    () => aiToolRegistry.invokeTool('test_only_required_string_tool', { client, identityContext, params: { query: '' } }),
     aiToolRegistry.AiToolInvalidParamsError,
   );
   assert.equal(handler.mock.callCount(), 0);
@@ -288,9 +288,9 @@ test('aiToolRegistry: a `format: "uuid"` param sent as a non-UUID placeholder th
   });
 
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   await assert.rejects(
-    () => aiToolRegistry.invokeTool('test_only_uuid_format_tool', { client, actor, params: { target_id: '12345' } }),
+    () => aiToolRegistry.invokeTool('test_only_uuid_format_tool', { client, identityContext, params: { target_id: '12345' } }),
     aiToolRegistry.AiToolInvalidParamsError,
   );
   assert.equal(handler.mock.callCount(), 0);
@@ -314,19 +314,19 @@ test('aiToolRegistry: a `format: "uuid"` param sent as a real UUID passes throug
   });
 
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   const realUuid = '11111111-1111-4111-8111-111111111111';
-  await aiToolRegistry.invokeTool('test_only_uuid_format_tool_valid', { client, actor, params: { target_id: realUuid } });
+  await aiToolRegistry.invokeTool('test_only_uuid_format_tool_valid', { client, identityContext, params: { target_id: realUuid } });
   const [, receivedParams] = handler.mock.calls[0].arguments;
   assert.equal(receivedParams.target_id, realUuid);
 });
 
 test('Policy Gate: rejects wrong tenant distinctly (AiToolTenantMismatchError) and audit-logs the denial with reason "tenant"', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
   await assert.rejects(
     () => aiToolRegistry.invokeTool('get_college_profile', {
-      client, actor, params: { collegeId: 'college-b' },
+      client, identityContext, params: { collegeId: 'college-b' },
     }),
     aiToolRegistry.AiToolTenantMismatchError,
   );
@@ -342,9 +342,9 @@ test('Policy Gate: rejects wrong tenant distinctly (AiToolTenantMismatchError) a
 
 test('Policy Gate: rejects wrong role distinctly (AiToolRoleNotPermittedError) and audit-logs the denial with reason "role"', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   await assert.rejects(
-    () => aiToolRegistry.invokeTool('get_college_profile', { client, actor, params: {} }),
+    () => aiToolRegistry.invokeTool('get_college_profile', { client, identityContext, params: {} }),
     aiToolRegistry.AiToolRoleNotPermittedError,
   );
 
@@ -376,10 +376,10 @@ test('Policy Gate: L1/L2/L3 are all supported execution paths now — a real dum
   });
 
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
-  assert.deepEqual(await aiToolRegistry.invokeTool('test_only_l2_tool', { client, actor, params: {} }), { ok: 'l2' });
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  assert.deepEqual(await aiToolRegistry.invokeTool('test_only_l2_tool', { client, identityContext, params: {} }), { ok: 'l2' });
   assert.deepEqual(
-    await aiToolRegistry.invokeTool('test_only_l3_tool', { client, actor, params: {} }),
+    await aiToolRegistry.invokeTool('test_only_l3_tool', { client, identityContext, params: {} }),
     { ok: 'l3', workflow_request_id: 'wf-test-1', status: 'Draft' },
   );
   assert.deepEqual(deniedAuditRows(client), []);
@@ -396,9 +396,9 @@ test('Policy Gate: rejects a tool at an unsupported/unknown level distinctly (Ai
   });
 
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
   await assert.rejects(
-    () => aiToolRegistry.invokeTool('test_only_l4_tool', { client, actor, params: {} }),
+    () => aiToolRegistry.invokeTool('test_only_l4_tool', { client, identityContext, params: {} }),
     aiToolRegistry.AiToolLevelNotSupportedError,
   );
 
@@ -425,11 +425,11 @@ test('Policy Gate: the L3 runtime backstop catches a misbehaving L3 handler that
     handler: async () => ({ workflow_request_id: 'wf-bad-1', status: 'Dispatched' }),
   });
 
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
 
   const client1 = fakeClient();
   await assert.rejects(
-    () => aiToolRegistry.invokeTool('test_only_l3_tool_missing_workflow_request_id', { client: client1, actor, params: {} }),
+    () => aiToolRegistry.invokeTool('test_only_l3_tool_missing_workflow_request_id', { client: client1, identityContext, params: {} }),
     aiToolRegistry.AiToolL3BypassError,
   );
   const denied1 = deniedAuditRows(client1);
@@ -439,7 +439,7 @@ test('Policy Gate: the L3 runtime backstop catches a misbehaving L3 handler that
 
   const client2 = fakeClient();
   await assert.rejects(
-    () => aiToolRegistry.invokeTool('test_only_l3_tool_dispatched_status', { client: client2, actor, params: {} }),
+    () => aiToolRegistry.invokeTool('test_only_l3_tool_dispatched_status', { client: client2, identityContext, params: {} }),
     aiToolRegistry.AiToolL3BypassError,
   );
   const denied2 = deniedAuditRows(client2);
@@ -458,8 +458,8 @@ test('Policy Gate: L1/L2 handlers are never subject to the L3 bypass backstop �
   });
 
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
-  const result = await aiToolRegistry.invokeTool('test_only_l1_tool_no_workflow_request_id', { client, actor, params: {} });
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const result = await aiToolRegistry.invokeTool('test_only_l1_tool_no_workflow_request_id', { client, identityContext, params: {} });
   assert.deepEqual(result, { some: 'plain read result' });
   assert.deepEqual(deniedAuditRows(client), []);
 });
@@ -475,9 +475,9 @@ test('Policy Gate: rejects wrong data classification distinctly (AiToolDataClass
   });
 
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   await assert.rejects(
-    () => aiToolRegistry.invokeTool('test_only_restricted_tool', { client, actor, params: {} }),
+    () => aiToolRegistry.invokeTool('test_only_restricted_tool', { client, identityContext, params: {} }),
     (err) => err instanceof aiToolRegistry.AiToolDataClassificationError
       && !(err instanceof aiToolRegistry.AiToolRoleNotPermittedError),
   );
@@ -498,12 +498,12 @@ test('Policy Gate: rejects department-scope mismatch distinctly (AiToolDepartmen
     handler: async () => ({ ok: true }),
   });
 
-  const actor = { userId: 'u1', role: 'hod', collegeId: 'college-a', departmentId: 'dept-1' };
+  const identityContext = { userId: 'u1', role: 'hod', collegeId: 'college-a', departmentId: 'dept-1' };
 
   const rejectingClient = fakeClient();
   await assert.rejects(
     () => aiToolRegistry.invokeTool('test_only_department_tool', {
-      client: rejectingClient, actor, params: { departmentId: 'dept-2' },
+      client: rejectingClient, identityContext, params: { departmentId: 'dept-2' },
     }),
     aiToolRegistry.AiToolDepartmentScopeError,
   );
@@ -513,7 +513,7 @@ test('Policy Gate: rejects department-scope mismatch distinctly (AiToolDepartmen
 
   const passingClient = fakeClient();
   const passing = await aiToolRegistry.invokeTool('test_only_department_tool', {
-    client: passingClient, actor, params: { departmentId: 'dept-1' },
+    client: passingClient, identityContext, params: { departmentId: 'dept-1' },
   });
   assert.deepEqual(passing, { ok: true });
   assert.deepEqual(deniedAuditRows(passingClient), []);
@@ -556,9 +556,9 @@ test('Context Builder + Prompt Safety Layer: hostile tool content is wrapped as 
 
 test('aiService.invokeTool: runs the real L1 pipeline end to end and writes exactly one ai_tool_invoked audit_log row', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
 
-  const context = await aiService.invokeTool(client, 'get_college_profile', {}, { actor });
+  const context = await aiService.invokeTool(client, 'get_college_profile', {}, { identityContext });
 
   assert.equal(context.boundaryStart, aiPromptSafetyLayer.BOUNDARY_START);
   assert.equal(context.entries.length, 1);
@@ -667,9 +667,9 @@ test('nim adapter.complete: a non-ok response throws LlmRequestError, not a sile
 
 test('aiService.askAboutTool: an empty/missing question throws AiServiceValidationError before any Policy Gate check or LLM call', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
   await assert.rejects(
-    () => aiService.askAboutTool(client, 'get_college_profile', {}, '', { actor }),
+    () => aiService.askAboutTool(client, 'get_college_profile', {}, '', { identityContext }),
     aiService.AiServiceValidationError,
   );
   assert.deepEqual(client.queries, []);
@@ -677,14 +677,14 @@ test('aiService.askAboutTool: an empty/missing question throws AiServiceValidati
 
 test('aiService.askAboutTool: runs the full pipeline, calls the (mocked) LLM, and returns {..., question, answer}', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
 
   await withNimConfig('test-nim-key', async () => {
     await withMockFetch(async () => ({
       ok: true,
       json: async () => ({ choices: [{ message: { content: 'the mocked LLM answer' } }] }),
     }), async () => {
-      const result = await aiService.askAboutTool(client, 'get_college_profile', {}, 'What college is this?', { actor });
+      const result = await aiService.askAboutTool(client, 'get_college_profile', {}, 'What college is this?', { identityContext });
       assert.equal(result.question, 'What college is this?');
       assert.equal(result.answer, 'the mocked LLM answer');
       assert.equal(result.entries[0].toolName, 'get_college_profile');
@@ -697,11 +697,11 @@ test('aiService.askAboutTool: runs the full pipeline, calls the (mocked) LLM, an
 
 test('aiService.askAboutTool: an unconfigured LLM provider throws LlmNotConfiguredError, but the tool invocation still completed and is still audit-logged', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
 
   await withNimConfig(null, async () => {
     await assert.rejects(
-      () => aiService.askAboutTool(client, 'get_college_profile', {}, 'What college is this?', { actor }),
+      () => aiService.askAboutTool(client, 'get_college_profile', {}, 'What college is this?', { identityContext }),
       nimAdapter.LlmNotConfiguredError,
     );
   });
@@ -747,11 +747,11 @@ function sequentialMockFetch(responses) {
 
 test('aiService.askAgent: an empty/missing question throws AiServiceValidationError before any LLM call', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
   let fetchCalled = false;
   await withMockFetch(async () => { fetchCalled = true; }, async () => {
     await assert.rejects(
-      () => aiService.askAgent(client, '', { actor }),
+      () => aiService.askAgent(client, '', { identityContext }),
       aiService.AiServiceValidationError,
     );
   });
@@ -761,10 +761,10 @@ test('aiService.askAgent: an empty/missing question throws AiServiceValidationEr
 
 test('aiService.askAgent: unconfigured LLM provider throws LlmNotConfiguredError, no tool ever runs', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
   await withNimConfig(null, async () => {
     await assert.rejects(
-      () => aiService.askAgent(client, 'What college is this?', { actor }),
+      () => aiService.askAgent(client, 'What college is this?', { identityContext }),
       nimAdapter.LlmNotConfiguredError,
     );
   });
@@ -777,14 +777,14 @@ test('aiService.askAgent: unconfigured LLM provider throws LlmNotConfiguredError
 
 test('aiService.askAgent: the LLM picks the registered tool -> the same Policy Gate re-validates it -> the tool actually runs', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
 
   await withNimConfig('test-nim-key', async () => {
     await withMockFetch(sequentialMockFetch([
       mockToolCallResponse('get_college_profile', {}),
       mockAnswerResponse('This is ARCNAVE Demo College.'),
     ]), async () => {
-      const result = await aiService.askAgent(client, 'What college is this?', { actor });
+      const result = await aiService.askAgent(client, 'What college is this?', { identityContext });
       assert.equal(result.toolUsed, 'get_college_profile');
       assert.equal(result.entries[0].toolName, 'get_college_profile');
       assert.equal(result.entries[0].dataClassification, 'Internal');
@@ -801,12 +801,12 @@ test('aiService.askAgent: the LLM picks the registered tool -> the same Policy G
 test('aiService.askAgent: the LLM picks a role it is NOT permitted to invoke -> the Policy Gate rejects it exactly as it would any other caller (re-validation, not blind trust)', async () => {
   const client = fakeClient();
   // 'staff' is not in get_college_profile's allowedRoles.
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
 
   await withNimConfig('test-nim-key', async () => {
     await withMockFetch(async () => mockToolCallResponse('get_college_profile', {}), async () => {
       await assert.rejects(
-        () => aiService.askAgent(client, 'What college is this?', { actor }),
+        () => aiService.askAgent(client, 'What college is this?', { identityContext }),
         aiToolRegistry.AiToolRoleNotPermittedError,
       );
     });
@@ -819,12 +819,12 @@ test('aiService.askAgent: the LLM picks a role it is NOT permitted to invoke -> 
 
 test('aiService.askAgent: the LLM picks an unknown/hallucinated tool name -> a clean AiToolNotFoundError, not a crash', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
 
   await withNimConfig('test-nim-key', async () => {
     await withMockFetch(async () => mockToolCallResponse('delete_all_students', {}), async () => {
       await assert.rejects(
-        () => aiService.askAgent(client, 'Delete every student record', { actor }),
+        () => aiService.askAgent(client, 'Delete every student record', { identityContext }),
         aiToolRegistry.AiToolNotFoundError,
       );
     });
@@ -842,7 +842,7 @@ test('aiService.askAgent: the LLM picks an unknown/hallucinated tool name -> a c
 test('aiService.askAgent: the tool-selection call\'s system prompt instructs the model to ask for clarification '
   + 'rather than guess a tool on an ambiguous question', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
   let capturedBody;
 
   await withNimConfig('test-nim-key', async () => {
@@ -850,7 +850,7 @@ test('aiService.askAgent: the tool-selection call\'s system prompt instructs the
       capturedBody = JSON.parse(options.body);
       return mockAnswerResponse('Could you clarify what you need help with?');
     }, async () => {
-      await aiService.askAgent(client, 'help me with the thing', { actor });
+      await aiService.askAgent(client, 'help me with the thing', { identityContext });
     });
   });
 
@@ -862,7 +862,7 @@ test('aiService.askAgent: the tool-selection call\'s system prompt instructs the
 test('aiService.askAgent: a successful tool_call\'s follow-up answer call is instructed to explain any scope/action '
   + 'substitution, and includes the tool\'s own description for context', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
   const capturedBodies = [];
 
   await withNimConfig('test-nim-key', async () => {
@@ -872,7 +872,7 @@ test('aiService.askAgent: a successful tool_call\'s follow-up answer call is ins
         ? mockToolCallResponse('get_college_profile', {})
         : mockAnswerResponse('This is the college profile.');
     }, async () => {
-      await aiService.askAgent(client, 'What college is this?', { actor });
+      await aiService.askAgent(client, 'What college is this?', { identityContext });
     });
   });
 
@@ -884,11 +884,11 @@ test('aiService.askAgent: a successful tool_call\'s follow-up answer call is ins
 
 test('aiService.askAgent: the LLM picks no tool -> returns its direct answer, still wrapped in the Prompt Safety Layer\'s envelope', async () => {
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
 
   await withNimConfig('test-nim-key', async () => {
     await withMockFetch(async () => mockAnswerResponse('Campus is open 9am-5pm.'), async () => {
-      const result = await aiService.askAgent(client, 'What are the campus hours?', { actor });
+      const result = await aiService.askAgent(client, 'What are the campus hours?', { identityContext });
       assert.equal(result.toolUsed, null);
       assert.equal(result.answer, 'Campus is open 9am-5pm.');
       assert.equal(result.boundaryStart, aiPromptSafetyLayer.BOUNDARY_START);
@@ -906,7 +906,7 @@ test('aiService.askAgent: the LLM picks no tool -> returns its direct answer, st
 // --- draft_notification (L2) / request_notification_send (L3) ---
 // notificationService itself is unit-tested against a live-shaped fake
 // client in notification-service.test.js; these tests prove the AI
-// tool layer wraps it correctly (right actor.collegeId/actorUserId,
+// tool layer wraps it correctly (right identityContext.collegeId/actorUserId,
 // origin: 'ai', Policy Gate re-validation) — repository/workflowService/
 // staffService mocked the same way notification-service.test.js mocks
 // them, not re-proving notificationService's own internals.
@@ -929,10 +929,10 @@ test('aiToolRegistry: listTools includes draft_notification (L2/Confidential) an
 
 test('draft_notification: staff (not in allowedRoles) is rejected by the Policy Gate before notificationRepository is ever touched', async () => {
   const createMock = mock.method(notificationRepository, 'create');
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   await assert.rejects(
     () => aiToolRegistry.invokeTool('draft_notification', {
-      client: fakeClient(), actor, params: { channel: 'email', toAddress: 'a@b.com', body: 'hi' },
+      client: fakeClient(), identityContext, params: { channel: 'email', toAddress: 'a@b.com', body: 'hi' },
     }),
     aiToolRegistry.AiToolRoleNotPermittedError,
   );
@@ -957,9 +957,9 @@ test('draft_notification: a role permitted to invoke the tool but not permitted 
     handler: async () => ({ ok: true }),
   });
 
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   await assert.rejects(
-    () => aiToolRegistry.invokeTool('test_only_confidential_tool_for_staff', { client: fakeClient(), actor, params: {} }),
+    () => aiToolRegistry.invokeTool('test_only_confidential_tool_for_staff', { client: fakeClient(), identityContext, params: {} }),
     (err) => err instanceof aiToolRegistry.AiToolDataClassificationError
       && !(err instanceof aiToolRegistry.AiToolRoleNotPermittedError),
   );
@@ -968,10 +968,10 @@ test('draft_notification: a role permitted to invoke the tool but not permitted 
 test('draft_notification: a permitted role runs the real notificationService.draftNotification, origin forced to "ai", audit-logged as ai_tool_invoked', async () => {
   const createMock = mock.method(notificationRepository, 'create', async (client, fields) => ({ id: 'notif-1', ...fields }));
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
 
   const result = await aiToolRegistry.invokeTool('draft_notification', {
-    client, actor, params: { channel: 'email', toAddress: 'parent@example.com', subject: 'Reminder', body: 'Please pay the fee.' },
+    client, identityContext, params: { channel: 'email', toAddress: 'parent@example.com', subject: 'Reminder', body: 'Please pay the fee.' },
   });
 
   assert.equal(result.id, 'notif-1');
@@ -985,10 +985,10 @@ test('draft_notification: a permitted role runs the real notificationService.dra
 
 test('request_notification_send: staff (not in allowedRoles) is rejected by the Policy Gate before workflowService is ever touched', async () => {
   const submitMock = mock.method(workflowService, 'submitRequest');
-  const actor = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'staff', collegeId: 'college-a' };
   await assert.rejects(
     () => aiToolRegistry.invokeTool('request_notification_send', {
-      client: fakeClient(), actor, params: { notificationId: '11111111-1111-4111-8111-111111111111' },
+      client: fakeClient(), identityContext, params: { notificationId: '11111111-1111-4111-8111-111111111111' },
     }),
     aiToolRegistry.AiToolRoleNotPermittedError,
   );
@@ -1011,10 +1011,10 @@ test('request_notification_send: a permitted role runs the real notificationServ
   const deliveryMock = mock.method(notificationRepository, 'recordDeliveryAttempt');
 
   const client = fakeClient();
-  const actor = { userId: 'requester-1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'requester-1', role: 'principal', collegeId: 'college-a' };
 
   const result = await aiToolRegistry.invokeTool('request_notification_send', {
-    client, actor, params: { notificationId: '11111111-1111-4111-8111-111111111111' },
+    client, identityContext, params: { notificationId: '11111111-1111-4111-8111-111111111111' },
   });
 
   assert.equal(result.workflow_request_id, 'wf-1');
@@ -1038,7 +1038,7 @@ test('request_notification_send: a permitted role runs the real notificationServ
 test('aiService.askAgent: the LLM picks draft_notification -> a real Draft notification is created via the same pipeline', async () => {
   const createMock = mock.method(notificationRepository, 'create', async (client, fields) => ({ id: 'notif-agent-1', ...fields }));
   const client = fakeClient();
-  const actor = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
+  const identityContext = { userId: 'u1', role: 'principal', collegeId: 'college-a' };
 
   await withNimConfig('test-nim-key', async () => {
     await withMockFetch(
@@ -1047,7 +1047,7 @@ test('aiService.askAgent: the LLM picks draft_notification -> a real Draft notif
         mockAnswerResponse('Drafted an email reminder to parent@example.com.'),
       ]),
       async () => {
-        const result = await aiService.askAgent(client, 'Draft a fee reminder email to the parent.', { actor });
+        const result = await aiService.askAgent(client, 'Draft a fee reminder email to the parent.', { identityContext });
         assert.equal(result.toolUsed, 'draft_notification');
         assert.equal(result.entries[0].toolName, 'draft_notification');
         assert.equal(result.answer, 'Drafted an email reminder to parent@example.com.');

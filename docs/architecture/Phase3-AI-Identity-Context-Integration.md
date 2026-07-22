@@ -100,9 +100,15 @@ before assuming otherwise:
   `actor.role` twice — `allowedRoles.includes(actor.role)` (line 249)
   and `aiClassificationAccess.permittedClassifications(actor.role)`
   (line 255). A third check, `tool.departmentScoped` (lines 263-271,
-  reading `actor.departmentId`), is **dead code** — no tool in the file
-  sets `departmentScoped: true`, and `actor.departmentId` is never set
-  by `routes/ai.js` either.
+  reading `actor.departmentId`), was flagged as "dead code" in this
+  plan's first draft — **correction, found during implementation**: it
+  is real, deliberately-built infrastructure with its own audited
+  failure reason (`describePolicyFailureReason`'s `'department_scope'`
+  case, alongside `'role'`/`'classification'`/`'tenant'`) and its own
+  dedicated test (`ai-service.test.js:490`, including audit-log
+  assertions) — just unused by any *shipped* tool today
+  (`departmentScoped: true` isn't set on any real tool definition).
+  Kept, not deleted (see decision 6's own correction below).
 - `aiClassificationAccess.js`'s `ROLE_CLASSIFICATION_ACCESS` table
   (lines 19-23) is keyed on the same three literal strings
   (`principal`/`hod`/`staff`) as `AI-Governance.md` §8's tables — a
@@ -168,12 +174,17 @@ before assuming otherwise:
    concept, keeps the name honest as it grows. `routes/ai.js` gets one
    shared `buildAiIdentityContext(req)` helper (not `buildAiActor`)
    replacing both inline literals. Since Group (a) already touches
-   every read site of the old `actor.role`/`actor.userId` shape
-   (`aiToolRegistry.assertPolicyAllows`, every tool handler that
-   forwards it — `aiToolRegistry.js` lines 988/1013/1041/1082/1100/
-   1116/1329, plus `aiService.js`), the rename rides along as a
-   mechanical find-replace on lines this step is editing anyway, not a
-   separate expansion of scope.
+   every read site of the old `actor.role`/`actor.userId` shape at the
+   AI layer's own boundary (`aiToolRegistry.assertPolicyAllows`/
+   `invokeTool`/`buildActionManifest`, `aiService.js`'s three exported
+   functions, `routes/ai.js`), the rename rides along there as a
+   mechanical find-replace on lines this step is editing anyway.
+   **Corrected during implementation**: individual tool handlers
+   (`aiToolRegistry.js` lines 988/1013/1041/1082/1100/1116/1329, and
+   ~35 more) keep their own local `actor` parameter name unchanged —
+   they receive the same (correct) value positionally either way, and
+   renaming ~40 local parameter names with no functional effect would
+   have been pure churn, not something this step's own diff needed.
 2. **`identityContext` gains scope fields**, sourced from
    `req.capabilities` directly, never re-derived: `departmentIds`,
    `classIds`, `scopeLevel`, and `positionAccountId` (`null` for a
@@ -227,12 +238,18 @@ before assuming otherwise:
    sufficient for the principle to hold end-to-end; this is a separate,
    larger optimization with its own blast radius across every AI
    tool's downstream service, not required for correctness.
-6. **`tool.departmentScoped`'s dead branch in `assertPolicyAllows`** is
-   deleted, not repurposed — decision 5 means `identityContext.
-   departmentId` (singular) was never going to be wired up
-   meaningfully; the new `identityContext.departmentIds` (plural,
-   decision 2) belongs to prompt context and future tool-scoping, not
-   this specific dead check.
+6. **CORRECTED during implementation — `tool.departmentScoped`'s branch
+   in `assertPolicyAllows` is KEPT, not deleted.** Originally planned
+   as dead-code removal; found during Group (a) step 1 to be real,
+   tested infrastructure (see the Ground Truth correction above), so
+   deleting it would have broken `ai-service.test.js:490` and removed
+   intentional forward-looking capability for zero reason. Renamed
+   alongside everything else (`actor` → `identityContext`), otherwise
+   untouched. `identityContext.departmentId` (singular, feeds this
+   exact-match check) is derived from the new `identityContext.
+   departmentIds` (plural, decision 2) — set only when scope is exactly
+   one department (true for any HOD or Class Tutor position), `null`
+   otherwise.
 
 ## Delivery ordering — 9 steps, 4 groups, one commit each (mirrors Phase 2's own cadence)
 
@@ -243,9 +260,19 @@ before assuming otherwise:
    `identityContext` at every read site the swap already touches
    (`aiToolRegistry.assertPolicyAllows`, the tool handlers listed in
    decision 1) — mechanical, bundled with the functional change, not a
-   separate pass. Delete `assertPolicyAllows`'s dead `departmentScoped`
-   branch (decision 6) in the same commit — it's directly adjacent code
-   this step already has open.
+   separate pass. **Corrected during implementation**: the rename
+   stopped at the boundary/dispatch layer (`routes/ai.js`, `aiService.js`'s
+   three exported functions, `aiToolRegistry.js`'s `invokeTool`/
+   `assertPolicyAllows`/`buildActionManifest`) — each individual tool
+   handler's own local 3rd-parameter name (still `actor`, ~40 handlers)
+   was deliberately left alone; renaming a local parameter name with no
+   functional effect across every handler would have been pure churn,
+   not the "rides along for free" the original decision assumed. The
+   *value* flowing into every handler is correct either way — only the
+   local name callers happen to use for it differs by layer.
+   `assertPolicyAllows`'s `departmentScoped` branch is renamed
+   (`actor`→`identityContext`) but KEPT, not deleted — see decision 6's
+   own correction.
 2. Tests: a real integration test proving `/ai/ask`/`/ai/tools/:name/
    invoke` work identically for an ordinary Personal session (regression
    — same tests that exist today must still pass unchanged) AND now

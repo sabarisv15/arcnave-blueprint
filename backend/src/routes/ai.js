@@ -25,6 +25,43 @@ function requireResolvedTenant(req, res) {
   return true;
 }
 
+// Phase 3 (AI Identity Context Integration) — the one normalized shape
+// every AI consumer reads generically from here down, regardless of
+// which resolver populated req.capabilities (resolveCapabilities,
+// Personal Identity Context; resolveCapabilitiesForPosition,
+// Institutional Identity Context — ADR-023). No branch here on which
+// one ran; every field below is read the same way either way.
+//
+// userId: resolveCapabilities returns it at the top level;
+// resolveCapabilitiesForPosition doesn't (a Position Account token's
+// own claims.sub is the position_account_id, never a userId — ADR-023)
+// but returns currentOccupantUserId instead, the real human behind
+// that seat right now — that's the correct "who is actually asking"
+// value for a Position Account session, not the account id itself.
+//
+// departmentId (singular) feeds assertPolicyAllows's existing
+// departmentScoped exact-match check (a tool requiring the caller's
+// own single department to equal a requested one) — set only when
+// scope is exactly one department (true for any HOD or Class Tutor
+// position), null otherwise; departmentIds/classIds (plural) are the
+// general-purpose scope fields prompt context and future tool-scoping
+// read.
+function buildAiIdentityContext(req) {
+  const capabilities = req.capabilities || {};
+  const departmentIds = capabilities.departmentIds || [];
+  const classIds = capabilities.assignedClassIds || capabilities.classIds || [];
+  return {
+    userId: capabilities.userId || capabilities.currentOccupantUserId || null,
+    role: capabilities.effectiveRole,
+    collegeId: req.collegeId,
+    departmentIds,
+    departmentId: departmentIds.length === 1 ? departmentIds[0] : null,
+    classIds,
+    scopeLevel: capabilities.scopeLevel || null,
+    positionAccountId: capabilities.positionAccountId || null,
+  };
+}
+
 // Each Policy Gate error gets its own HTTP mapping so a caller (and a
 // test) can tell rejections apart, same distinction
 // aiToolRegistry.js's own file comment argues for at the error-class
@@ -230,13 +267,13 @@ function createAiRouter() {
   // caller/test that never sends `question` is unaffected.
   router.post('/ai/tools/:name/invoke', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
-    const actor = { userId: req.jwtClaims.sub, role: req.jwtClaims.role, collegeId: req.collegeId };
+    const identityContext = buildAiIdentityContext(req);
     const params = (req.body || {}).params || {};
     const question = (req.body || {}).question;
     try {
       const result = question !== undefined
-        ? await aiService.askAboutTool(req.dbClient, req.params.name, params, question, { actor })
-        : await aiService.invokeTool(req.dbClient, req.params.name, params, { actor });
+        ? await aiService.askAboutTool(req.dbClient, req.params.name, params, question, { identityContext })
+        : await aiService.invokeTool(req.dbClient, req.params.name, params, { identityContext });
       res.json(result);
     } catch (err) {
       if (mapAiToolError(err, res)) return;
@@ -252,10 +289,10 @@ function createAiRouter() {
   // same as any caller naming a bad tool would get).
   router.post('/ai/ask', requireAuth, asyncHandler(async (req, res) => {
     if (!requireResolvedTenant(req, res)) return;
-    const actor = { userId: req.jwtClaims.sub, role: req.jwtClaims.role, collegeId: req.collegeId };
+    const identityContext = buildAiIdentityContext(req);
     const question = (req.body || {}).question;
     try {
-      const result = await aiService.askAgent(req.dbClient, question, { actor });
+      const result = await aiService.askAgent(req.dbClient, question, { identityContext });
       res.json(result);
     } catch (err) {
       if (mapAiToolError(err, res)) return;
