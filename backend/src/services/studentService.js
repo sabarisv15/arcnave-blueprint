@@ -558,6 +558,18 @@ async function removeStudent(client, id, { userId, actorRole }) {
 // findHodDepartmentId lookup and is unaffected — both branches just
 // need actorRole/actorUserId/collegeId read from whichever shape was
 // given.
+//
+// 'class_tutor' shares the 'staff' branch (a pre-existing gap, found
+// and fixed independent of Phase 4): identityService.
+// deriveEffectiveRoleAndScopeForPosition assigns effectiveRole
+// 'class_tutor' (not 'staff') to a Class Tutor Position, and
+// getVisibleClassIds already treats scopeLevel 'self_assigned'
+// identically regardless of which of the two role strings produced
+// it — this branch was simply never widened to admit the second one,
+// so a Class Tutor Position Account's students_roster call (its
+// allowedRoles already include 'class_tutor' — aiToolRegistry.js) fell
+// through to an empty roster in both the legacy shape and an
+// ActorContext alike.
 async function listStudents(client, { limit = 50, offset = 0 } = {}, actorInput = {}) {
   const isActorContext = 'scopeLevel' in actorInput;
   const actorRole = isActorContext ? actorInput.role : actorInput.actorRole;
@@ -567,7 +579,7 @@ async function listStudents(client, { limit = 50, offset = 0 } = {}, actorInput 
   if (actorRole === undefined || actorRole === 'principal') {
     return studentRepository.list(client, { limit, offset });
   }
-  if (actorRole === 'staff') {
+  if (actorRole === 'staff' || actorRole === 'class_tutor') {
     // Same broader read rule as assertCanViewStudent: a tutor's own
     // class PLUS every class this staff member teaches per
     // faculty_allocation — resolved via visibilityService.getVisibleClassIds

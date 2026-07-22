@@ -732,16 +732,6 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
   // dual-input equivalence visibilityService.js's own tests already
   // establish for getVisibleClassIds directly, proven here one layer up
   // at the Business Service that forwards it.
-  //
-  // Not exercised here: a genuinely Institutional (Class Tutor Position
-  // Account, effectiveRole 'class_tutor') identityContext. Doing so
-  // surfaced a real, PRE-EXISTING gap outside Phase 4's scope —
-  // studentService.listStudents' role dispatch only branches on the
-  // literal strings 'staff'/'hod'/'principal' and has no 'class_tutor'
-  // branch at all, so it falls through to an empty roster for that role
-  // in both the legacy shape and an ActorContext alike (not something
-  // Group (a)/(b)'s dual-input change introduced or could fix — the
-  // 5-call-site audit only lists this function's 'staff' branch).
   await t.test('listStudents (staff, ActorContext-shaped input) forwards straight through, scoped to exactly what the ActorContext\'s own assignedClassIds says', async () => {
     const institutionalActorContext = aiActorContext.buildActorContextForIdentity({
       userId: 'tutor-u1', role: 'staff', collegeId: 'c1', departmentIds: [], classIds: ['class-1'], scopeLevel: 'self_assigned', positionAccountId: null,
@@ -755,6 +745,42 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
     assert.equal(result.length, 1);
     assert.equal(result[0].id, 'student-id');
     assert.equal(findByClassMock.mock.callCount(), 1);
+    assert.equal(findByClassMock.mock.calls[0].arguments[1], 'class-1');
+  });
+
+  // Regression for a real, pre-existing gap found and flagged while
+  // writing the test above: listStudents' role dispatch only branched
+  // on 'staff'/'hod'/'principal', with no 'class_tutor' arm at all —
+  // even though identityService.deriveEffectiveRoleAndScopeForPosition
+  // assigns effectiveRole 'class_tutor' (not 'staff') to a Class Tutor
+  // Position, and students_roster's own allowedRoles already include
+  // 'class_tutor' (aiToolRegistry.js). A Class Tutor Position Account
+  // fell through to `return []` in both the legacy shape and an
+  // ActorContext alike, unrelated to Phase 4's dual-input change (which
+  // only widened the 'staff' branch's INPUT handling, not its role
+  // dispatch). Fixed by widening the same 'staff' branch to also match
+  // 'class_tutor' — getVisibleClassIds already treats scopeLevel
+  // 'self_assigned' identically regardless of which role string
+  // produced it, so no other change was needed.
+  await t.test('listStudents (class_tutor, legacy shape) returns the tutor\'s own class roster, not an empty list', async () => {
+    mockStaffCapabilities(t, ['class-1']);
+    const findByClassMock = t.mock.method(studentRepository, 'findByClassId', async () => [STUDENT]);
+    t.after(() => findByClassMock.mock.restore());
+
+    const result = await studentService.listStudents({}, {}, { actorUserId: 'tutor-u1', actorRole: 'class_tutor', collegeId: 'c1' });
+    assert.deepEqual(result, [STUDENT]);
+    assert.equal(findByClassMock.mock.calls[0].arguments[1], 'class-1');
+  });
+
+  await t.test('listStudents (class_tutor, ActorContext-shaped input) returns the position\'s own class roster, not an empty list', async () => {
+    const classTutorActorContext = aiActorContext.buildActorContextForIdentity({
+      userId: 'tutor-u1', role: 'class_tutor', collegeId: 'c1', departmentIds: [], classIds: ['class-1'], scopeLevel: 'class', positionAccountId: 'position-account-1',
+    });
+    const findByClassMock = t.mock.method(studentRepository, 'findByClassId', async () => [STUDENT]);
+    t.after(() => findByClassMock.mock.restore());
+
+    const result = await studentService.listStudents({}, {}, classTutorActorContext);
+    assert.deepEqual(result, [STUDENT]);
     assert.equal(findByClassMock.mock.calls[0].arguments[1], 'class-1');
   });
 
