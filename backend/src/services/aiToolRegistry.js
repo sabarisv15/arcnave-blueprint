@@ -86,6 +86,15 @@
 const auditLogRepository = require('../repositories/auditLogRepository');
 const aiClassificationAccess = require('./aiClassificationAccess');
 const { isUuid } = require('../identifierResolution');
+// Phase 4 Group (b): the 6 handlers below that reach a Business Service
+// function needing scope resolution (visibilityService.getVisibleClassIds,
+// via buildActorContext) build the ActorContext once via this helper and
+// pass it in, instead of a legacy {actorUserId, actorRole, collegeId}
+// literal — so the Business Service uses the already-resolved
+// Institutional (Position Account) scope when one is active, never
+// re-deriving the occupant's own Personal scope from actor.userId. See
+// Phase4-AI-Downstream-Scope-Fidelity.md.
+const aiActorContext = require('./aiActorContext');
 
 class AiToolNotFoundError extends Error {}
 class AiToolLevelNotSupportedError extends Error {}
@@ -617,7 +626,11 @@ registerTool({
     required: ['query'],
     additionalProperties: false,
   },
-  handler: (client, params, actor) => documentSearchService.searchDocuments(client, { query: params.query }, actor),
+  handler: (client, params, actor) => documentSearchService.searchDocuments(
+    client,
+    { query: params.query },
+    aiActorContext.buildActorContextForIdentity(actor),
+  ),
 });
 
 // --- Institutional Documents Phase 2 — AI-assisted upload/retrieval ----
@@ -996,7 +1009,7 @@ registerTool({
   handler: (client, params, actor) => studentService.listStudents(
     client,
     { limit: 500 },
-    { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+    aiActorContext.buildActorContextForIdentity(actor),
   ),
 });
 
@@ -1021,7 +1034,7 @@ registerTool({
   },
   handler: (client, params, actor) => analyticsService.getAttendanceRateForActor(
     client,
-    { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+    aiActorContext.buildActorContextForIdentity(actor),
     { startDate: params.start_date, endDate: params.end_date },
   ),
 });
@@ -1049,7 +1062,7 @@ registerTool({
   handler: async (client, params, actor) => {
     const rows = await analyticsService.getAttendanceRateForActor(
       client,
-      { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+      aiActorContext.buildActorContextForIdentity(actor),
     );
     const threshold = typeof params.threshold_percent === 'number' ? params.threshold_percent : 75;
     return rows.filter((row) => row.attendanceRatePercent !== null && row.attendanceRatePercent <= threshold);
@@ -1090,7 +1103,7 @@ registerTool({
       : undefined;
     return assessmentService.listMarksForActor(
       client,
-      { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+      aiActorContext.buildActorContextForIdentity(actor),
       { academicYear: params.academic_year, subject: params.subject, assessmentTypeId },
     );
   },
@@ -1108,7 +1121,7 @@ registerTool({
   params: { type: 'object', properties: {}, additionalProperties: false },
   handler: (client, params, actor) => academicService.getClassTimetableForActor(
     client,
-    { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+    aiActorContext.buildActorContextForIdentity(actor),
   ),
 });
 
