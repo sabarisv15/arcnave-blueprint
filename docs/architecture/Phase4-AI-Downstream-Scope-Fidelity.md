@@ -7,6 +7,25 @@ the AI Policy Gate and the LLM prompt correctly identity-context-aware
 one layer deeper: the Business Services an AI tool's data actually
 comes from.
 
+## Identity Context Propagation Rule
+
+**Once request authentication has produced an `IdentityContext`,
+downstream Business Services must consume that context directly. They
+must not perform a second capability-resolution step from `userId`
+unless they are intentionally resolving a different principal.**
+
+This is the one design principle every change in this phase (and any
+reviewer evaluating it) can check a diff against. `buildActorContext`
+re-resolving `identityContext.userId`'s own Personal capabilities is
+exactly the violation this phase exists to fix: nothing here needed a
+*different* principal — it needed the *same* one, already resolved,
+just handed sideways into a different function instead of asked for
+again. The narrow legitimate exception the rule itself carves out
+("intentionally resolving a different principal") covers things like
+`assertIsHodOfDepartment` resolving a target *student's* department's
+real HOD to check against — a genuinely different principal than the
+caller, not a re-resolution of the caller's own identity.
+
 ## Context
 
 `actorContextService.buildActorContext(client, { actorId, tenantId })`
@@ -68,6 +87,25 @@ only branches on `SELF_ASSIGNED`/`DEPARTMENT`/falls through to `[]`
 otherwise — so a naive fix that just forwards `identityContext.scopeLevel`
 verbatim would silently fail-closed (empty roster) for every Class
 Tutor session, the opposite of this phase's own goal. See decision 2.
+
+### Confirmed: every affected function already has enough information — nothing new needs to be threaded through
+
+Before locking in the fix, the real question to ask per function is
+"does it already receive enough information to skip the DB
+re-resolution, or does Group (a) need to introduce a genuinely missing
+parameter?" Checked directly against `routes/ai.js`'s
+`buildAiIdentityContext` (`routes/ai.js:49-63`, Phase 3 Group (a)):
+`identityContext` already carries `departmentIds`, `classIds`,
+`scopeLevel`, `userId`, `collegeId` — sourced straight from
+`req.capabilities`, no DB call of its own. That is every field the
+`ActorContext` shape needs (decision 1 below). **The answer is yes for
+all 5 call sites** — this phase is pure removal of unnecessary
+re-resolution, never a new lookup, a hidden global, or a parameter that
+needs adding upstream. If implementation turns up a function needing
+something `identityContext` doesn't already carry, that would be a
+genuine correction to this plan, not something to route around with a
+new ad hoc lookup — surface it before proceeding, the same discipline
+every prior phase's "corrected during implementation" notes followed.
 
 ## The principle
 
