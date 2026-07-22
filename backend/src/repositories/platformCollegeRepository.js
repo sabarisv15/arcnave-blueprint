@@ -22,6 +22,7 @@ async function listColleges(pool, { limit = 20, offset = 0, search } = {}) {
   const result = await pool.query(
     `SELECT
        c.college_id, c.name, c.subdomain, c.subscription_status, c.created_at,
+       c.level1_position_title, c.level3_position_title, c.storage_tier,
        s.active_users_count, s.students_count, s.staff_count,
        s.background_jobs_ok, s.last_sync_status, s.last_sync_error, s.updated_at AS stats_updated_at
      FROM colleges c

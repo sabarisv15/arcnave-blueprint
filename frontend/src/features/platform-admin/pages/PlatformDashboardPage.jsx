@@ -10,11 +10,14 @@ import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/com
 import {
   Form, FormField, FormItem, FormLabel, FormControl, FormMessage,
 } from '@/components/ui/form';
+import {
+  Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
+} from '@/components/ui/select';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { ApiError } from '@/api/client';
 import { platformAdminApi } from '@/api/platform';
-import { collegeFormSchema } from '@/features/platform-admin/schemas';
+import { collegeFormSchema, LICENSE_OPTIONS } from '@/features/platform-admin/schemas';
 
 function StatCard({ icon: Icon, label, value, isLoading }) {
   return (
@@ -37,14 +40,21 @@ function CreateCollegeCard() {
   const form = useForm({
     resolver: zodResolver(collegeFormSchema),
     defaultValues: {
-      collegeId: '', name: '', subdomain: '', level1PositionTitle: '',
+      collegeId: '',
+      name: '',
+      subdomain: '',
+      level1PositionTitle: '',
+      level3PositionTitle: '',
+      storageTier: '',
+      license: 'trial',
+      principalEmail: '',
     },
   });
 
   const createMutation = useMutation({
     mutationFn: (values) => platformAdminApi.createCollege(values),
-    onSuccess: () => {
-      toast.success('College created');
+    onSuccess: (college) => {
+      toast.success(college?.invitation ? 'College created and Principal invited' : 'College created');
       form.reset();
       queryClient.invalidateQueries({ queryKey: ['platform', 'dashboard-summary'] });
       queryClient.invalidateQueries({ queryKey: ['platform', 'colleges'] });
@@ -75,9 +85,44 @@ function CreateCollegeCard() {
               <FormItem><FormLabel>Subdomain</FormLabel><FormControl><Input placeholder="e.g. abceng" {...field} /></FormControl><FormMessage /></FormItem>
             )} />
             <FormField control={form.control} name="level1PositionTitle" render={({ field }) => (
-              <FormItem className="sm:col-span-3">
+              <FormItem>
                 <FormLabel>Level 1 Position Title (optional)</FormLabel>
                 <FormControl><Input placeholder="e.g. Principal, Director" {...field} /></FormControl>
+                <FormMessage />
+              </FormItem>
+            )} />
+            <FormField control={form.control} name="level3PositionTitle" render={({ field }) => (
+              <FormItem>
+                <FormLabel>Level 3 (HOD) Position Title (optional)</FormLabel>
+                <FormControl><Input placeholder="e.g. HOD, Head of Section" {...field} /></FormControl>
+                <FormMessage />
+              </FormItem>
+            )} />
+            <FormField control={form.control} name="license" render={({ field }) => (
+              <FormItem>
+                <FormLabel>License</FormLabel>
+                <Select value={field.value} onValueChange={field.onChange}>
+                  <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                  <SelectContent>
+                    {LICENSE_OPTIONS.map((option) => (
+                      <SelectItem key={option} value={option}>{option === 'trial' ? 'Trial' : 'Full'}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )} />
+            <FormField control={form.control} name="storageTier" render={({ field }) => (
+              <FormItem>
+                <FormLabel>Storage Tier (optional)</FormLabel>
+                <FormControl><Input placeholder="e.g. 5 GB" {...field} /></FormControl>
+                <FormMessage />
+              </FormItem>
+            )} />
+            <FormField control={form.control} name="principalEmail" render={({ field }) => (
+              <FormItem className="sm:col-span-2">
+                <FormLabel>Principal Email (optional — invites immediately)</FormLabel>
+                <FormControl><Input type="email" placeholder="principal@college.edu" {...field} /></FormControl>
                 <FormMessage />
               </FormItem>
             )} />

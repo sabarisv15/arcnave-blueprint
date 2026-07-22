@@ -37,16 +37,65 @@ async function bootstrapPlatformAdmin(client, { username, email, passwordHash })
   return result.rows[0] || null;
 }
 
+const COLLEGE_RETURNING = `id, college_id, name, subdomain, subscription_status, created_at,
+     level1_position_title, level3_position_title, storage_tier`;
+
 async function createCollege(client, {
-  collegeId, name, subdomain, createdBy, level1PositionTitle,
+  collegeId, name, subdomain, createdBy, level1PositionTitle, level3PositionTitle, storageTier, subscriptionStatus,
 }) {
   const result = await client.query(
-    `INSERT INTO colleges (college_id, name, subdomain, created_by, level1_position_title)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, college_id, name, subdomain, subscription_status, created_at, level1_position_title`,
-    [collegeId, name, subdomain, createdBy, level1PositionTitle || null],
+    `INSERT INTO colleges (college_id, name, subdomain, created_by, level1_position_title,
+       level3_position_title, storage_tier, subscription_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING ${COLLEGE_RETURNING}`,
+    [collegeId, name, subdomain, createdBy, level1PositionTitle || null,
+      level3PositionTitle || null, storageTier || null, subscriptionStatus || 'trial'],
   );
   return result.rows[0];
+}
+
+async function findCollegeById(client, collegeId) {
+  const result = await client.query(
+    `SELECT ${COLLEGE_RETURNING} FROM colleges WHERE college_id = $1`,
+    [collegeId],
+  );
+  return result.rows[0] || null;
+}
+
+// Create/Edit College customization — the edit half of createCollege
+// above. college_id/subdomain/created_by are deliberately not
+// editable here: college_id is this table's own external identifier
+// (other tables FK to it, tenant resolution keys off it) and subdomain
+// is what a college's users already have bookmarked/configured DNS
+// against — neither is safe to change through a simple PATCH, so
+// neither is even accepted as a field name below. name/license
+// (subscription_status)/level1_position_title/level3_position_title/
+// storage_tier are all cosmetic-or-administrative facts a Platform
+// Admin may legitimately revise after creation.
+const EDITABLE_COLUMNS = [
+  ['name', 'name'],
+  ['subscriptionStatus', 'subscription_status'],
+  ['level1PositionTitle', 'level1_position_title'],
+  ['level3PositionTitle', 'level3_position_title'],
+  ['storageTier', 'storage_tier'],
+];
+
+async function updateCollege(client, collegeId, fields) {
+  const entries = EDITABLE_COLUMNS.filter(([key]) => fields[key] !== undefined);
+  if (entries.length === 0) {
+    return findCollegeById(client, collegeId);
+  }
+
+  const setClauses = entries.map(([, column], i) => `${column} = $${i + 2}`);
+  const values = entries.map(([key]) => fields[key]);
+
+  const result = await client.query(
+    `UPDATE colleges SET ${setClauses.join(', ')}
+     WHERE college_id = $1
+     RETURNING ${COLLEGE_RETURNING}`,
+    [collegeId, ...values],
+  );
+  return result.rows[0] || null;
 }
 
 // Platform Admin module build, Phase B (plans/tingly-marinating-
@@ -60,5 +109,5 @@ async function listCollegeIds(client) {
 }
 
 module.exports = {
-  getPlatformAdminByUsername, bootstrapPlatformAdmin, createCollege, listCollegeIds,
+  getPlatformAdminByUsername, bootstrapPlatformAdmin, createCollege, findCollegeById, updateCollege, listCollegeIds,
 };

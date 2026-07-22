@@ -82,6 +82,10 @@ function post(baseUrl, path, headers, body) {
   return requestJson(baseUrl, path, 'POST', { headers, body });
 }
 
+function patch(baseUrl, path, headers, body) {
+  return requestJson(baseUrl, path, 'PATCH', { headers, body });
+}
+
 function startServer(app) {
   return new Promise((resolve) => {
     const server = app.listen(0, () => resolve(server));
@@ -268,6 +272,100 @@ test('platform API', async (t) => {
       { college_id: otherCollegeId, name: 'Other College', subdomain: collegeId },
     );
     assert.equal(second.status, 409);
+  });
+
+  await t.test('create college accepts license/level3 title/storage tier', async () => {
+    const token = await platformToken();
+    const collegeId = collegeIdFactory();
+    const resp = await post(
+      baseUrl,
+      '/api/v1/platform/colleges',
+      { authorization: `Bearer ${token}` },
+      {
+        college_id: collegeId,
+        name: 'Test College',
+        subdomain: collegeId,
+        subscription_status: 'full',
+        level3_position_title: 'Head of Section',
+        storage_tier: '5 GB',
+      },
+    );
+    assert.equal(resp.status, 201);
+    assert.equal(resp.body.subscription_status, 'full');
+    assert.equal(resp.body.level3_position_title, 'Head of Section');
+    assert.equal(resp.body.storage_tier, '5 GB');
+    assert.equal(resp.body.invitation, null, 'no principal_email was sent, so no invitation should fire');
+  });
+
+  await t.test('create college rejects an invalid license', async () => {
+    const token = await platformToken();
+    const collegeId = collegeIdFactory();
+    const resp = await post(
+      baseUrl,
+      '/api/v1/platform/colleges',
+      { authorization: `Bearer ${token}` },
+      {
+        college_id: collegeId, name: 'Test College', subdomain: collegeId, subscription_status: 'premium',
+      },
+    );
+    assert.equal(resp.status, 400);
+  });
+
+  await t.test('PATCH college updates name/license/level titles/storage tier, leaving unset fields untouched', async () => {
+    const token = await platformToken();
+    const collegeId = collegeIdFactory();
+    const created = await post(
+      baseUrl,
+      '/api/v1/platform/colleges',
+      { authorization: `Bearer ${token}` },
+      {
+        college_id: collegeId, name: 'Before Edit', subdomain: collegeId, level1_position_title: 'Director',
+      },
+    );
+    assert.equal(created.status, 201);
+
+    const resp = await patch(
+      baseUrl,
+      `/api/v1/platform/colleges/${collegeId}`,
+      { authorization: `Bearer ${token}` },
+      { name: 'After Edit', subscription_status: 'full', storage_tier: '20 GB' },
+    );
+    assert.equal(resp.status, 200);
+    assert.equal(resp.body.name, 'After Edit');
+    assert.equal(resp.body.subscription_status, 'full');
+    assert.equal(resp.body.storage_tier, '20 GB');
+    assert.equal(resp.body.level1_position_title, 'Director', 'a field not included in the PATCH body must be untouched');
+  });
+
+  await t.test('PATCH college rejects an invalid license', async () => {
+    const token = await platformToken();
+    const collegeId = collegeIdFactory();
+    const created = await post(
+      baseUrl,
+      '/api/v1/platform/colleges',
+      { authorization: `Bearer ${token}` },
+      { college_id: collegeId, name: 'Test College', subdomain: collegeId },
+    );
+    assert.equal(created.status, 201);
+
+    const resp = await patch(
+      baseUrl,
+      `/api/v1/platform/colleges/${collegeId}`,
+      { authorization: `Bearer ${token}` },
+      { subscription_status: 'premium' },
+    );
+    assert.equal(resp.status, 400);
+  });
+
+  await t.test('PATCH college 404s for an unknown college_id', async () => {
+    const token = await platformToken();
+    const resp = await patch(
+      baseUrl,
+      '/api/v1/platform/colleges/does-not-exist',
+      { authorization: `Bearer ${token}` },
+      { name: 'Whatever' },
+    );
+    assert.equal(resp.status, 404);
   });
 
   await t.test('create college requires a platform admin token', async () => {

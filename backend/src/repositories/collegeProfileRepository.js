@@ -57,6 +57,18 @@ async function getLevel1PositionTitle(client, collegeId) {
   return result.rows[0] ? result.rows[0].level1_position_title : null;
 }
 
+// Same shape as getLevel1PositionTitle above, one level down —
+// staffService.ensureHodPosition's own Platform-Admin-chosen title for
+// this college's Level 3 (HOD-equivalent) position, falling back to
+// DEFAULT_LEVEL3_POSITION_TITLE ('HOD') there when null.
+async function getLevel3PositionTitle(client, collegeId) {
+  const result = await client.query(
+    'SELECT level3_position_title FROM colleges WHERE college_id = $1',
+    [collegeId],
+  );
+  return result.rows[0] ? result.rows[0].level3_position_title : null;
+}
+
 async function updateProfile(client, collegeId, fields) {
   const entries = COLUMNS.filter(([key]) => fields[key] !== undefined);
   if (entries.length === 0) {
@@ -75,4 +87,6 @@ async function updateProfile(client, collegeId, fields) {
   return result.rows[0] || null;
 }
 
-module.exports = { getByCollegeId, updateProfile, getLevel1PositionTitle };
+module.exports = {
+  getByCollegeId, updateProfile, getLevel1PositionTitle, getLevel3PositionTitle,
+};

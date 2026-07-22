@@ -5,6 +5,10 @@ export const platformLoginFormSchema = z.object({
   password: z.string().min(1, 'Password is required'),
 });
 
+// License (subscription_status) — matches platformService.VALID_LICENSES
+// exactly; keep the two in sync if that set ever changes.
+export const LICENSE_OPTIONS = ['trial', 'full'];
+
 export const collegeFormSchema = z.object({
   collegeId: z.string().min(1, 'College ID is required'),
   name: z.string().min(1, 'Name is required'),
@@ -13,6 +17,30 @@ export const collegeFormSchema = z.object({
   // "Principal", "Director"). Backend defaults to "Principal" when
   // omitted, so this is never required.
   level1PositionTitle: z.string().optional(),
+  // Optional — same shape one level down, for the Level 3
+  // (HOD-equivalent) position. Backend defaults to "HOD" when omitted.
+  level3PositionTitle: z.string().optional(),
+  // Free-text, no fixed tier set yet (product scope still undecided,
+  // "will plan later" — same status as AI tier) — purely a label for
+  // now, nothing reads or enforces it.
+  storageTier: z.string().optional(),
+  license: z.enum(LICENSE_OPTIONS).default('trial'),
+  // Optional — when set, a Principal invitation is sent in the same
+  // request as college creation instead of requiring a separate
+  // "Invite Principal" action afterward.
+  principalEmail: z.union([z.string().email('Enter a valid email'), z.literal('')]).optional(),
+});
+
+// Edit mode: college_id/subdomain are immutable (see
+// platformRepository.updateCollege's own comment for why) — no field
+// for either here. principalEmail also drops out — inviting is its own
+// dedicated action (InvitePrincipalDialog), not folded into edit.
+export const editCollegeFormSchema = z.object({
+  name: z.string().min(1, 'Name is required'),
+  level1PositionTitle: z.string().optional(),
+  level3PositionTitle: z.string().optional(),
+  storageTier: z.string().optional(),
+  license: z.enum(LICENSE_OPTIONS).default('trial'),
 });
 
 export const invitePrincipalFormSchema = z.object({

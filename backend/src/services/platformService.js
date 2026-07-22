@@ -61,6 +61,24 @@ class PlatformAlreadyBootstrappedError extends Error {}
 // constraints).
 class DuplicateCollegeError extends Error {}
 
+// createCollege/updateCollege given a subscription_status outside the
+// two real license states. No DB CHECK constraint for this (same
+// "validate in application code, not the schema" convention
+// position_type's own migration comment documents) — enforced here
+// instead.
+class InvalidLicenseError extends Error {}
+
+// updateCollege given a college_id with no matching row.
+class CollegeUpdateNotFoundError extends Error {}
+
+const VALID_LICENSES = ['trial', 'full'];
+
+function assertValidLicense(subscriptionStatus) {
+  if (subscriptionStatus !== undefined && !VALID_LICENSES.includes(subscriptionStatus)) {
+    throw new InvalidLicenseError(`subscription_status must be one of ${JSON.stringify(VALID_LICENSES)}`);
+  }
+}
+
 // invitePrincipal's target college_id doesn't exist. Raised from a
 // foreign_key_violation (23503) on the INSERT — principal_invitations
 // has exactly one FK (college_id -> colleges), so any 23503 here
@@ -126,22 +144,45 @@ async function login(pool, { username, password }) {
   return { accessToken, tokenType: 'bearer' };
 }
 
-// level1PositionTitle: the Platform Admin's own name for the college's
-// Level 1 position ("Principal", "Director", ...) — ADR-021. Optional;
-// a college created without it
-// behaves exactly as every college did before this field existed
-// (positionRepository/authService's own "Principal" default applies at
-// accept time, not here — see provisionLevel1PositionForNewPrincipal's
-// comment). Stored on `colleges` now, purely so it survives the
+// level1PositionTitle/level3PositionTitle: the Platform Admin's own
+// names for the college's Level 1 and Level 3 positions ("Principal"/
+// "Director", "HOD"/"Head of Section", ...) — ADR-021, and its
+// Create/Edit College customization amendment for level3. Both
+// optional; a college created without either behaves exactly as every
+// college did before these fields existed (positionRepository/
+// authService's/staffService's own defaults apply at accept/
+// department-creation time, not here — see
+// provisionLevel1PositionForNewPrincipal's and ensureHodPosition's own
+// comments). Stored on `colleges` now, purely so they survive the
 // create-college -> invite -> accept gap; not used anywhere in this
 // function itself.
+//
+// storageTier: free-text, no validation — genuinely undecided product
+// scope (see the migration's own comment), purely a label for now.
+//
+// subscriptionStatus (license): validated against VALID_LICENSES
+// above; defaults to 'trial' at the repository layer (matching
+// colleges' own DB DEFAULT) when omitted, same as every college
+// created before this became a real, settable field.
+//
+// principalEmail: optional — when given, invitePrincipal fires in the
+// same call as college creation instead of requiring a second,
+// separate API call from the Platform Admin (decision: fold "invite
+// inline" into createCollege rather than removing the standalone
+// invite-principal route, which stays for re-inviting/inviting later).
+// invitePrincipal's own CollegeNotFoundError can't fire here — the
+// college this function just created always exists by the time this
+// runs.
 async function createCollege(pool, {
-  collegeId, name, subdomain, createdBy, ipAddress, level1PositionTitle,
+  collegeId, name, subdomain, createdBy, ipAddress,
+  level1PositionTitle, level3PositionTitle, storageTier, subscriptionStatus, principalEmail,
 }) {
+  assertValidLicense(subscriptionStatus);
+
   let college;
   try {
     college = await platformRepository.createCollege(pool, {
-      collegeId, name, subdomain, createdBy, level1PositionTitle,
+      collegeId, name, subdomain, createdBy, level1PositionTitle, level3PositionTitle, storageTier, subscriptionStatus,
     });
   } catch (err) {
     // 23505 = unique_violation (Postgres SQLSTATE) — colleges has two
@@ -162,6 +203,45 @@ async function createCollege(pool, {
     entityId: college.college_id,
     ipAddress,
     metadata: { name, subdomain },
+  });
+
+  let invitation = null;
+  if (principalEmail) {
+    invitation = await invitePrincipal(pool, {
+      collegeId: college.college_id, email: principalEmail, createdBy, ipAddress,
+    });
+  }
+
+  return { college, invitation };
+}
+
+// Create/Edit College customization — the edit half of createCollege.
+// college_id/subdomain are immutable (see platformRepository.
+// updateCollege's own comment); only name/license/level1-and-3 titles/
+// storage tier may change here.
+async function updateCollege(pool, collegeId, {
+  name, subscriptionStatus, level1PositionTitle, level3PositionTitle, storageTier, actorAdminId, ipAddress,
+}) {
+  assertValidLicense(subscriptionStatus);
+
+  const existing = await platformRepository.findCollegeById(pool, collegeId);
+  if (existing === null) {
+    throw new CollegeUpdateNotFoundError(`no college with college_id ${JSON.stringify(collegeId)}`);
+  }
+
+  const college = await platformRepository.updateCollege(pool, collegeId, {
+    name, subscriptionStatus, level1PositionTitle, level3PositionTitle, storageTier,
+  });
+
+  await platformAuditService.record(pool, {
+    actorAdminId,
+    action: 'college.updated',
+    entity: 'college',
+    entityId: collegeId,
+    ipAddress,
+    metadata: {
+      name, subscriptionStatus, level1PositionTitle, level3PositionTitle, storageTier,
+    },
   });
 
   return college;
@@ -395,11 +475,14 @@ module.exports = {
   PlatformAlreadyBootstrappedError,
   DuplicateCollegeError,
   CollegeNotFoundError,
+  InvalidLicenseError,
+  CollegeUpdateNotFoundError,
   PrincipalInvitationNotFoundError,
   PrincipalInvitationNotPendingError,
   bootstrapPlatformAdmin,
   login,
   createCollege,
+  updateCollege,
   invitePrincipal,
   resendPrincipalInvitation,
   revokePrincipalInvitation,

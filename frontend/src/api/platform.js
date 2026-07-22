@@ -12,9 +12,25 @@ function toQueryString(params) {
 export const platformAdminApi = {
   login: (username, password) => platformApi.post('/auth/login', { username, password }),
   createCollege: ({
-    collegeId, name, subdomain, level1PositionTitle,
+    collegeId, name, subdomain, level1PositionTitle, level3PositionTitle, storageTier, license, principalEmail,
   }) => platformApi.post('/colleges', {
-    college_id: collegeId, name, subdomain, level1_position_title: level1PositionTitle || undefined,
+    college_id: collegeId,
+    name,
+    subdomain,
+    level1_position_title: level1PositionTitle || undefined,
+    level3_position_title: level3PositionTitle || undefined,
+    storage_tier: storageTier || undefined,
+    subscription_status: license || undefined,
+    principal_email: principalEmail || undefined,
+  }),
+  updateCollege: (collegeId, {
+    name, level1PositionTitle, level3PositionTitle, storageTier, license,
+  }) => platformApi.patch(`/colleges/${collegeId}`, {
+    name: name || undefined,
+    level1_position_title: level1PositionTitle || undefined,
+    level3_position_title: level3PositionTitle || undefined,
+    storage_tier: storageTier || undefined,
+    subscription_status: license || undefined,
   }),
   invitePrincipal: (collegeId, email) => platformApi.post(`/colleges/${collegeId}/invite-principal`, { email }),
   resendInvitation: (invitationId) => platformApi.post(`/invitations/${invitationId}/resend`),

@@ -49,6 +49,7 @@ const authRepository = require('../repositories/authRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const hodInChargeRepository = require('../repositories/hodInChargeRepository');
 const positionRepository = require('../repositories/positionRepository');
+const collegeProfileRepository = require('../repositories/collegeProfileRepository');
 const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
 const workflowService = require('./workflowService');
 const authService = require('./authService');
@@ -274,6 +275,12 @@ const DEFAULT_LEVEL3_POSITION_TITLE = 'HOD';
 // Account authentication (Phase 4 target) doesn't exist yet, so
 // nothing reads these until that lands; the real reassignment
 // lifecycle (ADR-021) resets both in place once it does.
+//
+// Title: colleges.level3_position_title (Create/Edit College
+// customization) — the Platform-Admin-chosen name for this college's
+// HOD-equivalent position, falling back to DEFAULT_LEVEL3_POSITION_TITLE
+// when null (every college that never sets it). Same fallback shape
+// provisionLevel1PositionForNewPrincipal already uses for Level 1.
 async function ensureHodPosition(client, { collegeId, departmentId, createdBy }) {
   const existingAssignment = await positionRepository.findActiveDepartmentAssignment(client, departmentId);
   if (existingAssignment !== null) {
@@ -282,8 +289,9 @@ async function ensureHodPosition(client, { collegeId, departmentId, createdBy })
     return { position, account };
   }
 
+  const chosenTitle = await collegeProfileRepository.getLevel3PositionTitle(client, collegeId);
   const position = await positionRepository.createPosition(client, {
-    collegeId, level: 3, title: DEFAULT_LEVEL3_POSITION_TITLE, createdBy,
+    collegeId, level: 3, title: chosenTitle || DEFAULT_LEVEL3_POSITION_TITLE, createdBy,
   });
   const account = await positionRepository.createPositionAccount(client, {
     collegeId,

@@ -55,29 +55,83 @@ function createPlatformRouter() {
     }
   }));
 
+  function serializeCollege(college) {
+    return {
+      college_id: college.college_id,
+      name: college.name,
+      subdomain: college.subdomain,
+      subscription_status: college.subscription_status,
+      level1_position_title: college.level1_position_title,
+      level3_position_title: college.level3_position_title,
+      storage_tier: college.storage_tier,
+    };
+  }
+
   router.post('/colleges', requirePlatformAdmin, asyncHandler(async (req, res) => {
     const {
-      college_id: collegeId, name, subdomain, level1_position_title: level1PositionTitle,
+      college_id: collegeId, name, subdomain,
+      level1_position_title: level1PositionTitle, level3_position_title: level3PositionTitle,
+      storage_tier: storageTier, subscription_status: subscriptionStatus,
+      principal_email: principalEmail,
     } = req.body || {};
     try {
-      const college = await platformService.createCollege(platformPool, {
+      const { college, invitation } = await platformService.createCollege(platformPool, {
         collegeId,
         name,
         subdomain,
         createdBy: req.platformClaims.sub,
         ipAddress: req.ip,
         level1PositionTitle,
+        level3PositionTitle,
+        storageTier,
+        subscriptionStatus,
+        principalEmail,
       });
       res.status(201).json({
-        college_id: college.college_id,
-        name: college.name,
-        subdomain: college.subdomain,
-        subscription_status: college.subscription_status,
-        level1_position_title: college.level1_position_title,
+        ...serializeCollege(college),
+        invitation: invitation ? { invitation_id: invitation.invitationId, email: invitation.email, expires_at: invitation.expiresAt } : null,
       });
     } catch (err) {
       if (err instanceof platformService.DuplicateCollegeError) {
         res.status(409).json({ detail: 'college_id or subdomain already exists' });
+        return;
+      }
+      if (err instanceof platformService.InvalidLicenseError) {
+        res.status(400).json({ detail: err.message });
+        return;
+      }
+      throw err;
+    }
+  }));
+
+  // Create/Edit College customization — no PATCH on college_id/subdomain
+  // (see platformRepository.updateCollege's own comment on why those
+  // stay immutable). Every field optional; omitted fields are untouched
+  // (platformRepository.updateCollege's own partial-update shape,
+  // identical to collegeProfileRepository.updateProfile's).
+  router.patch('/colleges/:college_id', requirePlatformAdmin, asyncHandler(async (req, res) => {
+    const {
+      name, level1_position_title: level1PositionTitle, level3_position_title: level3PositionTitle,
+      storage_tier: storageTier, subscription_status: subscriptionStatus,
+    } = req.body || {};
+    try {
+      const college = await platformService.updateCollege(platformPool, req.params.college_id, {
+        name,
+        level1PositionTitle,
+        level3PositionTitle,
+        storageTier,
+        subscriptionStatus,
+        actorAdminId: req.platformClaims.sub,
+        ipAddress: req.ip,
+      });
+      res.json(serializeCollege(college));
+    } catch (err) {
+      if (err instanceof platformService.CollegeUpdateNotFoundError) {
+        res.status(404).json({ detail: err.message });
+        return;
+      }
+      if (err instanceof platformService.InvalidLicenseError) {
+        res.status(400).json({ detail: err.message });
         return;
       }
       throw err;

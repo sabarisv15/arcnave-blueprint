@@ -17,6 +17,7 @@ const facultyAllocationRepository = require('../src/repositories/facultyAllocati
 const hodInChargeRepository = require('../src/repositories/hodInChargeRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const positionRepository = require('../src/repositories/positionRepository');
+const collegeProfileRepository = require('../src/repositories/collegeProfileRepository');
 const identityService = require('../src/services/identityService');
 const staffService = require('../src/services/staffService');
 
@@ -24,8 +25,13 @@ const staffService = require('../src/services/staffService');
 // also calls ensureHodPosition/swapHodOccupant (staffService.js) —
 // every test exercising that path needs the Level 3 Position/Account/
 // Occupant plumbing stubbed too, same as every other repository call
-// in this file.
+// in this file. getLevel3PositionTitleMock added for Create/Edit
+// College customization — ensureHodPosition now reads
+// colleges.level3_position_title before falling back to the 'HOD'
+// default; null here exercises that default, same as every college
+// that never sets a custom title.
 function mockEnsureHodPositionCalls(t, { existingAssignment = null, existingOccupant = null } = {}) {
+  const getLevel3PositionTitleMock = t.mock.method(collegeProfileRepository, 'getLevel3PositionTitle', async () => null);
   const findAssignmentMock = t.mock.method(positionRepository, 'findActiveDepartmentAssignment', async () => existingAssignment);
   const createPositionMock = t.mock.method(positionRepository, 'createPosition', async () => ({ id: 'pos-1', level: 3 }));
   const createAccountMock = t.mock.method(positionRepository, 'createPositionAccount', async () => ({ id: 'acct-1' }));
@@ -34,6 +40,7 @@ function mockEnsureHodPositionCalls(t, { existingAssignment = null, existingOccu
   const revokeOccupantMock = t.mock.method(positionRepository, 'revokePositionOccupant', async () => ({ id: 'occ-old', revoked_at: new Date() }));
   const createOccupantMock = t.mock.method(positionRepository, 'createPositionOccupant', async (client, fields) => ({ id: 'occ-1', ...fields }));
   t.after(() => {
+    getLevel3PositionTitleMock.mock.restore();
     findAssignmentMock.mock.restore();
     createPositionMock.mock.restore();
     createAccountMock.mock.restore();
@@ -43,7 +50,7 @@ function mockEnsureHodPositionCalls(t, { existingAssignment = null, existingOccu
     createOccupantMock.mock.restore();
   });
   return {
-    findAssignmentMock, createPositionMock, createAccountMock, createDeptAssignmentMock, findOccupantMock, revokeOccupantMock, createOccupantMock,
+    getLevel3PositionTitleMock, findAssignmentMock, createPositionMock, createAccountMock, createDeptAssignmentMock, findOccupantMock, revokeOccupantMock, createOccupantMock,
   };
 }
 
