@@ -339,6 +339,93 @@ async function acceptInvitation(client, invitation, { password }) {
   return account;
 }
 
+// reassignPositionOccupant given a positionAccountId with no matching
+// position_accounts row.
+class PositionAccountReassignmentNotFoundError extends Error {}
+
+// Phase 2 step 21 (ADR-021 §10, decision 5) — the ONE reassignment
+// lifecycle, uniform across Level 1/2/3 and the Class Tutor assignment
+// (position_type='class_tutor'), not per-type copies. Replaces
+// staffService.swapHodOccupant's/classTutorService.swapClassTutorOccupant's
+// own bare occupant-swap-only behavior (built before real Position
+// Account credentials existed to reset) with the full lifecycle:
+//
+//   1. swap the occupant link (revoke the outgoing one, if any)
+//   2. session revocation — token_version bump AND a bulk refresh-token
+//      revoke (belt-and-suspenders; see
+//      revokeAllPositionAccountRefreshTokens's own comment for why the
+//      bump alone isn't sufficient)
+//   3. clear MFA/recovery state
+//   4. credential reset via a FRESH invite (decision 9 — never a
+//      mailed temp password), reusing the exact same
+//      position_account_invitations/sendPositionAccountInvitationEmail
+//      mechanism inviteToPosition already establishes for first-time
+//      bootstrap — the incoming occupant sets their own real password
+//      through the ordinary accept flow, never inheriting whatever the
+//      outgoing occupant (or a placeholder) had.
+//
+// Runs unconditionally whenever the occupant actually changes — INCLUDING
+// filling a previously vacant seat — not only when replacing someone,
+// since a freshly-assigned occupant needs that same real credential
+// reset regardless of what (if anything) the account's password_hash
+// was before. Idempotent no-op if newOccupantUserId already IS the
+// current occupant — nothing to reassign, so no session/credential
+// reset either (that would be a surprising, unrequested side effect of
+// what's supposed to be a "did nothing" call). One transaction — client
+// is the caller's own already-open per-request connection, so any
+// failure partway through rolls back everything above with it.
+async function reassignPositionOccupant(client, { positionAccountId, newOccupantUserId, actorUserId }) {
+  if (!newOccupantUserId) {
+    throw new PositionInvitationValidationError('newOccupantUserId is required');
+  }
+
+  const account = await positionRepository.findPositionAccountById(client, positionAccountId);
+  if (account === null) {
+    throw new PositionAccountReassignmentNotFoundError(`position account ${JSON.stringify(positionAccountId)} does not exist`);
+  }
+  const position = await positionRepository.findPositionById(client, account.position_id);
+
+  const currentOccupant = await positionRepository.findActiveOccupant(client, positionAccountId);
+  if (currentOccupant !== null && currentOccupant.user_id === newOccupantUserId) {
+    return { occupant: currentOccupant, invitation: null };
+  }
+
+  if (currentOccupant !== null) {
+    await positionRepository.revokePositionOccupant(client, currentOccupant.id, { revokedBy: actorUserId });
+  }
+
+  await positionRepository.incrementPositionAccountTokenVersion(client, positionAccountId);
+  await positionRepository.revokeAllPositionAccountRefreshTokens(client, positionAccountId);
+  await positionRepository.clearPositionAccountMfaAndRecovery(client, positionAccountId);
+
+  const rawToken = security.generateRefreshToken();
+  const expiresAt = new Date(Date.now() + config.principalInvitationExpireHours * 60 * 60 * 1000);
+  const invitation = await positionAccountInvitationRepository.createInvitation(client, {
+    collegeId: account.college_id,
+    positionId: position.id,
+    level: position.level,
+    positionType: position.position_type,
+    email: account.official_email,
+    tokenHash: security.hashRefreshToken(rawToken),
+    createdBy: actorUserId,
+    expiresAt,
+  });
+
+  await notificationService.sendPositionAccountInvitationEmail(client, {
+    to: account.official_email,
+    collegeId: account.college_id,
+    positionTitle: position.title,
+    token: rawToken,
+    expiresAt: invitation.expires_at,
+  });
+
+  const occupant = await positionRepository.createPositionOccupant(client, {
+    collegeId: account.college_id, positionAccountId, userId: newOccupantUserId, assignedBy: actorUserId,
+  });
+
+  return { occupant, invitation };
+}
+
 module.exports = {
   PositionInvitationForbiddenError,
   PositionInvitationLevelNotSupportedError,
@@ -351,4 +438,6 @@ module.exports = {
   inviteToPosition,
   lookupPendingInvitation,
   acceptInvitation,
+  PositionAccountReassignmentNotFoundError,
+  reassignPositionOccupant,
 };

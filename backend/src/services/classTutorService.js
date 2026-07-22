@@ -35,6 +35,7 @@ const positionRepository = require('../repositories/positionRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const visibilityService = require('./visibilityService');
 const academicService = require('./academicService');
+const positionAccountInvitationService = require('./positionAccountInvitationService');
 const security = require('../security');
 
 const STAFF_LEVEL = 4;
@@ -94,29 +95,23 @@ async function ensureClassTutorPosition(client, { collegeId, classId, createdBy 
 }
 
 // Closes whoever currently occupies the class's Class Tutor Position
-// (if anyone) and opens a new occupant link for newTutorUserId —
-// mirrors staffService.swapHodOccupant exactly. Idempotent:
-// re-assigning the same person is a no-op, not a needless
-// revoke-then-recreate. No session revocation/credential reset here —
-// same "no real Position Account sessions or credentials exist yet to
-// revoke" reasoning swapHodOccupant's own comment gives; the full
-// reassignment lifecycle (ADR-021 §10) is plan step 21/22, uniform
-// across every level, not duplicated ad hoc here.
+// (if anyone) and opens a new occupant link for newTutorUserId, plus
+// the full session-revocation/credential-reset lifecycle — Phase 2
+// step 22 wires this through positionAccountInvitationService.
+// reassignPositionOccupant (step 21, ADR-021 §10, decision 5) instead
+// of the bare occupant-swap this function used to do itself, so Class
+// Tutor reassignment gets the same token_version bump, refresh-token
+// revoke, and re-invite as every other level. Idempotent: re-assigning
+// the same person is a no-op (reassignPositionOccupant's own check).
 async function swapClassTutorOccupant(client, {
   collegeId, classId, newTutorUserId, actorUserId,
 }) {
   const { account } = await ensureClassTutorPosition(client, { collegeId, classId, createdBy: actorUserId });
-  const currentOccupant = await positionRepository.findActiveOccupant(client, account.id);
-  if (currentOccupant !== null) {
-    if (currentOccupant.user_id === newTutorUserId) {
-      return currentOccupant;
-    }
-    await positionRepository.revokePositionOccupant(client, currentOccupant.id, { revokedBy: actorUserId });
-  }
   try {
-    return await positionRepository.createPositionOccupant(client, {
-      collegeId, positionAccountId: account.id, userId: newTutorUserId, assignedBy: actorUserId,
+    const { occupant } = await positionAccountInvitationService.reassignPositionOccupant(client, {
+      positionAccountId: account.id, newOccupantUserId: newTutorUserId, actorUserId,
     });
+    return occupant;
   } catch (err) {
     // Phase 2 step 18: position_occupants_user_id_fkey (Postgres 23503)
     // replaces the old classes_tutor_user_id_fkey violation as the

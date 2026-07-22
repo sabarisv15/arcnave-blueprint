@@ -16,6 +16,7 @@ const classRepository = require('../src/repositories/classRepository');
 const positionRepository = require('../src/repositories/positionRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
 const staffService = require('../src/services/staffService');
+const positionAccountInvitationService = require('../src/services/positionAccountInvitationService');
 const classTutorService = require('../src/services/classTutorService');
 
 const CLASS_ROW = {
@@ -83,8 +84,15 @@ test('classTutorService.assignClassTutor', async (t) => {
     const createPositionMock = t.mock.method(positionRepository, 'createPosition', async () => ({ id: 'pos-1', level: 4, position_type: 'class_tutor' }));
     const createAccountMock = t.mock.method(positionRepository, 'createPositionAccount', async () => ({ id: 'acct-1' }));
     const createClassAssignmentMock = t.mock.method(positionRepository, 'createPositionClassAssignment', async () => ({ id: 'assign-1' }));
-    const findOccupantMock = t.mock.method(positionRepository, 'findActiveOccupant', async () => null);
-    const createOccupantMock = t.mock.method(positionRepository, 'createPositionOccupant', async (client, fields) => ({ id: 'occ-1', ...fields }));
+    // Phase 2 step 22: swapClassTutorOccupant now delegates the actual
+    // occupant swap to the shared reassignment lifecycle (step 21)
+    // instead of calling positionRepository directly — mock that one
+    // entry point rather than its internals.
+    const reassignMock = t.mock.method(
+      positionAccountInvitationService,
+      'reassignPositionOccupant',
+      async () => ({ occupant: { id: 'occ-1', userId: 'u1' }, invitation: { id: 'inv-1' } }),
+    );
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
       findClassMock.mock.restore();
@@ -92,14 +100,14 @@ test('classTutorService.assignClassTutor', async (t) => {
       createPositionMock.mock.restore();
       createAccountMock.mock.restore();
       createClassAssignmentMock.mock.restore();
-      findOccupantMock.mock.restore();
-      createOccupantMock.mock.restore();
+      reassignMock.mock.restore();
       auditMock.mock.restore();
     });
 
     const occupant = await classTutorService.assignClassTutor({}, 'class-1', { newTutorUserId: 'u1', actorUserId: 'hod-1' });
     assert.equal(occupant.userId, 'u1');
-    assert.equal(createOccupantMock.mock.calls[0].arguments[1].userId, 'u1');
+    assert.equal(reassignMock.mock.calls[0].arguments[1].positionAccountId, 'acct-1');
+    assert.equal(reassignMock.mock.calls[0].arguments[1].newOccupantUserId, 'u1');
     assert.equal(auditMock.mock.calls[0].arguments[1].action, 'class_tutor_assigned');
   });
 });
@@ -126,50 +134,59 @@ test('classTutorService.reassignClassTutor', async (t) => {
     const findAssignmentMock = t.mock.method(positionRepository, 'findActiveClassAssignment', async () => ({ position_id: 'pos-1' }));
     const findPositionMock = t.mock.method(positionRepository, 'findPositionById', async () => ({ id: 'pos-1', level: 4, position_type: 'class_tutor' }));
     const findAccountMock = t.mock.method(positionRepository, 'findPositionAccountByPositionId', async () => ({ id: 'acct-1' }));
-    const findOccupantMock = t.mock.method(positionRepository, 'findActiveOccupant', async () => ({ id: 'occ-old', user_id: 'u1' }));
-    const revokeOccupantMock = t.mock.method(positionRepository, 'revokePositionOccupant', async () => ({ id: 'occ-old', revoked_at: new Date() }));
-    const createOccupantMock = t.mock.method(positionRepository, 'createPositionOccupant', async (client, fields) => ({ id: 'occ-new', ...fields }));
+    // Phase 2 step 22: the revoke-old/create-new occupant swap now
+    // happens inside the shared reassignPositionOccupant lifecycle
+    // (step 21, already covered by reassign-position-occupant.test.js)
+    // — mock that one entry point rather than its internals.
+    const reassignMock = t.mock.method(
+      positionAccountInvitationService,
+      'reassignPositionOccupant',
+      async () => ({ occupant: { id: 'occ-new', userId: 'u2' }, invitation: { id: 'inv-1' } }),
+    );
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
       findClassMock.mock.restore();
       findAssignmentMock.mock.restore();
       findPositionMock.mock.restore();
       findAccountMock.mock.restore();
-      findOccupantMock.mock.restore();
-      revokeOccupantMock.mock.restore();
-      createOccupantMock.mock.restore();
+      reassignMock.mock.restore();
       auditMock.mock.restore();
     });
 
     await classTutorService.reassignClassTutor({}, 'class-1', { newTutorUserId: 'u2', actorUserId: 'hod-1' });
-    assert.equal(revokeOccupantMock.mock.callCount(), 1);
-    assert.equal(createOccupantMock.mock.calls[0].arguments[1].userId, 'u2');
+    assert.equal(reassignMock.mock.callCount(), 1);
+    assert.equal(reassignMock.mock.calls[0].arguments[1].positionAccountId, 'acct-1');
+    assert.equal(reassignMock.mock.calls[0].arguments[1].newOccupantUserId, 'u2');
     assert.equal(auditMock.mock.calls[0].arguments[1].action, 'class_tutor_reassigned');
   });
 
-  await t.test('is idempotent — reassigning to the SAME occupant is a no-op, no revoke/create', async () => {
+  await t.test('delegates the same-occupant no-op check to reassignPositionOccupant', async () => {
     const findClassMock = t.mock.method(classRepository, 'findById', async () => CLASS_ROW);
     mockHod(t, 'hod-1');
     const findAssignmentMock = t.mock.method(positionRepository, 'findActiveClassAssignment', async () => ({ position_id: 'pos-1' }));
     const findPositionMock = t.mock.method(positionRepository, 'findPositionById', async () => ({ id: 'pos-1', level: 4, position_type: 'class_tutor' }));
     const findAccountMock = t.mock.method(positionRepository, 'findPositionAccountByPositionId', async () => ({ id: 'acct-1' }));
-    const findOccupantMock = t.mock.method(positionRepository, 'findActiveOccupant', async () => ({ id: 'occ-1', user_id: 'u1' }));
-    const revokeOccupantMock = t.mock.method(positionRepository, 'revokePositionOccupant');
-    const createOccupantMock = t.mock.method(positionRepository, 'createPositionOccupant');
+    // Idempotency itself (no revoke/create for the same occupant) is
+    // reassignPositionOccupant's own behavior, proven in
+    // reassign-position-occupant.test.js — this test only proves
+    // classTutorService passes through its result unchanged.
+    const reassignMock = t.mock.method(
+      positionAccountInvitationService,
+      'reassignPositionOccupant',
+      async () => ({ occupant: { id: 'occ-1', userId: 'u1' }, invitation: null }),
+    );
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
     t.after(() => {
       findClassMock.mock.restore();
       findAssignmentMock.mock.restore();
       findPositionMock.mock.restore();
       findAccountMock.mock.restore();
-      findOccupantMock.mock.restore();
-      revokeOccupantMock.mock.restore();
-      createOccupantMock.mock.restore();
+      reassignMock.mock.restore();
       auditMock.mock.restore();
     });
 
-    await classTutorService.reassignClassTutor({}, 'class-1', { newTutorUserId: 'u1', actorUserId: 'hod-1' });
-    assert.equal(revokeOccupantMock.mock.callCount(), 0);
-    assert.equal(createOccupantMock.mock.callCount(), 0);
+    const occupant = await classTutorService.reassignClassTutor({}, 'class-1', { newTutorUserId: 'u1', actorUserId: 'hod-1' });
+    assert.equal(occupant.userId, 'u1');
+    assert.equal(reassignMock.mock.calls[0].arguments[1].newOccupantUserId, 'u1');
   });
 });

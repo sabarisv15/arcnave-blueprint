@@ -378,6 +378,22 @@ async function revokePositionAccountRefreshToken(client, tokenId) {
   await client.query('UPDATE position_account_refresh_tokens SET revoked_at = now() WHERE id = $1', [tokenId]);
 }
 
+// Phase 2 step 21 — mirrors authRepository.revokeAllRefreshTokensForUser
+// exactly: the bulk half of "revocable individually or in bulk per
+// account" (revokePositionAccountRefreshToken above already does the
+// individual case). reassignPositionOccupant calls this alongside
+// incrementPositionAccountTokenVersion (belt-and-suspenders, same
+// reasoning ADR-021's reassignment lifecycle gives for doing both) —
+// the token_version bump alone invalidates access tokens, but a still-
+// valid, unrevoked refresh token would otherwise mint a fresh one right
+// past it.
+async function revokeAllPositionAccountRefreshTokens(client, positionAccountId) {
+  await client.query(
+    'UPDATE position_account_refresh_tokens SET revoked_at = now() WHERE position_account_id = $1 AND revoked_at IS NULL',
+    [positionAccountId],
+  );
+}
+
 module.exports = {
   createPosition,
   findPositionById,
@@ -406,6 +422,7 @@ module.exports = {
   createPositionAccountRefreshToken,
   getPositionAccountRefreshTokenByHash,
   revokePositionAccountRefreshToken,
+  revokeAllPositionAccountRefreshTokens,
   createPositionClassAssignment,
   findActiveClassAssignment,
   revokePositionClassAssignment,
