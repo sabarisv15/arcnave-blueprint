@@ -661,17 +661,32 @@ registerTool({
     + '"ECE", "Circulars", "2026-2027") match real Institutional Documents data for this college. Read-only — '
     + 'never uploads or moves anything. Always call this BEFORE telling the user their document was saved '
     + 'somewhere, and relay any "not found" field back to the user as a clarifying question rather than guessing. '
-    + 'Call this when the user names an actual document destination — a category, department, or year — while '
-    + 'talking about saving/uploading/filing a document (e.g. "save this under Circulars", "put it in the ECE '
-    + 'folder", "file this for 2026-2027"). Only pass the fields the user actually named; never invent a category, '
-    + 'department, or year to fill a param the user did not mention. If the user is only asking to upload a file '
-    + 'with no destination named yet, do NOT call this tool — ask them which category it belongs to first.',
+    + 'Call this when the user names an actual document destination while talking about saving/uploading/filing a '
+    + 'document — "save this under Circulars" names a category, "put it in the ECE folder" names a department '
+    + '(NOT a category, even though the word "folder" is used), "file this for 2026-2027" names an academic year. '
+    + 'Only pass the fields the user actually named; never invent a category, department, or year to fill a param '
+    + 'the user did not mention, and never put a value in the wrong field — see each parameter\'s own description '
+    + 'below for which kind of name belongs in it. Do NOT call this tool with every parameter empty: if the user is '
+    + 'only asking to upload/save/file a document and has not named ANY category, department, or year yet, skip '
+    + 'this tool entirely and ask them which category it belongs to first — an empty call wastes a round trip '
+    + 'this tool cannot answer anyway.',
   allowedRoles: ['principal', 'hod', 'staff'],
   params: {
     type: 'object',
     properties: {
-      category: { type: 'string', description: 'Document category name the user mentioned, e.g. "Circulars".' },
-      department: { type: 'string', description: 'Department name the user mentioned, e.g. "ECE". Omit if the user did not name one (college-wide).' },
+      category: {
+        type: 'string',
+        description: 'Document category (a folder-like grouping, e.g. "Circulars", "Curriculum", "Policies", '
+          + '"Notices") the user mentioned. This is NEVER a department/branch name — "ECE", "CSE", "Mechanical" and '
+          + 'similar branch names always belong in the department parameter below, not here, even if the user said '
+          + '"folder" or "put it in ECE".',
+      },
+      department: {
+        type: 'string',
+        description: 'Department or branch name the user mentioned, e.g. "ECE", "CSE", "Mechanical". Omit if the '
+          + 'user did not name one (college-wide). This is NEVER a document category — "Circulars", "Curriculum" '
+          + 'and similar category names always belong in the category parameter above, not here.',
+      },
       academic_year: { type: 'string', description: 'Academic year label the user mentioned, e.g. "2026-2027". Omit if the user did not name one (defaults to the current Active year).' },
     },
     additionalProperties: false,

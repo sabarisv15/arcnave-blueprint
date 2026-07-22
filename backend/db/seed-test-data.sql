@@ -101,6 +101,20 @@ DELETE FROM colleges              WHERE college_id = 'demo';
 INSERT INTO colleges (college_id, name, subdomain, subscription_status)
 VALUES ('demo', 'ARCNAVE Demo College', 'demo', 'trial');
 
+-- The same 7 default categories authService.acceptInvitation now seeds
+-- for any real college on principal-invite accept — 'demo' never goes
+-- through that flow (it's seeded directly here), so it needs its own
+-- copy to exercise Institutional Documents / resolve_document_destination
+-- against realistic data instead of an empty table.
+INSERT INTO document_categories (college_id, name, slug) VALUES
+  ('demo', 'Curriculum', 'curriculum'),
+  ('demo', 'Circulars', 'circular'),
+  ('demo', 'Academic Calendar', 'academic_calendar'),
+  ('demo', 'Examination', 'examination'),
+  ('demo', 'Policies', 'policies'),
+  ('demo', 'Forms', 'forms'),
+  ('demo', 'Notices', 'notices');
+
 -- --- Module 0/2: users + staff profiles ---
 -- Password for every seeded user: Test@1234
 -- (argon2id, generated via this repo's own argon2 dependency and
