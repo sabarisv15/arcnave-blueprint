@@ -1,10 +1,14 @@
 # ARCNAVE — Identity Architecture
 
-Status: Schema and resolution layer designed and built (see ADR-021,
-ADR-022, ADR-024). Not yet wired into any live enforcement path — the
-Current Model and Target Model columns throughout this document say
-exactly where that line sits today.
-Last updated: 2026-07-21
+Status: Both identity contexts shipped (see ADR-021, ADR-022, ADR-023,
+ADR-024). Personal Identity Context has been live since Phase 1;
+Institutional Identity Context (Position Account login,
+`resolveCapabilitiesForPosition`, the reassignment lifecycle, and the
+Class Tutor Level 4 `position_type` carve-out) shipped in Phase 2. The
+Current Model and Target Model columns throughout this document are
+kept as a historical record of what changed and when, not because a
+gap still exists — §14 states current status precisely.
+Last updated: 2026-07-22 (Phase 2 complete)
 
 ## 1. Purpose
 This document is the identity and authorization blueprint for ARCNAVE.
@@ -144,11 +148,20 @@ currently occupies it.
   here.
 - **Structural Level 3 (HOD-equivalent)** — platform-defined, scoped to
   whichever departments it currently owns (§5.3).
-- **Base Level 4 (staff)** — person-centric, not part of this account
-  model at all: no Position, no Position Account. Scope for this level
-  comes from role/assignment data outside this model entirely (e.g.
-  class-tutor or faculty-allocation assignments), not from anything
-  described here.
+- **Base Level 4 (staff)** — person-centric by default: plain staff
+  (no assignment) get no Position, no Position Account. **Narrow
+  carve-out (Phase 2)**: a Level 4 position row now CAN exist when it
+  carries a real `position_type` assignment — today, `'class_tutor'`.
+  Such a position follows the exact same Position/Account/Occupant
+  model as HOD, one level down: HOD-only assignment, scoped to the
+  HOD's own department. This is not a new level — `positions.level`'s
+  `1-4` range is unchanged; `position_type` is orthogonal to level, and
+  the schema stays open for future assignment types (Placement
+  Coordinator, NSS Coordinator, Library In-charge, Exam Cell) without
+  inventing a new level per assignment. Scope for a plain Level 4
+  staff member (no assignment) still comes from role/assignment data
+  outside this model entirely (e.g. faculty-allocation), not from
+  anything described here.
 
 ### 5.3 Department ownership
 A configurable-level or structural-level position may own one or more
@@ -220,16 +233,20 @@ own workspace and personal operations — it is deliberately allowed to
 reflect everything a person is entitled to, not scoped to a single
 office.
 
-### Institutional Identity Context (target, not yet built)
+### Institutional Identity Context (shipped, Phase 2)
 Represents a single institutional account (Position Account) rather
 than a person. Capabilities resolve *exclusively* for that one account
 — never merged with any other responsibilities the current occupant
-happens to also hold — via a second, position-scoped resolver
-(`resolveCapabilitiesForPosition`, planned) that sits alongside the
-frozen `resolveCapabilities` contract rather than replacing it. This
-context is for acting on behalf of a specific institutional entity
-(logging in "as HOD-CSE," not "as Alice"). Not yet implemented — see
-`docs/architecture/Phase2-Position-Account-Auth-Plan.md`.
+happens to also hold — via a second, position-scoped resolver,
+`identityService.resolveCapabilitiesForPosition` (ADR-023), that sits
+alongside the frozen `resolveCapabilities` contract (ADR-022) rather
+than replacing it. This context is for acting on behalf of a specific
+institutional entity (logging in "as HOD-CSE," not "as Alice") — live
+for Level 1/2/3 positions and the Class Tutor assignment (Level 4 +
+`position_type='class_tutor'`). See
+`docs/architecture/Phase2-Position-Account-Auth-Plan.md` for the
+delivery record and [[ADR-023-Institutional-Capability-Resolver]] for
+the frozen contract itself.
 
 ## 7. Capability Resolution
 
@@ -305,17 +322,21 @@ is how authentication actually happens today, provisioned alongside
 (not superseded by) the structural Position Account created at the
 same time.
 
-### Institutional Identity Context (target, not yet built)
-The Position Account already carries everything an authentication path
-needs (credential, MFA state, session-version counter, recovery
-methods), but nothing reads or writes it for authentication purposes
-yet. Building that path (Phase 2) adds a second, independent login
-mechanism — logging into a Position Account directly, rather than
-through a person's User record — producing an Institutional Identity
-Context (§6) instead of a Personal one. It is a new, additional
-capability, not a prerequisite for retiring the User-record-based flow;
-the two are expected to coexist — a person may have both a personal
-login and, separately, credentials for an office they occupy.
+### Institutional Identity Context (shipped, Phase 2)
+The Position Account carries everything an authentication path needs
+(credential, MFA state, session-version counter, recovery methods) and
+now has its own login path: `POST /position-accounts/login`/`/refresh`/
+`/logout`, invite-based credential bootstrap (`POST /positions/
+:positionId/invitations`, `POST /position-accounts/invitations/accept`)
+recursive by scope (Platform Admin → Level 1/2, Level 2 → HOD, HOD →
+Class Tutor within their own department), mirroring the personal-login
+route shapes. Logging into a Position Account directly, rather than
+through a person's User record, produces an Institutional Identity
+Context (§6) instead of a Personal one — a genuinely additional
+capability, not a replacement for the User-record-based flow; the two
+coexist by design — a person may have both a personal login and,
+separately, credentials for an office they occupy (two logins per
+person, deliberately).
 
 ## 9. Authorization
 
@@ -341,16 +362,21 @@ code-level role-to-permission map, not yet tenant-configurable, but its
 *input* (the role label) now comes from live position data every
 request, not from the User record's stored role.
 
-### Position-based permissions (shipped for Personal Identity Context; Institutional Identity Context not yet built)
-Enforced today for personal logins via the mechanism above. The
-Capability Resolver's effective-role output is a drop-in comparison
-against the same role labels the permission table already uses,
-specifically so the source of the role label could be swapped without
-reshaping every call site that checks it — which is exactly what
-happened. Not yet built: authorization for an Institutional Identity
-Context session (logging in as a specific office), which needs its own
-position-scoped resolver (`resolveCapabilitiesForPosition`, planned,
-Phase 2) rather than reusing this one — see §6.
+### Position-based permissions (shipped for both identity contexts)
+Enforced for personal logins via the mechanism above; enforced for
+Position Account (Institutional Identity Context) sessions via its own
+position-scoped resolver, `resolveCapabilitiesForPosition` (ADR-023) —
+see §6. `middleware/rbac.js`'s `requirePermission` needed no change to
+support the second context: it already only reads `req.capabilities.
+effectiveRole`, regardless of which resolver populated it.
+`PERMISSION_ROLES` gained entries for the two new effective-role labels
+Institutional sessions can produce (`'level2'`, `'class_tutor'`) that
+Personal sessions never do. The Capability Resolver's effective-role
+output is a drop-in comparison against the same role labels the
+permission table already used, specifically so the source of the role
+label could be swapped without reshaping every call site that checks
+it — which is exactly what happened, twice now (Phase 1 for Personal,
+Phase 2 for Institutional).
 
 ### Workflow integration (shipped)
 Approval routing (`workflowChainService.resolveRoleUserId`) resolves
@@ -369,21 +395,31 @@ reverse slot→occupant lookup — not a static User-record role label.
 - **Occupancy** — established by opening a new occupant link; at most
   one is active per account at any time, enforced at the database
   level.
-- **Reassignment** *(Target Model — specified by ADR-021, not yet
-  implemented by any component)* — a single, atomic, all-or-nothing
-  operation:
+- **Reassignment** *(shipped, Phase 2 — implemented exactly as
+  specified by ADR-021, with one documented amendment to step 4, see
+  ADR-021's "Amendments")* — a single, atomic, all-or-nothing
+  operation, `positionAccountInvitationService.reassignPositionOccupant`,
+  uniform across Level 1/2/3 and the Class Tutor assignment, not
+  per-type copies:
   1. Revoke all active sessions for the account.
   2. Invalidate every outstanding refresh credential.
   3. Increment the session-version counter.
-  4. Reset the password credential to a temporary one.
+  4. Reset credentials via a fresh invite (amended from "a temporary
+     password" — reuses the same invite/accept mechanism first-time
+     bootstrap already uses).
   5. Clear MFA enrollment and recovery methods.
   6. Close the old occupant link, open the new one.
   7. Require password change and MFA re-enrollment on the new
-     occupant's first login.
+     occupant's first login (enforced by the ordinary invite-accept
+     flow, since step 4 always routes through it now).
 
   Unchanged by this sequence: the official mailbox, resolved
   permissions, and audit history — reassignment resets who can log in,
-  never what the position is or has done.
+  never what the position is or has done. Runs unconditionally
+  whenever the occupant actually changes, including filling a
+  previously vacant seat — not only when replacing someone. Idempotent:
+  reassigning to the current occupant is a no-op, not a needless
+  revoke/reset cycle.
 - **Retirement** — no Position or Position Account row is ever removed.
   "Retiring" a position means it has no active occupant and none is
   expected — represented by the absence of an active occupant link,
@@ -415,16 +451,24 @@ the fact.
 ```
 
 ### JWT
-Session tokens carry the tenant, the person, their role label, a
-session-version number, and a token type — minted at login or refresh.
-Nothing in the token today references Position Accounts or occupancy.
+Two token shapes now exist, distinguished by `type`. Personal tokens
+(`type: 'access'`) carry the tenant, the person, their role label, a
+session-version number — minted at login or refresh via the User
+record. Position Account tokens (`type: 'position_access'`) carry
+`sub: positionAccountId` (never a `userId`, specifically so there is
+nothing to accidentally union against), the tenant, `token_version`,
+and no `role` claim at all — role is derived fresh every request from
+live position state via `resolveCapabilitiesForPosition`, never trusted
+from the token.
 
 ### Session-version counter
-Exists on both the User record (live) and the Position Account
-(schema-ready, unused — no authentication path writes or reads it
-yet). Incremented on password reset, MFA reset, or (once reassignment
-is implemented) an occupant change; every increment invalidates every
-previously issued token for that identity.
+Exists on both the User record and the Position Account, both live.
+`users.token_version` backs Personal sessions (Phase 1);
+`position_accounts.token_version` backs Institutional sessions (Phase
+2) via its own lookup path (`middleware/sessionRevocation.js`'s
+`'position_access'` branch), not a reuse of the User-record check.
+Incremented on password reset, MFA reset, or an occupant change; every
+increment invalidates every previously issued token for that identity.
 
 ### Session revocation (ADR-024)
 A revocation check runs unconditionally on every authenticated
@@ -490,24 +534,41 @@ Current Model / Target Model notes in the sections above elaborate on
 individual rows here; if implementation status changes, this table and
 the corresponding section notes must be updated together.
 
-| Area | Current Model | Target Model |
+| Area | Phase 1 (Personal Identity Context) | Phase 2 (Institutional Identity Context) |
 |---|---|---|
-| Data model | Position/Account/Occupant/Module-scope/Department-scope tables exist, tenant-isolated, additive only | Same data model, fully consumed |
+| Data model | Position/Account/Occupant/Module-scope/Department-scope tables exist, tenant-isolated, additive only | + `position_class_assignments`, `position_account_invitations`, `position_account_refresh_tokens`, `positions.position_type` — same data model, fully consumed |
 | Structural Level 1 provisioning | Automatic, unconditional, at institution onboarding | Unchanged |
-| Resolution layer | Personal Identity Context (`resolveCapabilities`) live — called from authorization, workflow routing, visibility, and audit (Phase 1, `35092a2`..`231a5cc`) | Institutional Identity Context (`resolveCapabilitiesForPosition`) added alongside it, scoped per-office, never merged with Personal |
-| Authentication | Personal Identity Context: User-record based, live for every level | Institutional Identity Context: Position Account authentication, coexisting with (not replacing) the User-record path |
-| Session revocation | Enforced unconditionally, but only against the User record today; the Position Account's session-version counter exists unused | Position Account session-version counter checked once its authentication path exists |
-| Authorization | Personal Identity Context feeds the permission table's role input live (`req.capabilities.effectiveRole`); the table itself is still static/legacy-role-shaped | Institutional Identity Context authorization for Position Account sessions, via its own position-scoped resolver |
-| Workflow routing | Resolves 'principal'/'hod' via `identityService.resolvePositionOccupant`, not a stored role label | Unchanged — already consumes resolved capabilities |
-| Reassignment lifecycle | Specified, not implemented by any component | A real, atomic reassignment operation exists and is callable |
-| Audit identity | Only the Actor is recorded | Acting Position Account and Position recorded alongside the Actor |
-| Migration/backfill tooling | Removed — no live institution predates this schema | N/A unless a real live migration need arises |
+| Resolution layer | `resolveCapabilities` live — called from authorization, workflow routing, visibility, and audit (`35092a2`..`231a5cc`) | `resolveCapabilitiesForPosition` (ADR-023) live alongside it, scoped per-office, never merged with Personal |
+| Authentication | User-record based, live for every level | Position Account login/refresh/logout live for Level 1/2/3 and Class Tutor, coexisting with (not replacing) the User-record path |
+| Session revocation | Enforced unconditionally against the User record's `token_version` | Enforced unconditionally against `position_accounts.token_version`, its own lookup path |
+| Authorization | Feeds the permission table's role input live (`req.capabilities.effectiveRole`); the table itself is still static/legacy-role-shaped | Institutional sessions feed the same table via `resolveCapabilitiesForPosition`'s effective-role output (`'level2'`/`'class_tutor'` are new labels this phase added) |
+| Workflow routing | Resolves 'principal'/'hod' via `identityService.resolvePositionOccupant` | Extended to a `{classId}` overload resolving 'tutor' via the same mechanism |
+| Reassignment lifecycle | Specified by ADR-021, not yet implemented | Implemented — one shared, atomic operation (`reassignPositionOccupant`) uniform across L1/L2/L3/Class-Tutor, with the invite-based credential-reset amendment documented in ADR-021 |
+| Audit identity | Only the Actor is recorded | Still only the Actor recorded — Acting Position Account/Position fields remain part of the model's contract for a future call-site sweep, not yet populated by any Phase 2 call site |
+| `classes.tutor_user_id` | Live, bare FK, global-UNIQUE | Removed entirely — Class Tutor is a full Position Account; `grep -rn tutor_user_id backend/src` returns nothing outside migration files |
+| Migration/backfill tooling | Removed — no live institution predates this schema | Unchanged |
+
+**Not yet built, either phase**: Position Account MFA enrollment UX
+(columns exist, no enrollment flow to fork from — explicitly deferred,
+ADR-021 decision 8 of the Phase 2 plan); a cache layer for either
+resolver (ADR-026, deferred for both symmetrically); AI's Policy Gate
+still reads the raw JWT role claim, not either identity context (§13,
+scoped as Phase 3, see
+`docs/architecture/Phase3-AI-Identity-Context-Integration.md`).
 
 ## 15. Related Documents
 - `docs/adr/ADR-021-Institutional-Position-Account-Model.md` — the
-  data model and occupant-reassignment lifecycle decision.
+  data model and occupant-reassignment lifecycle decision, amended in
+  Phase 2 (Level 4 `position_type='class_tutor'` carve-out,
+  invite-based credential reset).
 - `docs/adr/ADR-022-Identity-Resolver-Contract.md` — the Capability
-  Resolver's frozen public contract.
+  Resolver's frozen public contract (`resolveCapabilities`, Personal
+  Identity Context).
+- `docs/adr/ADR-023-Institutional-Capability-Resolver.md` — the sibling
+  contract for `resolveCapabilitiesForPosition`, Institutional Identity
+  Context (Phase 2).
+- `docs/architecture/Phase2-Position-Account-Auth-Plan.md` — the full
+  Phase 2 delivery plan and record (23 steps, 6 groups).
 - `docs/adr/ADR-024-Session-Revocation.md` — the session-revocation
   mechanism and its rationale for deferring a cache layer.
 - `docs/adr/ADR-025-Migration-Rollback-Policy.md` — superseded backfill
@@ -533,10 +594,16 @@ appendix is stale and should be corrected.
 
 | Concept | Current implementation |
 |---|---|
-| Position / Position Account / Occupant / scope tables | `positions`, `position_accounts`, `position_occupants`, `position_module_assignments`, `position_department_assignments` |
-| Capability Resolver façade | `services/identityService.js` (`resolveCapabilities`) |
-| Individual resolvers | `services/identity/positionResolver.js`, `moduleResolver.js`, `departmentResolver.js`, `assignmentResolver.js`, `visibilityResolver.js` |
-| Authentication Service | `services/authService.js` |
+| Position / Position Account / Occupant / scope tables | `positions` (incl. `position_type`), `position_accounts`, `position_occupants`, `position_module_assignments`, `position_department_assignments`, `position_class_assignments` |
+| Personal Capability Resolver façade | `services/identityService.js` (`resolveCapabilities`) |
+| Institutional Capability Resolver façade | `services/identityService.js` (`resolveCapabilitiesForPosition`) |
+| Individual resolvers | `services/identity/positionResolver.js`, `moduleResolver.js`, `departmentResolver.js`, `classResolver.js`, `assignmentResolver.js`, `visibilityResolver.js` |
+| Personal authentication | `services/authService.js` |
+| Institutional (Position Account) authentication | `services/positionAccountAuthService.js` |
+| Institutional invite/accept/reassign | `services/positionAccountInvitationService.js` (`inviteToPosition`, `acceptInvitation`, `reassignPositionOccupant`) |
+| Class Tutor assignment/reassignment | `services/classTutorService.js` (`assignClassTutor`, `reassignClassTutor`) |
 | Session revocation check | `middleware/sessionRevocation.js` |
+| Identity resolution middleware | `middleware/identity.js` |
 | Role→permission table | `middleware/permissions.js` |
 | Workflow routing | `services/workflowChainService.js` |
+| Position Account routes | `routes/positionAccounts.js`, `routes/classes.js` (`POST`/`PUT /classes/:id/tutor`) |

@@ -186,19 +186,30 @@ new rule is decided, in the module that owns it.
   are emailed → login is enabled only once credentials exist.
 - HOD registration chain: HOD submits a profile request → Principal
   approves → credentials generated.
-- Class Tutor is assigned only by HOD, for one class at a time;
-  credentials for the Class Profile are sent automatically once
-  assigned.
-- **Resolved (Module 2 kickoff)** — Class Tutor: an assignment on a
-  Faculty member, not a separate role. `users.role` does not gain a
-  `class_tutor` value; a class/section record carries a tutor
-  reference (a faculty user_id) instead. A faculty member's `role`
-  stays `staff` regardless of whether they currently hold a tutor
-  assignment — "role" means job title, tutor-of-a-class is a
-  duty layered on top of it, checked via the assignment, not via
-  `requireRole`. Matches the registration chains below unchanged:
-  "Class Tutor is assigned only by HOD" is an assignment action, not
-  a role grant.
+- Class Tutor is assigned only by HOD, for one class at a time, scoped
+  to the HOD's own department; credentials for the Class Tutor Position
+  Account are sent automatically once assigned (an invite, not a
+  mailed password — see the Institutional identity model rule below).
+- **Resolved (Phase 2)** — Class Tutor is a real Institutional Position
+  Account, not a bare FK on `classes` and not a separate `users.role`
+  value either. `users.role` still does not gain a `class_tutor`
+  value — "role" means job title, and a faculty member's `role` stays
+  `staff` regardless of whether they currently hold a tutor assignment.
+  What changed from the earlier design: instead of `classes` carrying a
+  plain `tutor_user_id` FK, a Class Tutor assignment is a Level 4
+  Position (`positions.position_type = 'class_tutor'`, `positions.level`
+  unchanged at 4 — not a new level) following the identical
+  Position/Account/Occupant model HOD already uses one level up, linked
+  to its class via `position_class_assignments`. `classes.tutor_user_id`
+  has been fully removed. "Class Tutor is assigned only by HOD" is
+  still an assignment action, not a role grant — enforced via
+  `POST`/`PUT /classes/:id/tutor` (permission `classes.assign_tutor`,
+  HOD-only, own-department-scoped), not via `requireRole` and not via
+  `PATCH /classes/:id` (which now explicitly rejects `tutorUserId`
+  rather than silently accepting it). See
+  `docs/architecture/Identity-Architecture.md` §5.2 and
+  [[ADR-021-Institutional-Position-Account-Model]]'s Amendments section
+  for the full model.
 - **Staff lifecycle**: every staff member has a Permanent Internal ID
   for their whole institutional lifecycle; the institution-issued
   Staff ID/Employee Code may change on reappointment, but historical
@@ -215,25 +226,31 @@ new rule is decided, in the module that owns it.
   staff member may hold multiple institutional roles/duties
   simultaneously; existing duties continue unless explicitly
   reassigned.
-- **Institutional identity model (Position Accounts)**: for Level 1
-  and Level 3 positions, the permanent identity is the Institutional
-  Position Account, not the person — one account per position,
-  created once, never deleted (ADR-021). Occupant reassignment (e.g.
-  a new Principal appointed) is a single atomic operation: revoke all
-  active sessions, invalidate every refresh token, increment
-  `token_version`, reset credentials and MFA enrollment, and require
-  password/MFA re-enrollment on the new occupant's first login;
-  official email/mailbox, resolved permissions, and audit history
-  carry over unchanged. Level 1 accounts are provisioned automatically
-  and unconditionally when a college's Principal invitation is
-  accepted — standing behavior, not a rollout flag. Level 2 positions
-  are Principal-configured per institution; Level 4 (ordinary staff)
-  stays person-centric and outside this account model. **Current
-  state**: `position_accounts`/`position_occupants` are provisioned,
-  but authentication still runs through `users.role`, not through
-  Position Accounts — the two identity paths coexist until a
-  Position-Account login path is built; do not assume Position-Account
-  credentials are live for end-user login yet.
+- **Institutional identity model (Position Accounts)**: for Level 1,
+  Level 2, and Level 3 positions, and for the Class Tutor assignment
+  (Level 4 + `position_type='class_tutor'`), the permanent identity is
+  the Institutional Position Account, not the person — one account per
+  position, created once, never deleted (ADR-021). Occupant
+  reassignment (e.g. a new Principal appointed, or a class's tutor
+  changed) is a single atomic operation, uniform across all four:
+  revoke all active sessions, invalidate every refresh token, increment
+  `token_version`, reset credentials via a fresh invite (not a mailed
+  temporary password — ADR-021's Amendments), and clear MFA enrollment;
+  official email/mailbox, resolved permissions, and audit history carry
+  over unchanged. Level 1 accounts are provisioned automatically and
+  unconditionally when a college's Principal invitation is accepted —
+  standing behavior, not a rollout flag. Level 2 positions are
+  Principal-configured per institution; Class Tutor positions are
+  HOD-provisioned, own-department-scoped, on first assignment; plain
+  Level 4 staff (no assignment) stay person-centric and outside this
+  account model entirely. **Current state (Phase 2 shipped)**:
+  Position Account login/refresh/logout and invite-based credential
+  bootstrap are live for all four — a person may hold both a personal
+  login and, separately, credentials for an office they occupy, and the
+  two never resolve capabilities into one union (see
+  `docs/architecture/Identity-Architecture.md` §6 for the two identity
+  contexts and [[ADR-023-Institutional-Capability-Resolver]] for the
+  resolution contract).
 - **Session revocation** (ADR-024): every authenticated request
   re-validates `token_version` against the database, unconditionally.
   Password reset, MFA reset, or a Position Account occupant change all

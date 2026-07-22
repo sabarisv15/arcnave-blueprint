@@ -4,9 +4,13 @@ Status: Complete (migration → repository → service → API → UI, two
 slices: `classes` then `timetable_periods` + `faculty_allocation`).
 
 ## Tables
-- `classes` — class/section identity, `tutor_user_id` → `users(id)`
-  (never `staff(id)`, per BusinessRules' "Resolved (Module 2 kickoff)"
-  entry), `timetable_data` JSONB (opaque CSV-derived grid — matches
+- `classes` — class/section identity. Tutor-of-record is no longer a
+  column on this table: Class Tutor is a full Institutional Position
+  Account (`positions.position_type='class_tutor'`), assigned via
+  `POST`/`PUT /classes/:id/tutor`, not a `tutor_user_id` FK (Phase 2 —
+  see BusinessRules' Staff section "Resolved (Phase 2)" entry and
+  ADR-021's Amendments). `timetable_data` JSONB (opaque CSV-derived
+  grid — matches
   the real TutorClass.jsx/TutorClassMonitor.jsx rendering, not
   normalized), `timetable_status` (`No Tutor`/`Pending HOD`/`Pending
   Principal`/`Approved`/`Rejected` — no CHECK, service-enforced).
