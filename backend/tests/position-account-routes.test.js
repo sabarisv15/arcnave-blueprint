@@ -101,6 +101,10 @@ test('Position Account routes (Phase 2 step 7)', async (t) => {
       await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [cid]);
       // eslint-disable-next-line no-await-in-loop
       await cleanupPositionRows(adminPool, cid);
+      // eslint-disable-next-line no-await-in-loop -- Phase 4 Group (d)'s own faculty_allocation fixture FKs classes/timetable_periods, so both must run before the classes delete below
+      await adminPool.query('DELETE FROM faculty_allocation WHERE college_id = $1', [cid]);
+      // eslint-disable-next-line no-await-in-loop
+      await adminPool.query('DELETE FROM timetable_periods WHERE college_id = $1', [cid]);
       // eslint-disable-next-line no-await-in-loop -- Phase 3 Group (d)'s own class fixtures; classes.department_id FKs departments, so this must run before that delete
       await adminPool.query('DELETE FROM classes WHERE college_id = $1', [cid]);
       // eslint-disable-next-line no-await-in-loop
@@ -493,6 +497,82 @@ test('Position Account routes (Phase 2 step 7)', async (t) => {
     );
     assert.equal(personalDenied.status, 403);
     assert.equal(institutionalDenied.status, 403);
+  });
+
+  // Phase 4 Group (d) — final HTTP-level verification for AI Downstream
+  // Scope Fidelity (Phase4-AI-Downstream-Scope-Fidelity.md). Phase 3
+  // Group (d)'s own "same office, two auth paths" test above found that
+  // Personal and Institutional identity contexts resolve IDENTICAL
+  // effectiveRole/scope for a person holding exactly ONE position — by
+  // design, not a gap (Personal unions in that same position). A
+  // genuine divergence therefore needs a fixture where the two scopes
+  // are real DATA, not just tool-access booleans, and actually differ:
+  // one person who is BOTH a Class Tutor Position Account holder for
+  // one class AND independently faculty-allocated (subject teacher,
+  // unrelated to their tutorship) to a second class. Their Personal
+  // login (identityService.resolveCapabilities, SELF_ASSIGNED scope)
+  // legitimately unions both classes; their Class Tutor Position
+  // Account's own Institutional scope is exactly the one class it maps
+  // to — this is the concrete "returns provably different, individually
+  // correct data from the same tool" claim the phase's own Definition
+  // of Done names, over a real HTTP + Postgres round trip, not a mock.
+  await t.test('Phase 4 Group (d): a Class Tutor Position Account sees only its own class; the same occupant\'s Personal login sees that class PLUS an independent faculty allocation too', async () => {
+    const collegeId = await seedCollege('p4fid');
+    const tutorClassResult = await adminPool.query('INSERT INTO classes (college_id, class_name) VALUES ($1, $2) RETURNING id', [collegeId, 'P4-Tutor-Class']);
+    const tutorClassId = tutorClassResult.rows[0].id;
+    const facultyClassResult = await adminPool.query('INSERT INTO classes (college_id, class_name) VALUES ($1, $2) RETURNING id', [collegeId, 'P4-Faculty-Class']);
+    const facultyClassId = facultyClassResult.rows[0].id;
+
+    const occupantResult = await adminPool.query(
+      `INSERT INTO users (college_id, username, email, password_hash, role, is_active)
+       VALUES ($1, $2, $2 || '@example.test', 'x', 'staff', true) RETURNING id`,
+      [collegeId, `p4occupant${crypto.randomUUID().slice(0, 8)}`],
+    );
+    const occupantUserId = occupantResult.rows[0].id;
+
+    const { accountId: tutorAccountId } = await seedClassTutorPosition(
+      adminPool, { collegeId, userId: occupantUserId, classId: tutorClassId },
+    );
+
+    // Independent of the tutorship above — a real, structured
+    // faculty_allocation row, the same "subject teacher, not tutor"
+    // link facultyAllocationRepository.findByStaffUserId reads
+    // elsewhere in this suite (see attendance.test.js's own fixture).
+    const periodResult = await adminPool.query(
+      `INSERT INTO timetable_periods (college_id, day_of_week, hour_index, start_time, end_time)
+       VALUES ($1, 'Monday', 1, '09:00', '10:00') RETURNING id`,
+      [collegeId],
+    );
+    await adminPool.query(
+      `INSERT INTO faculty_allocation (college_id, class_id, period_id, subject, staff_user_id)
+       VALUES ($1, $2, $3, 'Mathematics', $4)`,
+      [collegeId, facultyClassId, periodResult.rows[0].id, occupantUserId],
+    );
+
+    const personalTok = await personalToken(collegeId, occupantUserId);
+    const institutionalTok = security.createPositionAccessToken({ positionAccountId: tutorAccountId, collegeId });
+
+    const collegeRow = await adminPool.query('SELECT subdomain FROM colleges WHERE college_id = $1', [collegeId]);
+    const subdomain = collegeRow.rows[0].subdomain;
+
+    const institutionalResp = await post(
+      baseUrl, '/api/v1/ai/tools/academic_class_timetable/invoke', { authorization: `Bearer ${institutionalTok}`, host: hostFor(subdomain) }, { params: {} },
+    );
+    assert.equal(institutionalResp.status, 200);
+    const institutionalData = JSON.parse(institutionalResp.body.entries[0].data);
+    assert.deepEqual(institutionalData.map((row) => row.classId), [tutorClassId],
+      "the Class Tutor Position Account's own Institutional scope must be exactly its one mapped class, never re-derived to the occupant's broader Personal scope");
+
+    const personalResp = await post(
+      baseUrl, '/api/v1/ai/tools/academic_class_timetable/invoke', { authorization: `Bearer ${personalTok}`, host: hostFor(subdomain) }, { params: {} },
+    );
+    assert.equal(personalResp.status, 200);
+    const personalData = JSON.parse(personalResp.body.entries[0].data);
+    assert.deepEqual(
+      personalData.map((row) => row.classId).sort(),
+      [facultyClassId, tutorClassId].sort(),
+      "the SAME occupant's Personal login legitimately unions the tutored class with the independent faculty allocation — genuinely different data from the Institutional session above, not a coincidence",
+    );
   });
 
   await t.test('a plain staff actor (no Level 2 position) cannot invite Level 3', async () => {

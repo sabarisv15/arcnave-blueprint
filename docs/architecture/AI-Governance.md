@@ -203,18 +203,31 @@ none: granting it speculatively would pre-empt product policy this
 document doesn't own. Below reflects that explicit per-tool audit, not
 silence.
 
-Downstream scope re-derivation for a Position Account session remains a
-known gap, broader than originally scoped here: Business Services that
-compute their own scope from `{actorUserId, actorRole}` (e.g.
+**Fixed in Phase 4** (`docs/architecture/Phase4-AI-Downstream-Scope-Fidelity.md`):
+downstream scope re-derivation for a Position Account session was a
+known gap noted here at the end of Phase 3 — Business Services that
+computed their own scope from `{actorUserId, actorRole}` (e.g.
 `studentService.listStudents` via `visibilityService`/
-`actorContextService.buildActorContext`) resolve the underlying
+`actorContextService.buildActorContext`) resolved the underlying
 person's **Personal** Identity Context from their user id, not the
-Position Account's Institutional scope the AI Policy Gate itself now
-correctly reads — for any Institutional role, not only the two added
-here. Not fixed in Phase 3 (would require rewiring every AI-tool-backing
-service to consume `req.capabilities` directly instead of re-deriving —
-its own larger refactor); tracked as a real, not hypothetical, item for
-whenever that rewiring happens.
+Position Account's Institutional scope the AI Policy Gate itself
+already correctly read. A background audit found the real blast radius
+was narrow — 5 call sites across `analyticsService.
+getAttendanceRateForActor`, `assessmentService.listMarksForActor`,
+`academicService.getClassTimetableForActor`, `documentSearchService.
+searchDocuments`, and `studentService.listStudents`'s `staff` branch —
+not the larger "rewire every service to consume `req.capabilities`
+directly" refactor originally feared. Each now accepts either the
+legacy shape or a pre-built `ActorContext` (a new pure helper,
+`aiActorContext.buildActorContextForIdentity(identityContext)`, maps
+Phase 3's already-resolved identity context onto it with zero DB call);
+`aiToolRegistry.js`'s 5 tool handlers build and pass that ActorContext
+instead of the legacy shape. Every non-AI (human dashboard) caller of
+these functions is untouched — the legacy shape still resolves exactly
+as before. Verified end-to-end over a real HTTP + Postgres round trip
+(`tests/position-account-routes.test.js`): a Class Tutor Position
+Account's own scope is provably narrower than the same occupant's
+Personal scope when the two genuinely differ.
 
 **Read (L1):**
 
