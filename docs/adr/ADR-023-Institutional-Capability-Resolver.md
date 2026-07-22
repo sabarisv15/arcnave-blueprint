@@ -112,6 +112,14 @@ ROLES` gained new entries for `'level2'`/`'class_tutor'`.
 - Full existing suite green throughout (`resolveCapabilities`'s own
   ADR-022 shape untouched by this addition).
 
+## Note (Phase 3)
+AI (`routes/ai.js`/`aiToolRegistry.js`) is now a consumer of whichever
+context this resolver (or `resolveCapabilities`) produced — it reads
+`req.capabilities.effectiveRole` generically, never branching on which
+of the two resolvers ran. See
+`docs/architecture/Phase3-AI-Identity-Context-Integration.md`. This
+ADR's own contract is unchanged; AI is simply a new caller.
+
 ## Related
 - [[ADR-021-Institutional-Position-Account-Model]] — the data model
   this resolver reads from; see that ADR's "Amendments" section for the

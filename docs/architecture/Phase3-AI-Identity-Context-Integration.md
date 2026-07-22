@@ -369,7 +369,43 @@ is ever built there.
    proves the structured block actually appears in what gets sent to
    the LLM.
 
-**(d) Verification:**
+**(d) Verification — DONE:**
+
+Both proofs shipped in `tests/position-account-routes.test.js`, at the
+real `/api/v1/ai/tools/:name/invoke` HTTP+DB level (no LLM call
+needed — the Policy Gate's 200/403 outcome is itself the observable
+proof of which effectiveRole/tool-set each auth path resolved):
+- **Different offices**: an HOD (Personal login) and a separate
+  person's Class Tutor (Position Account login) — `staff_roster`
+  (hod-only) admits the HOD and 403s the Class Tutor; `mark_attendance_nl`
+  (both, per Group (b)) admits both, proving that grant works end to
+  end over real HTTP+DB, not just the Policy Gate's own unit-level
+  audit.
+- **Same office, two auth paths**: the same person's Personal login and
+  that same person's own HOD Position Account get IDENTICAL tool
+  access (`staff_roster` 200/200, `finance_status_summary` 403/403).
+  **Correction from the plan's original framing**: for a person holding
+  exactly one position, this codebase's Personal resolver
+  (`resolveCapabilities`) is a priority PICK across whatever positions
+  the person occupies, not an additive union — so behavioral parity,
+  not divergence, is the correct outcome here; "provably different"
+  lives in `identityContext`'s own structural construction
+  (`positionAccountId`: `null` vs. the real id), proven at the unit
+  level in `ai-service.test.js`'s `aiActorContext.describeIdentityContext`
+  "same office, two auth paths" test (Group (c)), which also confirms
+  the rendered prompt block is correctly identical (that function
+  deliberately never reads `positionAccountId`).
+
+9. Full suite green: 1294 tests, 0 failures. `AI-Governance.md` §8/§8a
+already reflect shipped state (Group (b)). A one-line note added to
+`docs/adr/ADR-023-Institutional-Capability-Resolver.md` recording that
+AI is now a consumer of its own contract.
+
+**Phase 3 (AI Identity Context Integration) is now fully shipped —
+groups (a)/(b)/(c)/(d), all 9 steps.**
+
+<details><summary>Original step 8 wording (superseded by the DONE note above, kept for history)</summary>
+
 8. Two dual-context proofs, not one — reviewer feedback: the original
    draft only compared two *different* offices (HOD vs. Class Tutor).
    Add a second, more precise proof using the *same* office through
@@ -394,40 +430,48 @@ is ever built there.
    doesn't add a new one; a one-line note in ADR-023's own file noting
    "AI is now a consumer, see Phase 3" is enough if anything.
 
+</details>
+
 ## Definition of Done
 
-- [ ] `routes/ai.js` builds `identityContext` from `req.capabilities`
+- [x] `routes/ai.js` builds `identityContext` from `req.capabilities`
       only, for both `/ai/tools/:name/invoke` and `/ai/ask` — zero
       remaining reads of `req.jwtClaims.role` in either route.
-- [ ] `grep -rn "jwtClaims.role" backend/src/routes/ai.js
+- [x] `grep -rn "jwtClaims.role" backend/src/routes/ai.js
       backend/src/services/aiToolRegistry.js
       backend/src/services/aiClassificationAccess.js
       backend/src/services/aiService.js` returns nothing — reviewer
       feedback: an explicit, automatable check future contributors can
       re-run, not just "we're pretty sure we caught every read site,"
       the same discipline Phase 2's own DoD used for `grep -rn
-      tutor_user_id backend/src`.
-- [ ] Neither `routes/ai.js` nor `aiToolRegistry.js` contains any branch
+      tutor_user_id backend/src`. Re-verified at Group (d).
+- [x] Neither `routes/ai.js` nor `aiToolRegistry.js` contains any branch
       testing "is this a Personal or Institutional session" — the
       principle's own bar, checked by actually reading the diff, not
       just by the tests passing.
-- [ ] A Position Account (Institutional) session can successfully call
+- [x] A Position Account (Institutional) session can successfully call
       at least one AI tool it's entitled to, end to end, proven by a
       real test — not just that the code compiles.
-- [ ] `'level2'`/`'class_tutor'` are deliberately present or absent from
+- [x] `'level2'`/`'class_tutor'` are deliberately present or absent from
       each tool's `allowedRoles`, never merely omitted by oversight —
       every tool has an explicit yes/no captured in the audit (step 3),
       not silence.
-- [ ] The LLM receives a real, generically-derived actor-context string
+- [x] The LLM receives a real, generically-derived actor-context string
       that differs correctly between a Personal and an Institutional
       session — proven by inspecting the actual prompt sent, not just
       that a function returns a string.
-- [ ] `AI-Governance.md` §8 reflects the shipped state; §8a is gone.
-- [ ] Full existing suite green at every step, not just at the end.
-- [ ] Downstream Business Service scope re-derivation is explicitly
+- [x] `AI-Governance.md` §8 reflects the shipped state; §8a is gone.
+- [x] Full existing suite green at every step, not just at the end.
+- [x] Downstream Business Service scope re-derivation is explicitly
       untouched — grep confirms no `req.capabilities` reads were added
       to `studentService`/`staffService`/`analyticsService`/etc. as part
-      of this phase (see "Explicitly deferred").
+      of this phase (see "Explicitly deferred"). **Real finding, not
+      just confirmed absent**: this re-derivation path (`buildActorContext`)
+      turns out to already ignore the caller's role/identity entirely for
+      EVERY Position Account session, always re-resolving the occupant's
+      own Personal capabilities instead — a wider, pre-existing gap this
+      phase surfaced (Group (b)) but does not fix, left deferred for the
+      same reason (see "Explicitly deferred" below).
 
 ## Explicitly deferred (not silently expanded)
 

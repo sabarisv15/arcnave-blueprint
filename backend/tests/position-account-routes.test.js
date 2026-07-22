@@ -15,7 +15,7 @@ const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
 const notificationService = require('../src/services/notificationService');
-const { cleanupPositionRows } = require('./helpers/positionFixtures');
+const { seedHodPosition, seedClassTutorPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PLATFORM_PASSWORD = 'PlatformPass123!';
@@ -101,6 +101,8 @@ test('Position Account routes (Phase 2 step 7)', async (t) => {
       await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [cid]);
       // eslint-disable-next-line no-await-in-loop
       await cleanupPositionRows(adminPool, cid);
+      // eslint-disable-next-line no-await-in-loop -- Phase 3 Group (d)'s own class fixtures; classes.department_id FKs departments, so this must run before that delete
+      await adminPool.query('DELETE FROM classes WHERE college_id = $1', [cid]);
       // eslint-disable-next-line no-await-in-loop
       await adminPool.query('DELETE FROM departments WHERE college_id = $1', [cid]);
       // eslint-disable-next-line no-await-in-loop
@@ -371,6 +373,126 @@ test('Position Account routes (Phase 2 step 7)', async (t) => {
       { params: {} },
     );
     assert.equal(deniedResp.status, 403);
+  });
+
+  // Phase 3 Group (d) — final verification. Both tests below use the
+  // direct /ai/tools/:name/invoke endpoint (no LLM call, no mocking
+  // needed) — the Policy Gate outcome (200/403) is the observable proof
+  // of which effectiveRole/tool-set each auth path actually resolved,
+  // exercised over a real HTTP+DB round trip, not a unit-level stub.
+  await t.test("Phase 3 Group (d): different offices — an HOD's Personal login and a separate person's Class Tutor Position Account get correctly different, non-leaking tool access", async () => {
+    const collegeId = await seedCollege('d1off');
+    const deptResult = await adminPool.query('INSERT INTO departments (college_id, name) VALUES ($1, $2) RETURNING id', [collegeId, 'D1-CSE']);
+    const departmentId = deptResult.rows[0].id;
+    const classResult = await adminPool.query('INSERT INTO classes (college_id, class_name) VALUES ($1, $2) RETURNING id', [collegeId, 'D1-3rd-Sem-CSE-A']);
+    const classId = classResult.rows[0].id;
+
+    const hodUserResult = await adminPool.query(
+      `INSERT INTO users (college_id, username, email, password_hash, role, is_active)
+       VALUES ($1, $2, $2 || '@example.test', 'x', 'staff', true) RETURNING id`,
+      [collegeId, `d1hod${crypto.randomUUID().slice(0, 8)}`],
+    );
+    await seedHodPosition(adminPool, { collegeId, userId: hodUserResult.rows[0].id, departmentId });
+    const hodToken = await personalToken(collegeId, hodUserResult.rows[0].id);
+
+    const tutorUserResult = await adminPool.query(
+      `INSERT INTO users (college_id, username, email, password_hash, role, is_active)
+       VALUES ($1, $2, $2 || '@example.test', 'x', 'staff', true) RETURNING id`,
+      [collegeId, `d1tutor${crypto.randomUUID().slice(0, 8)}`],
+    );
+    const { accountId: tutorAccountId } = await seedClassTutorPosition(
+      adminPool, { collegeId, userId: tutorUserResult.rows[0].id, classId },
+    );
+    const tutorToken = security.createPositionAccessToken({ positionAccountId: tutorAccountId, collegeId });
+
+    const collegeRow = await adminPool.query('SELECT subdomain FROM colleges WHERE college_id = $1', [collegeId]);
+    const subdomain = collegeRow.rows[0].subdomain;
+
+    // staff_roster: granted to hod, deliberately NOT to class_tutor
+    // (Group (b)'s own audit) — the sharpest boundary available, the
+    // same tool, one office admitted and the other correctly denied.
+    const hodStaffRoster = await post(
+      baseUrl, '/api/v1/ai/tools/staff_roster/invoke', { authorization: `Bearer ${hodToken}`, host: hostFor(subdomain) }, { params: {} },
+    );
+    assert.equal(hodStaffRoster.status, 200);
+    const tutorStaffRoster = await post(
+      baseUrl, '/api/v1/ai/tools/staff_roster/invoke', { authorization: `Bearer ${tutorToken}`, host: hostFor(subdomain) }, { params: {} },
+    );
+    assert.equal(tutorStaffRoster.status, 403, "a Class Tutor session must not leak into an hod-only tool's scope");
+
+    // mark_attendance_nl: granted to BOTH (Group (b) added class_tutor
+    // here specifically) — proves that grant actually works end to end
+    // over a real HTTP+DB round trip, not just the Policy Gate's own
+    // unit-level audit. Asserting notEqual(403), not 200: whether the
+    // handler itself succeeds depends on unrelated fixture data (an
+    // active timetable session) this test doesn't seed — only the
+    // Policy Gate's admission decision is this test's own concern.
+    const hodAttendance = await post(
+      baseUrl, '/api/v1/ai/tools/mark_attendance_nl/invoke', { authorization: `Bearer ${hodToken}`, host: hostFor(subdomain) },
+      { params: { absent_roll_numbers: [] } },
+    );
+    assert.notEqual(hodAttendance.status, 403);
+    const tutorAttendance = await post(
+      baseUrl, '/api/v1/ai/tools/mark_attendance_nl/invoke', { authorization: `Bearer ${tutorToken}`, host: hostFor(subdomain) },
+      { params: { absent_roll_numbers: [] } },
+    );
+    assert.notEqual(tutorAttendance.status, 403);
+  });
+
+  await t.test("Phase 3 Group (d): same office, two auth paths — the same person's Personal login and that same person's own HOD Position Account get identical tool access", async () => {
+    // Real finding from this pass (recorded in the plan doc): for a
+    // person holding exactly one position, this codebase's Personal
+    // resolver (identityService.resolveCapabilities — a priority pick
+    // across whatever positions the person occupies, not an additive
+    // union) and the Institutional resolver for that same position's
+    // own Position Account resolve the identical effectiveRole/scope —
+    // by design, since AI is meant to be a consumer of whichever
+    // context it's handed, never branching on which one produced it.
+    // "Provably different" for the SAME office is therefore not a
+    // behavioral claim (tool access is correctly identical here) but a
+    // structural one about identityContext's own construction —
+    // positionAccountId is null for Personal and the real id for
+    // Institutional — proven at the unit level in
+    // ai-service.test.js's aiActorContext.describeIdentityContext
+    // "same office, two auth paths" test (that function deliberately
+    // never reads positionAccountId, so the rendered prompt block is
+    // identical too). This test is the behavioral-parity half of that
+    // same proof, exercised over a real HTTP+DB round trip: neither
+    // auth path is treated as a lesser or different kind of session for
+    // the same real office.
+    const collegeId = await seedCollege('d2same');
+    const deptResult = await adminPool.query('INSERT INTO departments (college_id, name) VALUES ($1, $2) RETURNING id', [collegeId, 'D2-ECE']);
+    const departmentId = deptResult.rows[0].id;
+    const userResult = await adminPool.query(
+      `INSERT INTO users (college_id, username, email, password_hash, role, is_active)
+       VALUES ($1, $2, $2 || '@example.test', 'x', 'staff', true) RETURNING id`,
+      [collegeId, `d2person${crypto.randomUUID().slice(0, 8)}`],
+    );
+    const userId = userResult.rows[0].id;
+    const { accountId } = await seedHodPosition(adminPool, { collegeId, userId, departmentId });
+    const personalTok = await personalToken(collegeId, userId);
+    const institutionalTok = security.createPositionAccessToken({ positionAccountId: accountId, collegeId });
+
+    const collegeRow = await adminPool.query('SELECT subdomain FROM colleges WHERE college_id = $1', [collegeId]);
+    const subdomain = collegeRow.rows[0].subdomain;
+
+    const personalGranted = await post(
+      baseUrl, '/api/v1/ai/tools/staff_roster/invoke', { authorization: `Bearer ${personalTok}`, host: hostFor(subdomain) }, { params: {} },
+    );
+    const institutionalGranted = await post(
+      baseUrl, '/api/v1/ai/tools/staff_roster/invoke', { authorization: `Bearer ${institutionalTok}`, host: hostFor(subdomain) }, { params: {} },
+    );
+    assert.equal(personalGranted.status, 200);
+    assert.equal(institutionalGranted.status, 200);
+
+    const personalDenied = await post(
+      baseUrl, '/api/v1/ai/tools/finance_status_summary/invoke', { authorization: `Bearer ${personalTok}`, host: hostFor(subdomain) }, { params: {} },
+    );
+    const institutionalDenied = await post(
+      baseUrl, '/api/v1/ai/tools/finance_status_summary/invoke', { authorization: `Bearer ${institutionalTok}`, host: hostFor(subdomain) }, { params: {} },
+    );
+    assert.equal(personalDenied.status, 403);
+    assert.equal(institutionalDenied.status, 403);
   });
 
   await t.test('a plain staff actor (no Level 2 position) cannot invite Level 3', async () => {
