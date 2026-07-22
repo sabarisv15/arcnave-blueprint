@@ -21,6 +21,8 @@ const auditLogRepository = require('../src/repositories/auditLogRepository');
 const aiDocumentChunkRepository = require('../src/repositories/aiDocumentChunkRepository');
 const documentSearchService = require('../src/services/documentSearchService');
 const visibilityService = require('../src/services/visibilityService');
+const aiActorContext = require('../src/services/aiActorContext');
+const aiClassificationAccess = require('../src/services/aiClassificationAccess');
 
 // documentSearchService resolves { adapter, config } via
 // configurationService.getAiConfig, then calls adapter.embed(config,
@@ -347,5 +349,37 @@ test('documentSearchService.searchDocuments', async (t) => {
     const [, searchArgs] = searchMock.mock.calls[0].arguments;
     assert.deepEqual(searchArgs.classifications, []);
     assert.equal(results.length, 0);
+  });
+
+  // Phase 4 Group (c): an already-built ActorContext (Phase 4 Group (a)
+  // — aiActorContext.buildActorContextForIdentity, what aiToolRegistry.js's
+  // search_documents handler now passes, Group (b)) is forwarded straight
+  // into getVisibleClassIds unchanged — never rebuilt into the legacy
+  // {actorUserId, actorRole, collegeId} shape — and collegeId/role for
+  // the rest of this function (aiConfig, classifications) resolve from
+  // the ActorContext's own tenantId/role fields, not actor.collegeId/
+  // actor.userId (which an ActorContext doesn't have).
+  await t.test('an ActorContext-shaped actor (Institutional Class Tutor Position Account) is forwarded unchanged to getVisibleClassIds, scoped to the position\'s own class only', async () => {
+    mockAiConfig(t, async () => [[0.2]]);
+    const visibleClassIdsMock = t.mock.method(visibilityService, 'getVisibleClassIds', async () => ['class-1']);
+    const searchMock = t.mock.method(aiDocumentChunkRepository, 'search', async () => []);
+    t.after(() => {
+      visibleClassIdsMock.mock.restore();
+      searchMock.mock.restore();
+    });
+
+    const institutionalActorContext = aiActorContext.buildActorContextForIdentity({
+      userId: 'tutor-u1', role: 'class_tutor', collegeId: 'college-a', departmentIds: [], classIds: ['class-1'], scopeLevel: 'class', positionAccountId: 'position-account-1',
+    });
+
+    await documentSearchService.searchDocuments({}, { query: 'anything' }, institutionalActorContext);
+
+    assert.equal(visibleClassIdsMock.mock.callCount(), 1);
+    const [, forwardedActorInput] = visibleClassIdsMock.mock.calls[0].arguments;
+    assert.equal(forwardedActorInput, institutionalActorContext, 'the ActorContext must be forwarded by reference, never rebuilt into the legacy shape');
+
+    const [, searchArgs] = searchMock.mock.calls[0].arguments;
+    assert.equal(searchArgs.collegeId, 'college-a');
+    assert.deepEqual(searchArgs.classifications, aiClassificationAccess.permittedClassifications('class_tutor'));
   });
 });

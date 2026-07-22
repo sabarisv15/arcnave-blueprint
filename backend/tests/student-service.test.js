@@ -25,6 +25,7 @@ const staffService = require('../src/services/staffService');
 const identityService = require('../src/services/identityService');
 const visibilityService = require('../src/services/visibilityService');
 const studentService = require('../src/services/studentService');
+const aiActorContext = require('../src/services/aiActorContext');
 
 // getStudent/listStudents' 'staff' scoping goes through
 // visibilityService's legacy-shape path, which (Phase 1: Capability
@@ -721,6 +722,40 @@ test('StudentService validation and audit logging (no DB)', async (t) => {
     const result = await studentService.listStudents({}, {}, { actorUserId: 'tutor-u1', actorRole: 'staff' });
     assert.equal(result.length, 2);
     assert.deepEqual(new Set(result.map((s) => s.id)), new Set(['student-id', 'student-2']));
+  });
+
+  // Phase 4 Group (c): the ActorContext shape aiToolRegistry.js's
+  // students_roster handler now builds via aiActorContext.
+  // buildActorContextForIdentity (Group (b)) is forwarded straight
+  // through the 'staff' branch's getVisibleClassIds call, and produces
+  // exactly the roster its own assignedClassIds implies — the same
+  // dual-input equivalence visibilityService.js's own tests already
+  // establish for getVisibleClassIds directly, proven here one layer up
+  // at the Business Service that forwards it.
+  //
+  // Not exercised here: a genuinely Institutional (Class Tutor Position
+  // Account, effectiveRole 'class_tutor') identityContext. Doing so
+  // surfaced a real, PRE-EXISTING gap outside Phase 4's scope —
+  // studentService.listStudents' role dispatch only branches on the
+  // literal strings 'staff'/'hod'/'principal' and has no 'class_tutor'
+  // branch at all, so it falls through to an empty roster for that role
+  // in both the legacy shape and an ActorContext alike (not something
+  // Group (a)/(b)'s dual-input change introduced or could fix — the
+  // 5-call-site audit only lists this function's 'staff' branch).
+  await t.test('listStudents (staff, ActorContext-shaped input) forwards straight through, scoped to exactly what the ActorContext\'s own assignedClassIds says', async () => {
+    const institutionalActorContext = aiActorContext.buildActorContextForIdentity({
+      userId: 'tutor-u1', role: 'staff', collegeId: 'c1', departmentIds: [], classIds: ['class-1'], scopeLevel: 'self_assigned', positionAccountId: null,
+    });
+    const findByClassMock = t.mock.method(studentRepository, 'findByClassId', async (client, classId) => (
+      classId === 'class-1' ? [{ ...STUDENT, created_at: '2024-01-01' }] : [{ id: 'student-2', college_id: 'c1', class_id: 'class-2', created_at: '2024-02-01' }]
+    ));
+    t.after(() => findByClassMock.mock.restore());
+
+    const result = await studentService.listStudents({}, {}, institutionalActorContext);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].id, 'student-id');
+    assert.equal(findByClassMock.mock.callCount(), 1);
+    assert.equal(findByClassMock.mock.calls[0].arguments[1], 'class-1');
   });
 
   await t.test('listStudents (hod) returns only their own department\'s roster', async () => {
