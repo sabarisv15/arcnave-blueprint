@@ -13,6 +13,7 @@
 
 const collegeProfileService = require('./collegeProfileService');
 const academicService = require('./academicService');
+const { SCOPE_LEVELS } = require('../constants/scopeLevels');
 
 const ROLE_LABELS = {
   principal: 'Principal',
@@ -76,4 +77,37 @@ async function describeIdentityContext(client, identityContext) {
   ].join('\n');
 }
 
-module.exports = { describeIdentityContext };
+// Phase 4 Group (a): maps an already-resolved identityContext (Phase 3's
+// routes/ai.js buildAiIdentityContext, itself sourced from
+// req.capabilities — Personal or Institutional, no branch here on
+// which) onto the exact ActorContext shape actorContextService.
+// buildActorContext returns, so visibilityService.isActorContext
+// recognizes it immediately and skips its own DB re-resolution — the
+// Identity Context Propagation Rule (Phase4-AI-Downstream-Scope-
+// Fidelity.md): consume the already-resolved context, never re-derive
+// a different one from userId/role. Pure and synchronous — no DB call.
+//
+// scopeLevel: 'class' (an Institutional Class Tutor position) maps to
+// SCOPE_LEVELS.SELF_ASSIGNED — visibilityService's own three-value enum
+// is not widened; a Class Tutor's "exactly these classes" is the same
+// shape as a staff member's own self_assigned scope from
+// getVisibleClassIds' point of view (decision 2).
+function buildActorContextForIdentity(identityContext) {
+  const scopeLevel = identityContext.scopeLevel === 'class'
+    ? SCOPE_LEVELS.SELF_ASSIGNED
+    : identityContext.scopeLevel;
+
+  return {
+    actorId: identityContext.userId,
+    tenantId: identityContext.collegeId,
+    role: identityContext.role,
+    scopeLevel,
+    departmentIds: identityContext.departmentIds || [],
+    assignedClassIds: identityContext.classIds || [],
+    campusIds: identityContext.collegeId !== undefined && identityContext.collegeId !== null
+      ? [identityContext.collegeId]
+      : [],
+  };
+}
+
+module.exports = { describeIdentityContext, buildActorContextForIdentity };

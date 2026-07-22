@@ -196,8 +196,12 @@ async function listMarksForFilters(client, {
 // collegeId} legacy shape directly) — never a caller-supplied classId/
 // departmentId. null from getVisibleClassIds means "unrestricted"
 // (principal), so no classIds filter is applied at all in that case.
-async function listMarksForActor(client, { actorUserId, actorRole, collegeId }, { academicYear, subject, assessmentTypeId } = {}) {
-  const classIds = await visibilityService.getVisibleClassIds(client, { actorUserId, actorRole, collegeId });
+// actorInput: either the legacy {actorUserId, actorRole, collegeId}
+// shape or an already-built ActorContext (Phase 4 Group (a)) —
+// forwarded straight into getVisibleClassIds unchanged either way; see
+// analyticsService.getAttendanceRateForActor's own comment.
+async function listMarksForActor(client, actorInput, { academicYear, subject, assessmentTypeId } = {}) {
+  const classIds = await visibilityService.getVisibleClassIds(client, actorInput);
   if (classIds !== null && classIds.length === 0) {
     return [];
   }

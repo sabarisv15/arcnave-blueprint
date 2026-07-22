@@ -57,8 +57,15 @@ async function getAttendanceRateByClass(client, { classId, startDate, endDate } 
 // as calling getAttendanceRateByClass with no filter at all, so no
 // classIds value is passed through in that case, not an empty-array
 // filter that would wrongly return nothing.
-async function getAttendanceRateForActor(client, { actorUserId, actorRole, collegeId }, { startDate, endDate } = {}) {
-  const classIds = await visibilityService.getVisibleClassIds(client, { actorUserId, actorRole, collegeId });
+// actorInput accepts either the legacy {actorUserId, actorRole,
+// collegeId} shape or an already-built ActorContext (Phase 4 Group (a)
+// — aiActorContext.buildActorContextForIdentity) — forwarded straight
+// into getVisibleClassIds unchanged either way; that function already
+// has its own dual-input detection (visibilityService.isActorContext),
+// so this function does nothing itself besides not destructuring the
+// legacy shape out of the caller's actual input.
+async function getAttendanceRateForActor(client, actorInput, { startDate, endDate } = {}) {
+  const classIds = await visibilityService.getVisibleClassIds(client, actorInput);
   if (classIds !== null && classIds.length === 0) {
     return [];
   }

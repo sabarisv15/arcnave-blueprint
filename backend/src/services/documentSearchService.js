@@ -252,26 +252,38 @@ const DEFAULT_SEARCH_LIMIT = 5;
 // unrecognized role) gets an empty result set, not an error; searching
 // and finding nothing is not a failure the way a Policy Gate rejection
 // is.
+// actor: either the legacy identityContext-ish shape ({userId, role,
+// collegeId, ...}, no `actorId`/`tenantId` key) or an already-built
+// ActorContext (Phase 4 Group (a) — aiActorContext.
+// buildActorContextForIdentity; distinguished the same way
+// visibilityService.isActorContext does, by presence of a key the
+// legacy shape never has, `actorId`). Unlike the other 4 affected
+// functions, `actor` here also supplies role/collegeId for
+// classification/tenant lookups unrelated to visibility scoping, so
+// both are resolved via the same actorId/tenantId-presence check
+// rather than only at the getVisibleClassIds call.
 async function searchDocuments(client, { query, limit } = {}, actor) {
   if (!query || typeof query !== 'string') {
     throw new DocumentSearchValidationError('query is required and must be a non-empty string');
   }
 
+  const collegeId = 'tenantId' in actor ? actor.tenantId : actor.collegeId;
   const classifications = aiClassificationAccess.permittedClassifications(actor.role);
   // Same department/class scoping the GET /documents route already
   // enforces via visibilityService.assertCanViewStudent — without this,
   // an hod could reach a student document outside their own
   // department through AI search alone. null means unrestricted
   // (principal); see aiDocumentChunkRepository.search's own comment.
-  const classIds = await visibilityService.getVisibleClassIds(client, {
-    actorUserId: actor.userId,
-    actorRole: actor.role,
-    collegeId: actor.collegeId,
-  });
-  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, actor.collegeId);
+  const classIds = await visibilityService.getVisibleClassIds(
+    client,
+    'actorId' in actor
+      ? actor
+      : { actorUserId: actor.userId, actorRole: actor.role, collegeId: actor.collegeId },
+  );
+  const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, collegeId);
   const [queryEmbedding] = await adapter.embed(aiConfig, [query], { inputType: 'query' });
   const rows = await aiDocumentChunkRepository.search(client, {
-    collegeId: actor.collegeId,
+    collegeId,
     classifications,
     embedding: queryEmbedding,
     limit: limit || DEFAULT_SEARCH_LIMIT,

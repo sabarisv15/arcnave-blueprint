@@ -548,7 +548,22 @@ async function removeStudent(client, id, { userId, actorRole }) {
 // large enough for that to matter, and it avoids two different
 // pagination conventions for what's structurally the same lookup
 // list()'s own LIMIT/OFFSET already covers for principal/unscoped.
-async function listStudents(client, { limit = 50, offset = 0 } = {}, { actorUserId, actorRole, collegeId } = {}) {
+// actorInput: either the legacy {actorUserId, actorRole, collegeId}
+// shape or an already-built ActorContext (Phase 4 Group (a) —
+// aiActorContext.buildActorContextForIdentity), distinguished the same
+// way visibilityService.isActorContext does, by presence of a
+// `scopeLevel` key the legacy shape never has. Only the `staff` branch
+// below is in Phase 4's scope (it forwards into getVisibleClassIds);
+// the `hod` branch already uses its own independent, real
+// findHodDepartmentId lookup and is unaffected — both branches just
+// need actorRole/actorUserId/collegeId read from whichever shape was
+// given.
+async function listStudents(client, { limit = 50, offset = 0 } = {}, actorInput = {}) {
+  const isActorContext = 'scopeLevel' in actorInput;
+  const actorRole = isActorContext ? actorInput.role : actorInput.actorRole;
+  const actorUserId = isActorContext ? actorInput.actorId : actorInput.actorUserId;
+  const collegeId = isActorContext ? actorInput.tenantId : actorInput.collegeId;
+
   if (actorRole === undefined || actorRole === 'principal') {
     return studentRepository.list(client, { limit, offset });
   }
@@ -568,7 +583,7 @@ async function listStudents(client, { limit = 50, offset = 0 } = {}, { actorUser
     // surfaced now that a real Position fixture (not
     // classes.tutor_user_id, which needed no collegeId) is what proves
     // this path end to end.
-    const classIds = await visibilityService.getVisibleClassIds(client, { actorUserId, actorRole, collegeId });
+    const classIds = await visibilityService.getVisibleClassIds(client, actorInput);
     if (classIds.length === 0) {
       return [];
     }

@@ -1241,8 +1241,12 @@ const CLASS_TIMETABLE_SCOPE_LIMIT = 500;
 // classId/departmentId. null from getVisibleClassIds means
 // "unrestricted" (principal), so every class in the college is
 // enumerated via listClasses rather than treated as an empty filter.
-async function getClassTimetableForActor(client, { actorUserId, actorRole, collegeId }) {
-  const classIds = await visibilityService.getVisibleClassIds(client, { actorUserId, actorRole, collegeId });
+// actorInput: either the legacy {actorUserId, actorRole, collegeId}
+// shape or an already-built ActorContext (Phase 4 Group (a)) —
+// forwarded straight into getVisibleClassIds unchanged either way; see
+// analyticsService.getAttendanceRateForActor's own comment.
+async function getClassTimetableForActor(client, actorInput) {
+  const classIds = await visibilityService.getVisibleClassIds(client, actorInput);
 
   let targetClassIds;
   if (classIds === null) {
