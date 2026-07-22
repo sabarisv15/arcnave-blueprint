@@ -18,6 +18,7 @@
 const aiToolRegistry = require('./aiToolRegistry');
 const aiContextBuilder = require('./aiContextBuilder');
 const aiPromptSafetyLayer = require('./aiPromptSafetyLayer');
+const aiActorContext = require('./aiActorContext');
 const configurationService = require('./configurationService');
 const auditLogRepository = require('../repositories/auditLogRepository');
 // AI Experience Layer (AIX) — presentation only, added after the real
@@ -147,8 +148,9 @@ async function askAboutTool(client, toolName, params, question, { identityContex
 
   const sanitizedContext = await invokeTool(client, toolName, params, { identityContext });
   const { systemPrompt, userPrompt } = aiPromptSafetyLayer.renderForLlm(sanitizedContext, question);
+  const identityBlock = await aiActorContext.describeIdentityContext(client, identityContext);
   const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, identityContext.collegeId);
-  const answer = await adapter.complete(aiConfig, { systemPrompt, userPrompt });
+  const answer = await adapter.complete(aiConfig, { systemPrompt: `${identityBlock}\n\n${systemPrompt}`, userPrompt });
 
   const presentation = aiExperienceLayer.buildPresentation({
     sanitizedContext, question, answer, toolUsed: toolName, tool: aiToolRegistry.getTool(toolName), actorRole: identityContext.role,
@@ -169,9 +171,9 @@ async function askAboutTool(client, toolName, params, question, { identityContex
 // both are this codebase's own trusted, developer-authored text, never
 // retrieved/caller content, so neither needs rule 9's boundary
 // wrapping the tool DATA itself still gets.
-async function summarizeToolResult(sanitizedContext, question, tool, adapter, aiConfig) {
+async function summarizeToolResult(sanitizedContext, question, tool, adapter, aiConfig, identityBlock) {
   const { systemPrompt, userPrompt } = aiPromptSafetyLayer.renderForLlm(sanitizedContext, question);
-  const combinedSystemPrompt = `${systemPrompt}\n\n${TOOL_RESULT_ANSWER_SYSTEM_PROMPT}\n\n`
+  const combinedSystemPrompt = `${identityBlock}\n\n${systemPrompt}\n\n${TOOL_RESULT_ANSWER_SYSTEM_PROMPT}\n\n`
     + `The tool that was called: ${tool.name} — ${tool.description}`;
   return adapter.complete(aiConfig, { systemPrompt: combinedSystemPrompt, userPrompt });
 }
@@ -203,9 +205,10 @@ async function askAgent(client, question, { identityContext } = {}) {
   // call the frontend makes only after a user click — a real gate, not
   // just registry metadata a handler could ignore.
   const tools = aiToolRegistry.listTools({ excludeHumanOnly: true });
+  const identityBlock = await aiActorContext.describeIdentityContext(client, identityContext);
   const { adapter, config: aiConfig } = await configurationService.getAiConfig(client, identityContext.collegeId);
   const decision = await adapter.completeWithTools(aiConfig, {
-    systemPrompt: AGENT_SYSTEM_PROMPT,
+    systemPrompt: `${identityBlock}\n\n${AGENT_SYSTEM_PROMPT}`,
     userPrompt: question,
     tools,
   });
@@ -213,7 +216,7 @@ async function askAgent(client, question, { identityContext } = {}) {
   if (decision.type === 'tool_call') {
     const sanitizedContext = await invokeTool(client, decision.toolName, decision.arguments || {}, { identityContext });
     const tool = aiToolRegistry.getTool(decision.toolName);
-    const answer = await summarizeToolResult(sanitizedContext, question, tool, adapter, aiConfig);
+    const answer = await summarizeToolResult(sanitizedContext, question, tool, adapter, aiConfig, identityBlock);
     const presentation = aiExperienceLayer.buildPresentation({
       sanitizedContext, question, answer, toolUsed: decision.toolName, tool, actorRole: identityContext.role,
     });

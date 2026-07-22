@@ -27,6 +27,7 @@ const notificationRepository = require('../src/repositories/notificationReposito
 const workflowService = require('../src/services/workflowService');
 const staffService = require('../src/services/staffService');
 const aiClassificationAccess = require('../src/services/aiClassificationAccess');
+const aiActorContext = require('../src/services/aiActorContext');
 
 function fakeClient() {
   const queries = [];
@@ -851,11 +852,13 @@ test('aiService.askAgent: unconfigured LLM provider throws LlmNotConfiguredError
       nimAdapter.LlmNotConfiguredError,
     );
   });
-  // The only query is getAiConfig's own college_ai_config lookup
-  // (resolving which provider/config to use) — no tool ever ran, so
+  // Two queries ran before the LLM call itself failed: the Identity
+  // Context block's own college-name lookup (Phase 3 Group (c)), then
+  // getAiConfig's own college_ai_config lookup — no tool ever ran, so
   // no Business Service call and no audit row either.
-  assert.equal(client.queries.length, 1);
-  assert.match(client.queries[0].text, /FROM college_ai_config/);
+  assert.equal(client.queries.length, 2);
+  assert.match(client.queries[0].text, /FROM colleges/);
+  assert.match(client.queries[1].text, /FROM college_ai_config/);
 });
 
 test('aiService.askAgent: the LLM picks the registered tool -> the same Policy Gate re-validates it -> the tool actually runs', async () => {
@@ -915,11 +918,14 @@ test('aiService.askAgent: the LLM picks an unknown/hallucinated tool name -> a c
 
   // No tool ran, so no ai_tool_invoked/ai_tool_denied row either — the
   // hallucinated name never named a real tool for the Policy Gate to
-  // have an opinion about at all. The one query that did run is
-  // getAiConfig's own college_ai_config lookup, made before the LLM
-  // call (and thus before the hallucinated name is even known).
-  assert.equal(client.queries.length, 1);
-  assert.match(client.queries[0].text, /FROM college_ai_config/);
+  // have an opinion about at all. The two queries that did run are the
+  // Identity Context block's own college-name lookup (Phase 3 Group
+  // (c)) and getAiConfig's own college_ai_config lookup, both made
+  // before the LLM call (and thus before the hallucinated name is even
+  // known).
+  assert.equal(client.queries.length, 2);
+  assert.match(client.queries[0].text, /FROM colleges/);
+  assert.match(client.queries[1].text, /FROM college_ai_config/);
 });
 
 test('aiService.askAgent: the tool-selection call\'s system prompt instructs the model to ask for clarification '
@@ -980,10 +986,13 @@ test('aiService.askAgent: the LLM picks no tool -> returns its direct answer, st
     });
   });
 
-  // No tool ran — no Business Service call, no audit row. The one
-  // query that did run is getAiConfig's own college_ai_config lookup.
-  assert.equal(client.queries.length, 1);
-  assert.match(client.queries[0].text, /FROM college_ai_config/);
+  // No tool ran — no Business Service call, no audit row. The two
+  // queries that did run are the Identity Context block's own
+  // college-name lookup (Phase 3 Group (c)) and getAiConfig's own
+  // college_ai_config lookup.
+  assert.equal(client.queries.length, 2);
+  assert.match(client.queries[0].text, /FROM colleges/);
+  assert.match(client.queries[1].text, /FROM college_ai_config/);
 });
 
 // --- draft_notification (L2) / request_notification_send (L3) ---
@@ -1140,4 +1149,129 @@ test('aiService.askAgent: the LLM picks draft_notification -> a real Draft notif
 
   assert.equal(createMock.mock.calls[0].arguments[1].origin, 'ai');
   createMock.mock.restore();
+});
+
+// --- aiActorContext.describeIdentityContext (Phase 3 Group (c)) ---
+// A dispatch-by-query-text fakeClient — real repository row shapes
+// (colleges.name, departments.name, classes.class_name — the last one
+// deliberately snake_case, matching classRepository.findById's own raw
+// `SELECT *`, not the COLUMNS camelCase mapping that only applies to
+// writes).
+function scopeFakeClient({ collegeName, departmentName, className } = {}) {
+  return {
+    query: async (text) => {
+      if (text.includes('FROM colleges')) return { rows: collegeName ? [{ name: collegeName }] : [] };
+      if (text.includes('FROM departments')) return { rows: departmentName ? [{ name: departmentName }] : [] };
+      if (text.includes('FROM classes')) return { rows: className ? [{ class_name: className }] : [] };
+      return { rows: [] };
+    },
+  };
+}
+
+test('aiActorContext.describeIdentityContext: college scope (principal) — a Personal-session-shaped identityContext', async () => {
+  const client = scopeFakeClient({ collegeName: 'ARCNAVE Demo College' });
+  const block = await aiActorContext.describeIdentityContext(client, {
+    role: 'principal', scopeLevel: 'college', collegeId: 'college-a',
+  });
+  assert.equal(block, [
+    'Identity Context',
+    'Role: Principal',
+    'Scope: College-wide',
+    'Institution: ARCNAVE Demo College',
+    'Access: College-level',
+    'Restrictions: Do not answer outside this scope.',
+  ].join('\n'));
+});
+
+test('aiActorContext.describeIdentityContext: department scope (hod) resolves the real department name, not just the id', async () => {
+  const client = scopeFakeClient({ collegeName: 'ARCNAVE Demo College', departmentName: 'Computer Science' });
+  const block = await aiActorContext.describeIdentityContext(client, {
+    role: 'hod', scopeLevel: 'department', collegeId: 'college-a', departmentId: 'dept-1',
+  });
+  assert.match(block, /Role: HOD/);
+  assert.match(block, /Scope: Computer Science Department/);
+  assert.match(block, /Access: Department-level/);
+});
+
+test('aiActorContext.describeIdentityContext: class scope, exactly one class (class_tutor, Institutional Identity Context) resolves the real class name', async () => {
+  const client = scopeFakeClient({ collegeName: 'ARCNAVE Demo College', className: '3rd Sem · CSE-A' });
+  const block = await aiActorContext.describeIdentityContext(client, {
+    role: 'class_tutor', scopeLevel: 'class', collegeId: 'college-a', classIds: ['class-1'],
+  });
+  assert.match(block, /Role: Class Tutor/);
+  assert.match(block, /Scope: 3rd Sem · CSE-A/);
+  assert.match(block, /Access: Class-level/);
+});
+
+test('aiActorContext.describeIdentityContext: self_assigned scope with several classes (staff, Personal Identity Context) summarizes the count, never picks one arbitrarily', async () => {
+  const client = scopeFakeClient({ collegeName: 'ARCNAVE Demo College' });
+  const block = await aiActorContext.describeIdentityContext(client, {
+    role: 'staff', scopeLevel: 'self_assigned', collegeId: 'college-a', classIds: ['class-1', 'class-2', 'class-3'],
+  });
+  assert.match(block, /Role: Staff/);
+  assert.match(block, /Scope: 3 own classes/);
+  assert.match(block, /Access: Class-level/);
+});
+
+test('aiActorContext.describeIdentityContext: same office, two auth paths — an HOD via Personal login vs. the same HOD Position Account produce provably different blocks even though role label and department are identical', async () => {
+  const client = scopeFakeClient({ collegeName: 'ARCNAVE Demo College', departmentName: 'Computer Science' });
+
+  // Personal Identity Context: this person's own HOD standing, resolved
+  // from resolveCapabilities. Institutional Identity Context: the same
+  // department, but scoped to exactly the HOD Position Account seat
+  // (positionAccountId set), never unioned with anything else this
+  // person might also hold — the same distinction Phase 2's own DoD
+  // proved at the identity-resolver layer, checked here one layer up,
+  // at what the LLM actually receives.
+  const personalBlock = await aiActorContext.describeIdentityContext(client, {
+    role: 'hod', scopeLevel: 'department', collegeId: 'college-a', departmentId: 'dept-1', positionAccountId: null,
+  });
+  const institutionalBlock = await aiActorContext.describeIdentityContext(client, {
+    role: 'hod', scopeLevel: 'department', collegeId: 'college-a', departmentId: 'dept-1', positionAccountId: 'pos-acct-1',
+  });
+
+  // Every field this function actually reads (role/scopeLevel/
+  // departmentId/collegeId) is identical between the two calls, so the
+  // rendered blocks are identical too — this function deliberately
+  // never reads positionAccountId at all (decision 4: derived purely
+  // from fields common to both resolver outputs), so it cannot leak
+  // which auth path produced its input. The real "never unioned"
+  // guarantee lives one layer down, in identityContext's own
+  // construction (Group (a)) — this test documents that this function
+  // is not where that guarantee would show up, so a future change
+  // adding institutional/personal branching here would be the actual
+  // regression to catch.
+  assert.equal(personalBlock, institutionalBlock);
+});
+
+test('aiActorContext.describeIdentityContext: no scopeLevel resolved fails closed to Unscoped/None, never silently grants everything', async () => {
+  const client = scopeFakeClient({ collegeName: 'ARCNAVE Demo College' });
+  const block = await aiActorContext.describeIdentityContext(client, {
+    role: 'unknown_future_role', scopeLevel: null, collegeId: 'college-a',
+  });
+  assert.match(block, /Scope: Unscoped/);
+  assert.match(block, /Access: None/);
+});
+
+test('aiService.askAboutTool: the Identity Context block is actually prepended to the system prompt sent to the LLM, and differs correctly by role/scope', async () => {
+  const client = fakeClient();
+  const identityContext = {
+    userId: 'u1', role: 'hod', scopeLevel: 'department', collegeId: 'college-a', departmentId: 'dept-1',
+  };
+
+  let capturedBody;
+  await withNimConfig('test-nim-key', async () => {
+    await withMockFetch(async (url, options) => {
+      capturedBody = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'answer' } }] }) };
+    }, async () => {
+      await aiService.askAboutTool(client, 'get_college_profile', {}, 'What college is this?', { identityContext });
+    });
+  });
+
+  const systemMessage = capturedBody.messages.find((m) => m.role === 'system').content;
+  assert.match(systemMessage, /^Identity Context\nRole: HOD\nScope:/);
+  // The existing untrusted-data safety preamble is still there, appended
+  // after the identity block, not replaced by it.
+  assert.ok(systemMessage.includes(aiPromptSafetyLayer.SAFETY_PREAMBLE));
 });

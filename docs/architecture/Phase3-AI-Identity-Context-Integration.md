@@ -328,7 +328,27 @@ real, not hypothetical, tracked item.
    403s there — a decision this explicit needs a test on both sides,
    not just the positive case.
 
-**(c) Prompt context — tell the LLM who's asking, as a structured block:**
+**(c) Prompt context — tell the LLM who's asking, as a structured block — DONE:**
+
+Shipped as `services/aiActorContext.js`'s `describeIdentityContext(client,
+identityContext)`, prepended (via a blank-line join) ahead of the
+existing system prompt at all three real LLM call sites in
+`aiService.js`: `askAgent`'s tool-selection call (`AGENT_SYSTEM_PROMPT`),
+`askAboutTool`'s `renderForLlm` call, and `summarizeToolResult`'s
+combined prompt. Branches only on `identityContext.scopeLevel` (college
+→ "College-wide"; department → the real department name via
+`collegeProfileService.getDepartment`; `self_assigned`/`class` → the
+real class name via `academicService.getClass` for exactly one class,
+or "N own classes" for several; anything else fails closed to
+"Unscoped"/"None") — never on role or which resolver produced the
+input, so it cannot itself leak Personal vs. Institutional. A dedicated
+test proves the same-office-two-auth-paths case is byte-identical
+(the function doesn't read `positionAccountId` at all — the "never
+unioned" guarantee lives one layer down, in Group (a)'s own
+`identityContext` construction, not here).
+
+`invokeTool` (the no-LLM, direct-invoke path) is untouched — no prompt
+is ever built there.
 6. New small pure function (decision 4) — e.g.
    `aiActorContext.describeIdentityContext(identityContext)` — takes
    the normalized shape from Group (a) and returns the labeled
