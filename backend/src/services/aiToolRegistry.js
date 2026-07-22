@@ -608,7 +608,7 @@ registerTool({
   description: "Semantic search over the college's own uploaded documents (certificates, templates, etc.) — "
     + 'returns the most relevant text chunks for a natural-language query, scoped to what the acting role is '
     + 'permitted to see.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -681,7 +681,7 @@ registerTool({
     + 'only asking to upload/save/file a document and has not named ANY category, department, or year yet, skip '
     + 'this tool entirely and ask them which category it belongs to first — an empty call wastes a round trip '
     + 'this tool cannot answer anyway.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -725,7 +725,7 @@ registerTool({
     + 'category (required) and optional department/academic year. Never called by the AI on its own — only '
     + "reachable via the user's own explicit confirm action in the chat UI, after resolve_document_destination "
     + 'has already shown them where it will be saved.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -785,7 +785,7 @@ registerTool({
     + 'Forms, Notices) matching an optional category/department/academic-year/search filter — the AI-facing '
     + 'equivalent of browsing the Institutional Documents page with filters set. Most recent first, so "the '
     + 'latest examination timetable" is simply the first row of a category="Examination" call.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -837,7 +837,7 @@ registerTool({
   dataClassification: 'Internal',
   description: 'Lists every version of a logical Institutional Document (same document_group_id), newest first — '
     + 'use after list_institutional_documents/search_documents has already resolved a document id.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -861,7 +861,7 @@ registerTool({
   dataClassification: 'Internal',
   description: 'Returns the cross-year lineage of an Institutional Document — its ancestor(s) in earlier academic '
     + 'years and its successor(s) in later years, e.g. "what is the 2025-2026 version of the 2024-2025 Curriculum?"',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -902,7 +902,7 @@ registerTool({
     + 'absent roll numbers (e.g. "mark roll numbers 35, 67, and 25 absent") — every other enrolled student in that '
     + "session is marked Present. Resolves the current session from the acting user's own approved timetable "
     + 'allocation or substitute assignment; fails if they have no active session right now.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -943,7 +943,7 @@ registerTool({
   dataClassification: 'Internal',
   description: 'Lists academic calendar events (semester dates, holidays, exams, and other institution-defined '
     + 'events) for the acting college, optionally within a date range. Read-only — never creates or edits an event.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -991,7 +991,7 @@ registerTool({
   description: "Lists students within the acting user's own scope — their own taught/tutored class(es), their own "
     + 'department (HOD), or the whole college (principal). Roster/profile data only — never includes attendance '
     + 'or marks; use attendance_summary or assessment_marks_summary for those.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: { type: 'object', properties: {}, additionalProperties: false },
   handler: (client, params, actor) => studentService.listStudents(
     client,
@@ -1010,7 +1010,7 @@ registerTool({
     + 'department, or whole college), optionally within a date range. Use this for ANY question about attendance '
     + "— rates, percentages, who's attending, department/class attendance — not students_roster (which never "
     + 'includes attendance data).',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -1038,7 +1038,7 @@ registerTool({
   dataClassification: 'Internal',
   description: "Lists classes within the acting user's own scope whose attendance rate is at or below a threshold "
     + 'percent (default 75) — the same data as attendance_summary, filtered to the classes that need attention.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -1074,7 +1074,7 @@ registerTool({
     + 'department, or whole college), optionally filtered by academic year, subject, or assessment type. Use this '
     + 'for viewing/listing marks (e.g. "who failed", "show marks for..."); use assessment_record_mark instead to '
     + 'record or update one student\'s mark.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -1104,7 +1104,7 @@ registerTool({
   dataClassification: 'Internal',
   description: "Faculty allocation / timetable for classes within the acting user's own scope (own taught/tutored "
     + 'classes, own department, or whole college).',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: { type: 'object', properties: {}, additionalProperties: false },
   handler: (client, params, actor) => academicService.getClassTimetableForActor(
     client,
@@ -1168,7 +1168,7 @@ registerTool({
   description: "Records (or updates) one student's mark for the acting user's own class/subject — the same "
     + 'recordMark action available on the dashboard. Fails if the acting user is not the assigned Subject Faculty '
     + 'for that class/subject.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -1316,7 +1316,7 @@ registerTool({
   dataClassification: 'Internal',
   description: "Updates routine profile fields (phone, address, parent contact, notes — never lifecycle status) "
     + "for a student within the acting user's own scope. Fails if the student is not in the acting user's scope.",
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -1485,7 +1485,7 @@ registerTool({
   dataClassification: 'Internal',
   description: "Submits a student lifecycle status change (Discontinued/Debarred/Dismissed/Graduated) for "
     + 'principal approval. Does NOT change the status — approval must happen via the workflow approvals screen first.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {
@@ -1515,7 +1515,7 @@ registerTool({
   dataClassification: 'Internal',
   description: 'Submits an internal (same-college) student transfer request for principal approval. Does NOT '
     + 'move the student — approval must happen via the workflow approvals screen first.',
-  allowedRoles: ['principal', 'hod', 'staff'],
+  allowedRoles: ['principal', 'hod', 'staff', 'class_tutor'],
   params: {
     type: 'object',
     properties: {

@@ -26,6 +26,7 @@ const config = require('../src/config');
 const notificationRepository = require('../src/repositories/notificationRepository');
 const workflowService = require('../src/services/workflowService');
 const staffService = require('../src/services/staffService');
+const aiClassificationAccess = require('../src/services/aiClassificationAccess');
 
 function fakeClient() {
   const queries = [];
@@ -517,6 +518,88 @@ test('Policy Gate: rejects department-scope mismatch distinctly (AiToolDepartmen
   });
   assert.deepEqual(passing, { ok: true });
   assert.deepEqual(deniedAuditRows(passingClient), []);
+});
+
+// Phase 3 Group (b): 'class_tutor' — a Position Account scoped to
+// exactly one class — was added to every tool whose existing 'staff'
+// grant already means "own taught/tutored class(es)," and deliberately
+// left off every hod/principal-tier tool (own department/college, a
+// broader scope than one class owns). Config-level assertion for the
+// grants (allowedRoles is the source of truth listTools/AI-Governance.md
+// §8 both describe) plus a real Policy Gate rejection for every tool
+// deliberately left unchanged, proving the omission is enforced at
+// runtime, not just documented.
+const CLASS_TUTOR_GRANTED_TOOLS = [
+  'search_documents', 'resolve_document_destination', 'upload_institutional_document',
+  'list_institutional_documents', 'get_document_version_history', 'get_document_lineage',
+  'mark_attendance_nl', 'list_calendar_events', 'students_roster', 'attendance_summary',
+  'students_low_attendance', 'assessment_marks_summary', 'academic_class_timetable',
+  'assessment_record_mark', 'students_update_profile', 'students_submit_lifecycle_change',
+  'students_submit_transfer',
+];
+
+test("Policy Gate: 'class_tutor' is granted exactly the tools whose scope is the tutor's own class (allowedRoles audit)", () => {
+  CLASS_TUTOR_GRANTED_TOOLS.forEach((toolName) => {
+    const tool = aiToolRegistry.getTool(toolName);
+    assert.ok(tool !== null, `expected a real registered tool named ${JSON.stringify(toolName)}`);
+    assert.ok(
+      tool.allowedRoles.includes('class_tutor'),
+      `expected ${toolName}'s allowedRoles to include 'class_tutor'`,
+    );
+  });
+});
+
+// Excludes 'test_only_*' fixtures other tests in this file register
+// against the same module-level registry (registerTool has no
+// unregister, so they persist for the rest of the process) — this
+// audit only cares about the real registry aiToolRegistry.js itself
+// defines.
+function realToolNames() {
+  return aiToolRegistry.listTools().map((t) => t.name).filter((name) => !name.startsWith('test_only_'));
+}
+
+test("Policy Gate: 'class_tutor' is rejected (AiToolRoleNotPermittedError) on every hod/principal-tier tool deliberately left unchanged", async () => {
+  const allTools = realToolNames();
+  const deliberatelyUnchanged = allTools.filter((name) => !CLASS_TUTOR_GRANTED_TOOLS.includes(name));
+  assert.ok(deliberatelyUnchanged.length > 0);
+
+  for (let i = 0; i < deliberatelyUnchanged.length; i += 1) {
+    const toolName = deliberatelyUnchanged[i];
+    const client = fakeClient();
+    const identityContext = {
+      userId: 'u1', role: 'class_tutor', collegeId: 'college-a', departmentId: null,
+    };
+    // eslint-disable-next-line no-await-in-loop -- deliberate: sequential audit-log inserts against one fakeClient per iteration keep the assertion simple, and this list is small
+    await assert.rejects(
+      () => aiToolRegistry.invokeTool(toolName, { client, identityContext, params: {} }),
+      aiToolRegistry.AiToolRoleNotPermittedError,
+      `expected ${toolName} to reject role 'class_tutor'`,
+    );
+  }
+});
+
+test("Policy Gate: 'level2' is deliberately granted no tool at all (ADR-021's own scope-configuration policy is still undecided) — rejected (AiToolRoleNotPermittedError) on every real registered tool", async () => {
+  const allTools = realToolNames();
+  assert.ok(allTools.length > 0);
+
+  for (let i = 0; i < allTools.length; i += 1) {
+    const toolName = allTools[i];
+    const client = fakeClient();
+    const identityContext = {
+      userId: 'u1', role: 'level2', collegeId: 'college-a', departmentId: null,
+    };
+    // eslint-disable-next-line no-await-in-loop -- deliberate, see the class_tutor loop above for the same reasoning
+    await assert.rejects(
+      () => aiToolRegistry.invokeTool(toolName, { client, identityContext, params: {} }),
+      aiToolRegistry.AiToolRoleNotPermittedError,
+      `expected ${toolName} to reject role 'level2'`,
+    );
+  }
+});
+
+test("aiClassificationAccess: 'class_tutor' is permitted Internal data only, matching every tool it was granted (all Internal); 'level2' is permitted nothing", () => {
+  assert.deepEqual(aiClassificationAccess.permittedClassifications('class_tutor'), ['Internal']);
+  assert.deepEqual(aiClassificationAccess.permittedClassifications('level2'), []);
 });
 
 test('Context Builder + Prompt Safety Layer: hostile tool content is wrapped as inert data, never executed or re-parsed as a boundary', () => {

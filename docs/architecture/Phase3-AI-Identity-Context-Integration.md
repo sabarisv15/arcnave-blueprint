@@ -280,7 +280,32 @@ before assuming otherwise:
    session with the correct `effectiveRole` — the first real exercise
    of a `position_access` token against `/api/v1/ai/*`.
 
-**(b) Close the effectiveRole label gap:**
+**(b) Close the effectiveRole label gap — DONE:**
+
+**Correction found during implementation**: `buildActorContext`
+(`actorContextService.js`) — the shared scope-resolution path
+`visibilityService`/`studentService`/`staffService` all sit on top of —
+does not derive scope from a role string at all; it re-resolves the
+underlying human's own **Personal** Identity Context from their user id
+via `identityService.resolveCapabilities`, ignoring whichever
+`identityContext.role` a caller passes in. `constants/roleScopeLevels.js`
+(`ROLE_SCOPE_LEVELS`), which this step's first draft assumed was the
+load-bearing role→scope mapping to extend for `class_tutor`/`level2`,
+turned out to be dead code — nothing calls `resolveScopeLevel` outside
+its own file. So this correctness gap is broader than originally
+scoped here: **every** Institutional (Position Account) role, not only
+`class_tutor`/`level2`, gets the occupant's Personal scope from any
+downstream Business Service that re-derives via `buildActorContext`,
+not the Position Account's own Institutional scope the Policy Gate
+(Group a) now correctly reads. This is the same shape decision 5
+already defers ("downstream Business Service scope re-derivation... NOT
+rewired... this phase"), just wider than decision 5's own text
+describes — left deferred, not fixed here, since fixing it for real
+means rewiring every AI-tool-backing service to consume
+`req.capabilities` directly, decision 5's own larger, separately-scoped
+refactor. `AI-Governance.md` §8 now carries a note recording this as a
+real, not hypothetical, tracked item.
+
 3. Audit every tool's `allowedRoles` in `aiToolRegistry.js` plus
    `AI-Governance.md` §8's three tables: for each tool, decide whether
    `'level2'`/`'class_tutor'` should be added, using this guidance —

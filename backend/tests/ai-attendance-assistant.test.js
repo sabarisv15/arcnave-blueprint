@@ -145,5 +145,5 @@ test('mark_attendance_nl is registered as an L1 tool', () => {
   assert.ok(tool, 'mark_attendance_nl must be registered');
   assert.equal(tool.level, 'L1');
   assert.equal(tool.dataClassification, 'Internal');
-  assert.deepEqual(tool.allowedRoles.sort(), ['hod', 'principal', 'staff']);
+  assert.deepEqual(tool.allowedRoles.sort(), ['class_tutor', 'hod', 'principal', 'staff']);
 });

@@ -182,51 +182,62 @@ or workflow-submitting alike):
   scope-resolution path every tool's handler uses — never a bespoke
   per-tool lookup.
 
-## 8a. Planned: identity-context-aware authorization (not yet built)
-
-Today, every check in §8 below (`allowedRoles`, `permittedClassifications`)
-resolves against `req.jwtClaims.role` — a raw JWT claim — read directly
-in `routes/ai.js`/`services/aiToolRegistry.js`, independent of the
-identity-context resolution the rest of the platform uses
-(`identityService.resolveCapabilities` for authorization/workflow/
-visibility/audit since Phase 1). This is a deliberate, tracked gap, not
-an oversight: AI should become **identity-context-centric**, not
-office-centric — the AI itself doesn't change, only which identity
-context it reads changes based on how the person is logged in (personal
-login → Personal Identity Context; Position Account login → Institutional
-Identity Context, scoped to exactly that office). Scoped as its own
-post-Phase-2 work item — see
-`docs/architecture/Phase3-AI-Identity-Context-Integration.md` — not
-started yet.
-
-## 8. Role-aware ERP Copilot tool registry (this slice)
+## 8. Role-aware ERP Copilot tool registry
 
 Every tool below follows §7. All are Internal classification unless
 noted; `allowedRoles` is the tool's ceiling, further narrowed at
 runtime by whatever scope the actor actually has.
 
+Authorization resolves against `req.capabilities.effectiveRole` (Phase
+3, `docs/architecture/Phase3-AI-Identity-Context-Integration.md`) —
+Personal login → Personal Identity Context, Position Account login →
+Institutional Identity Context — never `req.jwtClaims.role` directly.
+`effectiveRole` includes two labels no tool recognized before Phase 3
+Group (b): `class_tutor` (a Position Account scoped to exactly one
+class) and `level2` (a Position Account scoped per a Principal's own
+configuration, policy still undecided — ADR-021). `class_tutor` was
+added, tool-by-tool, wherever a tool's existing `staff` grant already
+means "own taught/tutored class(es)" — the same scope a Class Tutor
+Position Account legitimately owns. `level2` was deliberately added to
+none: granting it speculatively would pre-empt product policy this
+document doesn't own. Below reflects that explicit per-tool audit, not
+silence.
+
+Downstream scope re-derivation for a Position Account session remains a
+known gap, broader than originally scoped here: Business Services that
+compute their own scope from `{actorUserId, actorRole}` (e.g.
+`studentService.listStudents` via `visibilityService`/
+`actorContextService.buildActorContext`) resolve the underlying
+person's **Personal** Identity Context from their user id, not the
+Position Account's Institutional scope the AI Policy Gate itself now
+correctly reads — for any Institutional role, not only the two added
+here. Not fixed in Phase 3 (would require rewiring every AI-tool-backing
+service to consume `req.capabilities` directly instead of re-deriving —
+its own larger refactor); tracked as a real, not hypothetical, item for
+whenever that rewiring happens.
+
 **Read (L1):**
 
 | Tool | Classification | Roles | Notes |
 |---|---|---|---|
-| `students_roster` | Internal | principal, hod, staff | wraps `studentService.listStudents` (already scope-aware) |
-| `attendance_summary` | Internal | principal, hod, staff | |
-| `students_low_attendance` | Internal | principal, hod, staff | same data as `attendance_summary`, threshold-filtered |
-| `assessment_marks_summary` | Internal | principal, hod, staff | deliberately Internal, not the §4 Confidential default — the same tutor already has full read/write access to these exact marks on the dashboard |
-| `academic_class_timetable` | Internal | principal, hod, staff | |
-| `staff_roster` | Internal | principal, hod | wraps `staffService.listStaffForActor` (already scope-aware); not staff — no dashboard reason for a tutor to browse the staff directory |
-| `finance_status_summary` | Restricted | principal | college-wide only; nothing in the schema scopes a fee structure to one department |
+| `students_roster` | Internal | principal, hod, staff, class_tutor | wraps `studentService.listStudents` (already scope-aware) |
+| `attendance_summary` | Internal | principal, hod, staff, class_tutor | |
+| `students_low_attendance` | Internal | principal, hod, staff, class_tutor | same data as `attendance_summary`, threshold-filtered |
+| `assessment_marks_summary` | Internal | principal, hod, staff, class_tutor | deliberately Internal, not the §4 Confidential default — the same tutor already has full read/write access to these exact marks on the dashboard |
+| `academic_class_timetable` | Internal | principal, hod, staff, class_tutor | |
+| `staff_roster` | Internal | principal, hod | wraps `staffService.listStaffForActor` (already scope-aware); not staff/class_tutor — no dashboard reason for a tutor to browse the staff directory |
+| `finance_status_summary` | Restricted | principal | college-wide only; nothing in the schema scopes a fee structure to one department; level2 deliberately not added — see above |
 | `workflow_pending_summary` | Internal | principal, hod | wraps `workflowService.listPendingForApprover` — requests awaiting the actor's own approval, not a department/college-wide audit |
 
 **Direct-write (L1 — §7 carve-out; human path already direct for these roles):**
 
 | Tool | Classification | Roles | Mirrors |
 |---|---|---|---|
-| `assessment_record_mark` | Internal | principal, hod, staff | `recordMark`, gated by `assertIsAssignedFaculty` |
+| `assessment_record_mark` | Internal | principal, hod, staff, class_tutor | `recordMark`, gated by `assertIsAssignedFaculty` |
 | `calendar_create_event` / `calendar_update_event` | Internal | principal | `createEvent`/`updateEvent` — no workflow step exists for calendar |
 | `finance_record_payment` | Restricted | principal | `markFeePayment` — "a simple write, not a fee change" |
 | `finance_draft_fee_structure` | Restricted | principal | `createFeeStructure` — lands Pending Approval, not live until submitted+approved |
-| `students_update_profile` | Internal | principal, hod, staff | `updateStudent`, gated by `assertCanModifyStudent`; excludes lifecycle status |
+| `students_update_profile` | Internal | principal, hod, staff, class_tutor | `updateStudent`, gated by `assertCanModifyStudent`; excludes lifecycle status |
 | `staff_update_profile` | Internal | principal | `updateStaff` — principal-only on the dashboard too, not HOD |
 
 **Workflow-submitting (L3 — never mutate directly, only submit the identical request a human submission already uses):**
@@ -235,8 +246,8 @@ runtime by whatever scope the actor actually has.
 |---|---|---|
 | `finance_submit_fee_structure_change` | `fee_structure` | principal |
 | `staff_submit_registration` | `staff_registration` | principal, hod |
-| `students_submit_lifecycle_change` | `student_lifecycle_change` | principal, hod, staff |
-| `students_submit_transfer` | `student_transfer` | principal, hod, staff |
+| `students_submit_lifecycle_change` | `student_lifecycle_change` | principal, hod, staff, class_tutor |
+| `students_submit_transfer` | `student_transfer` | principal, hod, staff, class_tutor |
 | `academic_submit_timetable_for_approval` | `timetable_approval` | principal, hod |
 
 Not built in this slice (flagged, not silently omitted):
