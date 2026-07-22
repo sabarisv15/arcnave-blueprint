@@ -133,6 +133,11 @@ test('principal invitation', async (t) => {
     for (const cid of createdColleges) {
       // eslint-disable-next-line no-await-in-loop
       await adminPool.query('DELETE FROM principal_invitations WHERE college_id = $1', [cid]);
+      // Every accept now also seeds the 7 default document_categories
+      // (document_categories.college_id FKs colleges) — must go before
+      // the colleges delete below.
+      // eslint-disable-next-line no-await-in-loop
+      await adminPool.query('DELETE FROM document_categories WHERE college_id = $1', [cid]);
       // Every accept now also provisions a Level 1 position/account/
       // occupant (ADR-021, unconditional) — position_occupants /
       // position_accounts / positions all FK to users(id)

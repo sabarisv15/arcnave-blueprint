@@ -113,6 +113,8 @@ test('new-college onboarding: dual-write consistency', async (t) => {
     await stopServer(server);
     for (const cid of createdColleges) {
       // eslint-disable-next-line no-await-in-loop
+      await adminPool.query('DELETE FROM document_categories WHERE college_id = $1', [cid]);
+      // eslint-disable-next-line no-await-in-loop
       await adminPool.query('DELETE FROM position_occupants WHERE college_id = $1', [cid]);
       // eslint-disable-next-line no-await-in-loop
       await adminPool.query('DELETE FROM position_accounts WHERE college_id = $1', [cid]);
@@ -210,6 +212,17 @@ test('new-college onboarding: dual-write consistency', async (t) => {
     assert.equal(occupant.user_id, user.id);
     assert.equal(occupant.assigned_by, user.id);
     assert.equal(occupant.revoked_at, null, 'the new principal must be the single ACTIVE occupant');
+
+    const categories = await adminPool.query(
+      'SELECT name, slug FROM document_categories WHERE college_id = $1 ORDER BY name',
+      [collegeId],
+    );
+    assert.equal(categories.rows.length, 7, 'accept must seed the 7 default document categories for a new college');
+    const slugs = categories.rows.map((r) => r.slug).sort();
+    assert.deepEqual(
+      slugs,
+      ['academic_calendar', 'circular', 'curriculum', 'examination', 'forms', 'notices', 'policies'],
+    );
   });
 
   await t.test('a Platform-Admin-chosen Level 1 title is honored end-to-end (create -> invite -> accept)', async () => {

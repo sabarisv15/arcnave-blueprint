@@ -17,6 +17,7 @@ const config = require('../config');
 const security = require('../security');
 const authRepository = require('../repositories/authRepository');
 const positionRepository = require('../repositories/positionRepository');
+const documentCategoryRepository = require('../repositories/documentCategoryRepository');
 const collegeProfileRepository = require('../repositories/collegeProfileRepository');
 const principalInvitationRepository = require('../repositories/principalInvitationRepository');
 const userMfaOtpRepository = require('../repositories/userMfaOtpRepository');
@@ -698,6 +699,20 @@ async function acceptInvitation(client, invitation, { username, password }) {
   // back — never a user with no matching position account, or vice
   // versa.
   await provisionLevel1PositionForNewPrincipal(client, invitation.college_id, user, passwordHash);
+
+  // Same deferred-to-accept-time reasoning as the Level 1 position
+  // above, for an unrelated reason: document_categories' RLS policy
+  // (tenant_isolation, current_setting('app.current_tenant')) and its
+  // GRANT (arcnave_app only) both require a tenant-scoped connection —
+  // platformService.createCollege runs against platformPool
+  // (arcnave_platform, no tenant context), so it structurally cannot do
+  // this insert. `client` here already is that tenant-scoped
+  // transaction. Fixes the gap migration 1756400000000 flagged in its
+  // own comment: a college created after that migration got none of
+  // the 7 default document categories it backfilled for pre-existing
+  // colleges. Idempotent (ON CONFLICT DO NOTHING on college_id+slug),
+  // so re-accepting an invitation never duplicates or errors.
+  await documentCategoryRepository.createDefaultsForCollege(client, invitation.college_id);
 
   return user;
 }
