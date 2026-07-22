@@ -17,6 +17,7 @@ const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
 const globalConfig = require('../src/config');
+const { seedPrincipalPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PASSWORD = 'AiConfigApiTestPass123!';
@@ -92,11 +93,13 @@ async function seedTenant(adminPool, label) {
     );
     userIds[username] = result.rows[0].id;
   }
+  await seedPrincipalPosition(adminPool, { collegeId, userId: userIds.principaluser, passwordHash });
   return { collegeId, subdomain: `aicfgtenant${label}${suffix}`, userIds };
 }
 
 async function cleanupTenant(adminPool, tenant) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [tenant.collegeId]);
+  await cleanupPositionRows(adminPool, tenant.collegeId);
   await adminPool.query('DELETE FROM college_ai_config WHERE college_id = $1', [tenant.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [tenant.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [tenant.collegeId]);

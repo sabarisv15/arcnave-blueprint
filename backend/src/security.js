@@ -45,9 +45,19 @@ async function needsRehash(passwordHash) {
   return argon2.needsRehash(passwordHash);
 }
 
-function createAccessToken({ userId, collegeId, role }) {
+// tokenVersion: embeds the users.token_version (ADR-024) the token was
+// minted with, so a later reset can invalidate it. Defaults to 0 for
+// any caller that doesn't pass one (e.g. existing tests written before
+// this column existed) — 0 is also every pre-existing user's actual
+// column value, so this default doesn't change what a decoded claim
+// means for a caller that never opts into passing it explicitly.
+function createAccessToken({
+  userId, collegeId, role, tokenVersion = 0,
+}) {
   return jwt.sign(
-    { sub: userId, college_id: collegeId, role, type: 'access' },
+    {
+      sub: userId, college_id: collegeId, role, token_version: tokenVersion, type: 'access',
+    },
     config.jwtSecretKey,
     { algorithm: config.jwtAlgorithm, expiresIn: `${config.accessTokenExpireMinutes}m` },
   );
@@ -59,6 +69,26 @@ function decodeAccessToken(token) {
   } catch (err) {
     throw new TokenError(err.message);
   }
+}
+
+// Phase 2 (Position Account Auth): a Position Account's session token.
+// Signed with the SAME jwtSecretKey/algorithm as createAccessToken (so
+// middleware/identity.js can decode either with one decodeAccessToken
+// call) but structurally distinct in one deliberate way: `sub` is the
+// position_account_id, not a userId, and there is no `role` claim at
+// all — role/scope is derived fresh every request from live position
+// state via identityService.resolveCapabilitiesForPosition, never
+// trusted from the token. `type: 'position_access'` is what
+// middleware/identity.js and middleware/sessionRevocation.js branch on
+// to tell this apart from a personal-login 'access' token.
+function createPositionAccessToken({ positionAccountId, collegeId, tokenVersion = 0 }) {
+  return jwt.sign(
+    {
+      sub: positionAccountId, college_id: collegeId, token_version: tokenVersion, type: 'position_access',
+    },
+    config.jwtSecretKey,
+    { algorithm: config.jwtAlgorithm, expiresIn: `${config.accessTokenExpireMinutes}m` },
+  );
 }
 
 // Platform-admin token. Signed with platformJwtSecretKey — a
@@ -126,6 +156,7 @@ module.exports = {
   needsRehash,
   createAccessToken,
   decodeAccessToken,
+  createPositionAccessToken,
   createPlatformAccessToken,
   decodePlatformAccessToken,
   generateRefreshToken,

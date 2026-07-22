@@ -4,7 +4,10 @@ const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requirePlatformAdmin } = require('../middleware/platformAuth');
 const platformService = require('../services/platformService');
+const platformAuditService = require('../services/platformAuditService');
+const positionAccountInvitationService = require('../services/positionAccountInvitationService');
 const { platformPool } = require('../db/pool');
+const { openTenantTransaction } = require('../db/tenantTransaction');
 
 function createPlatformRouter() {
   const router = express.Router();
@@ -53,7 +56,9 @@ function createPlatformRouter() {
   }));
 
   router.post('/colleges', requirePlatformAdmin, asyncHandler(async (req, res) => {
-    const { college_id: collegeId, name, subdomain } = req.body || {};
+    const {
+      college_id: collegeId, name, subdomain, level1_position_title: level1PositionTitle,
+    } = req.body || {};
     try {
       const college = await platformService.createCollege(platformPool, {
         collegeId,
@@ -61,12 +66,14 @@ function createPlatformRouter() {
         subdomain,
         createdBy: req.platformClaims.sub,
         ipAddress: req.ip,
+        level1PositionTitle,
       });
       res.status(201).json({
         college_id: college.college_id,
         name: college.name,
         subdomain: college.subdomain,
         subscription_status: college.subscription_status,
+        level1_position_title: college.level1_position_title,
       });
     } catch (err) {
       if (err instanceof platformService.DuplicateCollegeError) {
@@ -228,6 +235,79 @@ function createPlatformRouter() {
   router.get('/dashboard-summary', requirePlatformAdmin, asyncHandler(async (req, res) => {
     const summary = await platformService.getDashboardSummary(platformPool);
     res.json(summary);
+  }));
+
+  // Phase 2 (Position Account Auth), decision 3: Platform Admin ->
+  // Level 1/2. Unlike every other route in this file, this one needs
+  // to write to TENANT-scoped tables (positions/position_accounts/
+  // position_account_invitations) — arcnave_platform (this router's
+  // connection) has no GRANT on any of them, by design (ADR-010). This
+  // opens its own tenant-scoped transaction against the target college
+  // — the same openTenantTransaction/appPool trick
+  // routes/positionAccountInvitations.js's (unauthenticated) accept
+  // route uses, just from an authenticated-as-Platform-Admin route
+  // instead of a tokenized one. actorIsPlatformAdmin: true is what
+  // lets assertCanInvite's Level 1/2 rule pass with no capabilities
+  // object at all — a Platform Admin has no `users` row to resolve
+  // one from.
+  router.post('/colleges/:college_id/position-accounts/invite', requirePlatformAdmin, asyncHandler(async (req, res) => {
+    const { level, email, title } = req.body || {};
+    await openTenantTransaction(req, res, req.params.college_id);
+
+    try {
+      const { invitation, position } = await positionAccountInvitationService.inviteToPosition(req.dbClient, {
+        collegeId: req.params.college_id,
+        level: Number(level),
+        title,
+        email,
+        actorIsPlatformAdmin: true,
+        actorCapabilities: null,
+        invitedBy: req.platformClaims.sub,
+      });
+
+      // The human-visible record of this action: platform_audit_log
+      // (not the tenant-side audit_log — that table has no listing
+      // route/UI yet, this one does, see AuditLogsPage.jsx). actor_admin_id
+      // is a real platform_admins.id, so the listing query's own
+      // `LEFT JOIN platform_admins` resolves it to the admin's actual
+      // username — never blank, never falls back to the UI's "system"
+      // placeholder (that placeholder is only ever for actor_admin_id
+      // IS NULL, which this write never produces).
+      await platformAuditService.record(platformPool, {
+        actorAdminId: req.platformClaims.sub,
+        action: 'position_account.invited',
+        entity: 'position',
+        entityId: position.id,
+        ipAddress: req.ip,
+        metadata: {
+          collegeId: req.params.college_id, level: Number(level), email,
+        },
+      });
+
+      res.status(201).json({
+        invitation_id: invitation.id,
+        college_id: invitation.college_id,
+        position_id: invitation.position_id,
+        email: invitation.email,
+        expires_at: invitation.expires_at,
+      });
+    } catch (err) {
+      await req.rollbackTransaction();
+      if (err instanceof positionAccountInvitationService.PositionInvitationForbiddenError
+        || err instanceof positionAccountInvitationService.PositionInvitationLevelNotSupportedError) {
+        res.status(403).json({ detail: err.message });
+        return;
+      }
+      if (err instanceof positionAccountInvitationService.PositionInvitationValidationError) {
+        res.status(400).json({ detail: err.message });
+        return;
+      }
+      if (err instanceof positionAccountInvitationService.PositionAccountAlreadyProvisionedError) {
+        res.status(409).json({ detail: err.message });
+        return;
+      }
+      throw err;
+    }
   }));
 
   return router;

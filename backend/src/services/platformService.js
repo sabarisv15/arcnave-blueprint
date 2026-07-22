@@ -126,12 +126,23 @@ async function login(pool, { username, password }) {
   return { accessToken, tokenType: 'bearer' };
 }
 
+// level1PositionTitle: the Platform Admin's own name for the college's
+// Level 1 position ("Principal", "Director", ...) — ADR-021. Optional;
+// a college created without it
+// behaves exactly as every college did before this field existed
+// (positionRepository/authService's own "Principal" default applies at
+// accept time, not here — see provisionLevel1PositionForNewPrincipal's
+// comment). Stored on `colleges` now, purely so it survives the
+// create-college -> invite -> accept gap; not used anywhere in this
+// function itself.
 async function createCollege(pool, {
-  collegeId, name, subdomain, createdBy, ipAddress,
+  collegeId, name, subdomain, createdBy, ipAddress, level1PositionTitle,
 }) {
   let college;
   try {
-    college = await platformRepository.createCollege(pool, { collegeId, name, subdomain, createdBy });
+    college = await platformRepository.createCollege(pool, {
+      collegeId, name, subdomain, createdBy, level1PositionTitle,
+    });
   } catch (err) {
     // 23505 = unique_violation (Postgres SQLSTATE) — colleges has two
     // UNIQUE constraints (college_id, subdomain), either one failing

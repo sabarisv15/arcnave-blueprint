@@ -22,6 +22,7 @@ const http = require('node:http');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const { seedPrincipalPosition, seedHodPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PASSWORD = 'ClassesTestPass123!';
@@ -97,11 +98,15 @@ async function seedTenant(adminPool, label) {
   const passwordHash = await security.hashPassword(PASSWORD);
   const userIds = {};
   // 'subjectuser'/'subjectuser2' stand in for already-provisioned
-  // faculty accounts a principal names as a Class Tutor — distinct
-  // from 'principaluser' (the actor) and 'staffuser' (read-RBAC only),
+  // faculty accounts an HOD names as a Class Tutor via POST/PUT
+  // /classes/:id/tutor (Phase 2 step 18) — distinct from 'principaluser'
+  // (the actor for plain class create/update/delete), 'hoduser' (the
+  // Class Tutor assignment actor), and 'staffuser' (read-RBAC only),
   // same split staff.test.js uses.
-  for (const username of ['principaluser', 'staffuser', 'subjectuser', 'subjectuser2']) {
-    const role = username === 'principaluser' ? 'principal' : 'staff';
+  for (const username of [
+    'principaluser', 'staffuser', 'subjectuser', 'subjectuser2', 'hoduser', 'otherhoduser',
+  ]) {
+    const role = username === 'principaluser' ? 'principal' : username === 'hoduser' || username === 'otherhoduser' ? 'hod' : 'staff';
     // eslint-disable-next-line no-await-in-loop
     const result = await adminPool.query(
       `INSERT INTO users (college_id, username, email, password_hash, role, is_active)
@@ -110,12 +115,57 @@ async function seedTenant(adminPool, label) {
     );
     userIds[username] = result.rows[0].id;
   }
-  return { ...college, userIds };
+  await seedPrincipalPosition(adminPool, { collegeId: college.collegeId, userId: userIds.principaluser, passwordHash });
+
+  // A department 'hoduser' heads (for the Class Tutor
+  // assignment/reassignment tests) and a second, DIFFERENT department
+  // 'otherhoduser' heads (to prove the own-department scope check).
+  const deptResult = await adminPool.query(
+    'INSERT INTO departments (college_id, name) VALUES ($1, $2) RETURNING id',
+    [college.collegeId, 'CSE'],
+  );
+  const departmentId = deptResult.rows[0].id;
+  await seedHodPosition(adminPool, {
+    collegeId: college.collegeId, userId: userIds.hoduser, departmentId, passwordHash,
+  });
+
+  const otherDeptResult = await adminPool.query(
+    'INSERT INTO departments (college_id, name) VALUES ($1, $2) RETURNING id',
+    [college.collegeId, 'ECE'],
+  );
+  const otherDepartmentId = otherDeptResult.rows[0].id;
+  await seedHodPosition(adminPool, {
+    collegeId: college.collegeId, userId: userIds.otherhoduser, departmentId: otherDepartmentId, passwordHash,
+  });
+
+  // visibilityService.assertIsHodOfDepartment (reused by
+  // classTutorService.assignClassTutor/reassignClassTutor for the
+  // own-department scope check) resolves the department's real HOD via
+  // staffService.findHodForDepartment — the legacy `staff`
+  // table+users.role join, not yet migrated onto the Position model —
+  // so a `staff` row is required here too, alongside seedHodPosition's
+  // Position/Account/Occupant rows (which only satisfy
+  // requirePermission's identityService-resolved effectiveRole check).
+  await adminPool.query(
+    'INSERT INTO staff (college_id, user_id, full_name, department_id) VALUES ($1, $2, $3, $4)',
+    [college.collegeId, userIds.hoduser, 'Hod User', departmentId],
+  );
+  await adminPool.query(
+    'INSERT INTO staff (college_id, user_id, full_name, department_id) VALUES ($1, $2, $3, $4)',
+    [college.collegeId, userIds.otherhoduser, 'Other Hod User', otherDepartmentId],
+  );
+
+  return {
+    ...college, userIds, departmentId, otherDepartmentId,
+  };
 }
 
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
+  await cleanupPositionRows(adminPool, college.collegeId);
   await adminPool.query('DELETE FROM classes WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM staff WHERE college_id = $1', [college.collegeId]);
+  await adminPool.query('DELETE FROM departments WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM colleges WHERE college_id = $1', [college.collegeId]);
@@ -185,13 +235,16 @@ test('classes', async (t) => {
     assert.equal(resp.status, 400);
   });
 
-  await t.test('create does not require a tutor_user_id', async () => {
+  // Phase 2 step 20: classes.tutor_user_id is gone entirely (dropped
+  // by migration) — a class is created with no tutor concept at all
+  // now, not "tutor_user_id: null".
+  await t.test('create does not require a tutor and the response carries no tutor_user_id field', async () => {
     const token = await login(collegeA, 'principaluser');
     const resp = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, token), {
       class_name: 'No Tutor Yet Class',
     });
     assert.equal(resp.status, 201);
-    assert.equal(resp.body.tutor_user_id, null);
+    assert.equal('tutor_user_id' in resp.body, false);
   });
 
   await t.test('create on a duplicate class_name within the same tenant is a real 409, from a real DB constraint', async () => {
@@ -207,17 +260,17 @@ test('classes', async (t) => {
     assert.equal(dup.status, 409);
   });
 
-  await t.test('create assigning a tutor already tutoring another class is a real 409', async () => {
+  // Phase 2 step 18: tutor_user_id is no longer accepted by
+  // POST/PUT /classes/:id at all — an explicit 400, not a silent no-op
+  // (dropping it would look like it worked). Class Tutor assignment now
+  // only goes through POST/PUT /classes/:id/tutor (HOD-only,
+  // own-department), see the dedicated block below.
+  await t.test('create rejects a tutor_user_id in the body with 400, not a silent no-op', async () => {
     const token = await login(collegeA, 'principaluser');
-    const first = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, token), {
-      class_name: 'Tutor Conflict Class One', tutor_user_id: collegeA.userIds.subjectuser,
+    const resp = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, token), {
+      class_name: 'Reject Tutor At Create Class', tutor_user_id: collegeA.userIds.subjectuser,
     });
-    assert.equal(first.status, 201);
-
-    const dup = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, token), {
-      class_name: 'Tutor Conflict Class Two', tutor_user_id: collegeA.userIds.subjectuser,
-    });
-    assert.equal(dup.status, 409);
+    assert.equal(resp.status, 400);
   });
 
   await t.test('two classes can independently have no tutor at all', async () => {
@@ -230,14 +283,6 @@ test('classes', async (t) => {
     });
     assert.equal(first.status, 201);
     assert.equal(second.status, 201);
-  });
-
-  await t.test('create with a tutor_user_id that does not exist returns 404, not a 500', async () => {
-    const token = await login(collegeA, 'principaluser');
-    const resp = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, token), {
-      class_name: 'Ghost Tutor Class', tutor_user_id: crypto.randomUUID(),
-    });
-    assert.equal(resp.status, 404);
   });
 
   await t.test('an aadhaar-shaped field is silently dropped, never stored or echoed back', async () => {
@@ -325,19 +370,16 @@ test('classes', async (t) => {
     assert.equal(resp.status, 409);
   });
 
-  await t.test('update assigning a tutor already tutoring another class is a real 409', async () => {
+  await t.test('update rejects a tutor_user_id in the body with 400, not a silent no-op', async () => {
     const token = await login(collegeA, 'principaluser');
-    await post(baseUrl, '/api/v1/classes', headersFor(collegeA, token), {
-      class_name: 'Update Tutor Conflict One', tutor_user_id: collegeA.userIds.subjectuser2,
-    });
-    const second = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, token), {
-      class_name: 'Update Tutor Conflict Two',
+    const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, token), {
+      class_name: 'Reject Tutor At Update Class',
     });
 
-    const resp = await put(baseUrl, `/api/v1/classes/${second.body.id}`, headersFor(collegeA, token), {
+    const resp = await put(baseUrl, `/api/v1/classes/${created.body.id}`, headersFor(collegeA, token), {
       tutor_user_id: collegeA.userIds.subjectuser2,
     });
-    assert.equal(resp.status, 409);
+    assert.equal(resp.status, 400);
   });
 
   await t.test('delete removes the row and returns 204; a second delete 404s', async () => {
@@ -376,13 +418,20 @@ test('classes', async (t) => {
   // visibilityService scopes 'staff' to SELF_ASSIGNED (their own
   // tutor/faculty-allocated classes only, not every class in the
   // college — the access-leak fix this codebase's own checkpoint
-  // documents). tutor_user_id is what makes staffuser "assigned" here.
+  // documents). Being assigned as Class Tutor (via POST
+  // /classes/:id/tutor, Phase 2 step 18 — no more tutor_user_id at
+  // create time) is what makes staffuser "assigned" here.
   await t.test('read is allowed for staff assigned as tutor, not just principal', async () => {
     const principalToken = await login(collegeA, 'principaluser');
     const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, principalToken), {
-      class_name: 'Readable By Staff Class',
-      tutor_user_id: collegeA.userIds.staffuser,
+      class_name: 'Readable By Staff Class', department_id: collegeA.departmentId,
     });
+
+    const hodToken = await login(collegeA, 'hoduser');
+    const assign = await post(baseUrl, `/api/v1/classes/${created.body.id}/tutor`, headersFor(collegeA, hodToken), {
+      new_tutor_user_id: collegeA.userIds.staffuser,
+    });
+    assert.equal(assign.status, 201);
 
     const staffToken = await login(collegeA, 'staffuser');
     const resp = await get(baseUrl, `/api/v1/classes/${created.body.id}`, headersFor(collegeA, staffToken));
@@ -403,6 +452,129 @@ test('classes', async (t) => {
   await t.test('read requires authentication', async () => {
     const resp = await get(baseUrl, '/api/v1/classes', headersFor(collegeA));
     assert.equal(resp.status, 401);
+  });
+
+  // --- Class Tutor assignment/reassignment (Phase 2 step 18) ---
+  // HOD-only, own-department-scoped — supersedes tutor_user_id entirely.
+
+  await t.test('POST /classes/:id/tutor assigns a first-time Class Tutor, 201', async () => {
+    const principalToken = await login(collegeA, 'principaluser');
+    const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, principalToken), {
+      class_name: 'Assign Tutor Class', department_id: collegeA.departmentId,
+    });
+
+    const hodToken = await login(collegeA, 'hoduser');
+    const resp = await post(baseUrl, `/api/v1/classes/${created.body.id}/tutor`, headersFor(collegeA, hodToken), {
+      new_tutor_user_id: collegeA.userIds.subjectuser,
+    });
+    assert.equal(resp.status, 201);
+  });
+
+  await t.test('POST /classes/:id/tutor on a class that already has one is a real 409', async () => {
+    const principalToken = await login(collegeA, 'principaluser');
+    const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, principalToken), {
+      class_name: 'Double Assign Tutor Class', department_id: collegeA.departmentId,
+    });
+
+    const hodToken = await login(collegeA, 'hoduser');
+    const first = await post(baseUrl, `/api/v1/classes/${created.body.id}/tutor`, headersFor(collegeA, hodToken), {
+      new_tutor_user_id: collegeA.userIds.subjectuser,
+    });
+    assert.equal(first.status, 201);
+
+    const second = await post(baseUrl, `/api/v1/classes/${created.body.id}/tutor`, headersFor(collegeA, hodToken), {
+      new_tutor_user_id: collegeA.userIds.subjectuser2,
+    });
+    assert.equal(second.status, 409);
+  });
+
+  await t.test('POST /classes/:id/tutor with a nonexistent newTutorUserId is a real 404, not a 500', async () => {
+    const principalToken = await login(collegeA, 'principaluser');
+    const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, principalToken), {
+      class_name: 'Ghost Tutor Assign Class', department_id: collegeA.departmentId,
+    });
+
+    const hodToken = await login(collegeA, 'hoduser');
+    const resp = await post(baseUrl, `/api/v1/classes/${created.body.id}/tutor`, headersFor(collegeA, hodToken), {
+      new_tutor_user_id: crypto.randomUUID(),
+    });
+    assert.equal(resp.status, 404);
+  });
+
+  await t.test('POST /classes/:id/tutor rejects a missing new_tutor_user_id with 400', async () => {
+    const principalToken = await login(collegeA, 'principaluser');
+    const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, principalToken), {
+      class_name: 'Missing New Tutor Class', department_id: collegeA.departmentId,
+    });
+
+    const hodToken = await login(collegeA, 'hoduser');
+    const resp = await post(baseUrl, `/api/v1/classes/${created.body.id}/tutor`, headersFor(collegeA, hodToken), {});
+    assert.equal(resp.status, 400);
+  });
+
+  await t.test('POST /classes/:id/tutor is forbidden for the HOD of a DIFFERENT department', async () => {
+    const principalToken = await login(collegeA, 'principaluser');
+    const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, principalToken), {
+      class_name: 'Wrong Dept Hod Class', department_id: collegeA.departmentId,
+    });
+
+    const otherHodToken = await login(collegeA, 'otherhoduser');
+    const resp = await post(baseUrl, `/api/v1/classes/${created.body.id}/tutor`, headersFor(collegeA, otherHodToken), {
+      new_tutor_user_id: collegeA.userIds.subjectuser,
+    });
+    assert.equal(resp.status, 403);
+  });
+
+  await t.test('POST /classes/:id/tutor is forbidden for a non-HOD role', async () => {
+    const principalToken = await login(collegeA, 'principaluser');
+    const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, principalToken), {
+      class_name: 'Non Hod Assign Class', department_id: collegeA.departmentId,
+    });
+
+    const staffToken = await login(collegeA, 'staffuser');
+    const resp = await post(baseUrl, `/api/v1/classes/${created.body.id}/tutor`, headersFor(collegeA, staffToken), {
+      new_tutor_user_id: collegeA.userIds.subjectuser,
+    });
+    assert.equal(resp.status, 403);
+  });
+
+  await t.test('POST /classes/:id/tutor against a nonexistent class is a real 404', async () => {
+    const hodToken = await login(collegeA, 'hoduser');
+    const resp = await post(baseUrl, `/api/v1/classes/${crypto.randomUUID()}/tutor`, headersFor(collegeA, hodToken), {
+      new_tutor_user_id: collegeA.userIds.subjectuser,
+    });
+    assert.equal(resp.status, 404);
+  });
+
+  await t.test('PUT /classes/:id/tutor reassigns an already-assigned Class Tutor to a new occupant, 200', async () => {
+    const principalToken = await login(collegeA, 'principaluser');
+    const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, principalToken), {
+      class_name: 'Reassign Tutor Class', department_id: collegeA.departmentId,
+    });
+
+    const hodToken = await login(collegeA, 'hoduser');
+    const first = await post(baseUrl, `/api/v1/classes/${created.body.id}/tutor`, headersFor(collegeA, hodToken), {
+      new_tutor_user_id: collegeA.userIds.subjectuser,
+    });
+    assert.equal(first.status, 201);
+
+    const reassign = await put(baseUrl, `/api/v1/classes/${created.body.id}/tutor`, headersFor(collegeA, hodToken), {
+      new_tutor_user_id: collegeA.userIds.subjectuser2,
+    });
+    assert.equal(reassign.status, 200);
+  });
+
+  await t.test('PUT /classes/:id/tutor on a class with no active Class Tutor yet is a real 404', async () => {
+    const principalToken = await login(collegeA, 'principaluser');
+    const created = await post(baseUrl, '/api/v1/classes', headersFor(collegeA, principalToken), {
+      class_name: 'Reassign Without Assign Class', department_id: collegeA.departmentId,
+    });
+
+    const hodToken = await login(collegeA, 'hoduser');
+    const resp = await put(baseUrl, `/api/v1/classes/${created.body.id}/tutor`, headersFor(collegeA, hodToken), {
+      new_tutor_user_id: collegeA.userIds.subjectuser,
+    });
+    assert.equal(resp.status, 404);
   });
 
   // --- Cross-tenant isolation ---

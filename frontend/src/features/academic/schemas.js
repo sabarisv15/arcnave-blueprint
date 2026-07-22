@@ -33,7 +33,14 @@ export const classFormSchema = z.object({
   department: z.string().optional().or(z.literal('')),
   departmentId: z.string().optional().or(z.literal('')),
   semester: z.string().optional().or(z.literal('')),
-  tutorUserId: z.string().optional().or(z.literal('')),
+});
+
+// Class Tutor assignment/reassignment now goes through its own
+// dedicated route (POST/PUT /classes/:id/tutor, HOD-only,
+// own-department) — classes.tutor_user_id is gone, and createClass/
+// updateClass reject it outright. See ClassDetailPage's ProfileTab.
+export const classTutorFormSchema = z.object({
+  newTutorUserId: z.string().min(1, 'Tutor user ID is required'),
 });
 
 export const timetablePeriodFormSchema = z.object({

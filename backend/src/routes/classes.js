@@ -4,6 +4,7 @@ const express = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requirePermission } = require('../middleware/rbac');
 const academicService = require('../services/academicService');
+const classTutorService = require('../services/classTutorService');
 const staffService = require('../services/staffService');
 const workflowService = require('../services/workflowService');
 const visibilityService = require('../services/visibilityService');
@@ -135,6 +136,22 @@ function mapAcademicServiceError(err, res) {
     res.status(403).json({ detail: err.message });
     return true;
   }
+  // Phase 2 step 18 — classTutorService.assignClassTutor/
+  // reassignClassTutor's own errors, checked here rather than a second
+  // mapper function: same one call site (mapAcademicServiceError)
+  // routes/classes.js already funnels every service error through.
+  if (err instanceof classTutorService.ClassTutorClassNotFoundError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof classTutorService.ClassTutorValidationError) {
+    res.status(400).json({ detail: err.message });
+    return true;
+  }
+  if (err instanceof classTutorService.ClassTutorNotAssignedError) {
+    res.status(404).json({ detail: err.message });
+    return true;
+  }
   return false;
 }
 
@@ -236,6 +253,43 @@ function createClassesRouter() {
         return;
       }
       res.json(cls);
+    } catch (err) {
+      if (mapAcademicServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  // Phase 2 step 18: dedicated routes for Class Tutor
+  // assignment/reassignment — a genuinely different actor set
+  // (HOD-only, own-department, requirePermission('classes.assign_tutor')
+  // mapped to ['hod']) than the rest of this file's principal-only
+  // create/update/delete, so folded into neither PATCH /classes/:id nor
+  // a shared permission. POST is first-time assignment (409 if one
+  // already exists); PUT is reassignment (404 if none exists yet).
+  router.post('/classes/:id/tutor', requirePermission('classes.assign_tutor'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const occupant = await classTutorService.assignClassTutor(
+        req.dbClient,
+        req.params.id,
+        { newTutorUserId: (req.body || {}).new_tutor_user_id, actorUserId: req.jwtClaims.sub },
+      );
+      res.status(201).json(occupant);
+    } catch (err) {
+      if (mapAcademicServiceError(err, res)) return;
+      throw err;
+    }
+  }));
+
+  router.put('/classes/:id/tutor', requirePermission('classes.assign_tutor'), asyncHandler(async (req, res) => {
+    if (!requireResolvedTenant(req, res)) return;
+    try {
+      const occupant = await classTutorService.reassignClassTutor(
+        req.dbClient,
+        req.params.id,
+        { newTutorUserId: (req.body || {}).new_tutor_user_id, actorUserId: req.jwtClaims.sub },
+      );
+      res.json(occupant);
     } catch (err) {
       if (mapAcademicServiceError(err, res)) return;
       throw err;

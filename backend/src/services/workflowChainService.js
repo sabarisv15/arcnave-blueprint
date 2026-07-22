@@ -39,8 +39,7 @@
 // gets identical behavior to today, not a behavior change by omission.
 
 const configurationService = require('./configurationService');
-const staffService = require('./staffService');
-const classRepository = require('../repositories/classRepository');
+const identityService = require('./identityService');
 const workflowDelegationRepository = require('../repositories/workflowDelegationRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 
@@ -59,6 +58,7 @@ const DEFAULT_CHAINS = {
 };
 
 const KNOWN_ROLES = ['principal', 'hod', 'tutor'];
+const PRINCIPAL_LEVEL = 1;
 
 class WorkflowChainValidationError extends Error {}
 class WorkflowChainUnknownEntityTypeError extends Error {}
@@ -69,30 +69,49 @@ class WorkflowChainUnknownRoleError extends Error {}
 // is a caller bug (missing context), not a business-data problem.
 class WorkflowChainMissingContextError extends Error {}
 
+// Resolves 'principal'/'hod' via identityService.resolvePositionOccupant
+// (ADR-022) instead of staffService's users.role-based lookups or any
+// direct positionRepository/resolver access of this file's own —
+// workflow routing is one of the four consumers Phase 1 moves onto the
+// Position model as the single source of truth, and identityService is
+// its sole entry point, never a second, parallel "who is the HOD/
+// Principal" implementation. staffService.ensureHodPosition/
+// swapHodOccupant (staffService.js) keep a department's Level 3
+// occupant in sync on every HOD/Acting-HOD change, so an active HOD
+// In-Charge appointee is simply the current occupant here too — no
+// separate in-charge fallback needed, unlike the
+// staffService.findHodForDepartment lookup this replaces.
 async function resolveRoleUserId(client, role, { collegeId, classId, departmentId }) {
   if (role === 'principal') {
-    return (await staffService.findPrincipal(client, collegeId)).user_id;
+    const userId = await identityService.resolvePositionOccupant(client, { collegeId, level: PRINCIPAL_LEVEL });
+    if (userId === null) {
+      throw new WorkflowChainMissingContextError(`college ${JSON.stringify(collegeId)} has no active Principal to resolve a "principal" chain step`);
+    }
+    return userId;
   }
   if (role === 'hod') {
     if (!departmentId) {
       throw new WorkflowChainMissingContextError('departmentId is required to resolve an "hod" chain step');
     }
-    // staffService.findHodForDepartment already falls back to an
-    // active HOD In-Charge appointment (task #10) when no permanent
-    // HOD exists — BusinessRules.md's own "HOD In-Charge appointments
-    // automatically act as workflow delegates where applicable" is
-    // already satisfied by that fallback, not re-implemented here.
-    return (await staffService.findHodForDepartment(client, collegeId, departmentId)).user_id;
+    const userId = await identityService.resolvePositionOccupant(client, { collegeId, departmentId });
+    if (userId === null) {
+      throw new WorkflowChainMissingContextError(`department ${JSON.stringify(departmentId)} has no active HOD (permanent or acting) to resolve an "hod" chain step`);
+    }
+    return userId;
   }
   if (role === 'tutor') {
     if (!classId) {
       throw new WorkflowChainMissingContextError('classId is required to resolve a "tutor" chain step');
     }
-    const cls = await classRepository.findById(client, classId);
-    if (cls === null || !cls.tutor_user_id) {
+    // Phase 2 step 11: classes.tutor_user_id -> the Position/Account/
+    // Occupant model, same swap resolveRoleUserId already made for
+    // 'principal'/'hod' in Phase 1 — classRepository is no longer
+    // consulted for this role at all.
+    const userId = await identityService.resolvePositionOccupant(client, { collegeId, classId });
+    if (userId === null) {
       throw new WorkflowChainMissingContextError(`class ${JSON.stringify(classId)} has no tutor assigned to resolve a "tutor" chain step`);
     }
-    return cls.tutor_user_id;
+    return userId;
   }
   throw new WorkflowChainUnknownRoleError(`role ${JSON.stringify(role)} is not a known chain role (${KNOWN_ROLES.join(', ')})`);
 }

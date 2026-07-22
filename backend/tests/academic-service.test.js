@@ -10,13 +10,16 @@
 // as staff-service.test.js.
 //
 // What's deliberately NOT here: an actual
-// classes_college_id_class_name_key / classes_tutor_user_id_key /
-// classes_tutor_user_id_fkey violation reaching its domain error
-// end-to-end. That needs a real Postgres 23505/23503 from the live
-// constraints, not a hand-thrown err.code + err.constraint — the
-// Module 3 first slice already live-verified those exact constraint
-// names against a real database (see .ai/RESULT.md), so this file
-// trusts that grounding rather than re-verifying it without a DB.
+// classes_college_id_class_name_key / classes_department_id_fkey
+// violation reaching its domain error end-to-end. That needs a real
+// Postgres 23505/23503 from the live constraints, not a hand-thrown
+// err.code + err.constraint — the Module 3 first slice already
+// live-verified those exact constraint names against a real database
+// (see .ai/RESULT.md), so this file trusts that grounding rather than
+// re-verifying it without a DB. tutorUserId is no longer a createClass/
+// updateClass concern at all (Phase 2 step 18) — see
+// class-tutor-service.test.js for assignClassTutor/reassignClassTutor's
+// own coverage.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -147,34 +150,20 @@ test('AcademicService validation and audit logging (no DB)', async (t) => {
     );
   });
 
-  await t.test('createClass maps a classes_tutor_user_id_key violation to ClassTutorConflictError', async () => {
-    const createMock = t.mock.method(classRepository, 'create', async () => {
-      const err = new Error('duplicate key value violates unique constraint "classes_tutor_user_id_key"');
-      err.code = '23505';
-      err.constraint = 'classes_tutor_user_id_key';
-      throw err;
-    });
+  // Phase 2 step 18: tutorUserId is no longer accepted by createClass at
+  // all (ClassTutorConflictError/ClassTutorNotFoundError now come from
+  // classTutorService.assignClassTutor/reassignClassTutor instead — see
+  // class-tutor-service.test.js) — a caller-supplied value is an
+  // explicit ClassValidationError, never silently dropped.
+  await t.test('createClass rejects a tutorUserId field with ClassValidationError, without touching the DB', async () => {
+    const createMock = t.mock.method(classRepository, 'create');
     t.after(() => createMock.mock.restore());
 
     await assert.rejects(
       () => academicService.createClass({}, { collegeId: 'c1', className: '3rd Sem · CS-A', tutorUserId: 'u1' }),
-      academicService.ClassTutorConflictError,
+      academicService.ClassValidationError,
     );
-  });
-
-  await t.test('createClass maps a classes_tutor_user_id_fkey violation to ClassTutorNotFoundError', async () => {
-    const createMock = t.mock.method(classRepository, 'create', async () => {
-      const err = new Error('insert or update on table "classes" violates foreign key constraint "classes_tutor_user_id_fkey"');
-      err.code = '23503';
-      err.constraint = 'classes_tutor_user_id_fkey';
-      throw err;
-    });
-    t.after(() => createMock.mock.restore());
-
-    await assert.rejects(
-      () => academicService.createClass({}, { collegeId: 'c1', className: '3rd Sem · CS-A', tutorUserId: 'missing-user' }),
-      academicService.ClassTutorNotFoundError,
-    );
+    assert.equal(createMock.mock.callCount(), 0);
   });
 
   await t.test('createClass maps a classes_department_id_fkey violation to ClassDepartmentNotFoundError', async () => {
@@ -279,19 +268,18 @@ test('AcademicService validation and audit logging (no DB)', async (t) => {
     );
   });
 
-  await t.test('updateClass maps a tutor conflict on update to ClassTutorConflictError', async () => {
-    const updateMock = t.mock.method(classRepository, 'update', async () => {
-      const err = new Error('duplicate key value violates unique constraint "classes_tutor_user_id_key"');
-      err.code = '23505';
-      err.constraint = 'classes_tutor_user_id_key';
-      throw err;
-    });
+  // Phase 2 step 18: same swap as createClass above — updateClass no
+  // longer accepts tutorUserId at all; PATCH /classes/:id gets an
+  // explicit 400, not a silent no-op.
+  await t.test('updateClass rejects a tutorUserId field with ClassValidationError, without touching the DB', async () => {
+    const updateMock = t.mock.method(classRepository, 'update');
     t.after(() => updateMock.mock.restore());
 
     await assert.rejects(
       () => academicService.updateClass({}, 'class-id', { tutorUserId: 'already-tutoring' }, { userId: 'u1' }),
-      academicService.ClassTutorConflictError,
+      academicService.ClassValidationError,
     );
+    assert.equal(updateMock.mock.callCount(), 0);
   });
 
   await t.test('removeClass on a nonexistent id is a no-op, no audit entry', async () => {

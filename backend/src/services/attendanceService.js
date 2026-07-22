@@ -46,6 +46,7 @@ const academicService = require('./academicService');
 const studentService = require('./studentService');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const workflowService = require('./workflowService');
+const identityService = require('./identityService');
 
 // Missing classId/sessionDate/hourIndex/totalStudents, or missing
 // actor identity (actorUserId/actorRole). Unlike e.g.
@@ -162,8 +163,10 @@ function dayOfWeekName(sessionDate) {
 
 // BusinessRules.md names three eligible actors. All three are now
 // verified with real, structured data:
-//   - "the class tutor" -> classes.tutor_user_id === actorUserId, a
-//     real FK comparison (Module 3).
+//   - "the class tutor" -> identityService.resolvePositionOccupant's
+//     {classId} overload === actorUserId (Position/Account/Occupant
+//     model, Phase 2 step 15 — previously a real FK comparison against
+//     classes.tutor_user_id, Module 3).
 //   - "an HOD (force-mark)" -> actorRole === 'hod', trusted the same
 //     way rbac.js trusts req.jwtClaims.role (a verified JWT claim, not
 //     re-derived here).
@@ -192,9 +195,24 @@ function dayOfWeekName(sessionDate) {
 // Approved." Real, correct code; not yet exercised by real data. Not
 // worked around here — see .ai/TASK.md.
 async function assertCanMark(client, cls, sessionDate, hourIndex, actorUserId, actorRole) {
-  const isTutor = cls.tutor_user_id !== null && cls.tutor_user_id === actorUserId;
+  // isHod checked first, before the tutor lookup below, purely to skip
+  // an unnecessary DB round-trip for the common HOD force-mark path —
+  // no behavior change from the original `isTutor || isHod` (both still
+  // grant access identically).
   const isHod = actorRole === 'hod';
-  if (isTutor || isHod) {
+  if (isHod) {
+    return;
+  }
+
+  // Phase 2 step 15: classes.tutor_user_id -> the Position/Account/
+  // Occupant model, same swap sendClassAlert/assertIsTutor/
+  // recordScholarshipDecision already made (steps 13/14) —
+  // identityService.resolvePositionOccupant's {classId} overload is the
+  // one entry point, never a direct positionRepository/resolver call of
+  // this file's own.
+  const tutorUserId = await identityService.resolvePositionOccupant(client, { collegeId: cls.college_id, classId: cls.id });
+  const isTutor = tutorUserId !== null && tutorUserId === actorUserId;
+  if (isTutor) {
     return;
   }
 
@@ -402,6 +420,10 @@ async function requestAttendanceCorrection(client, sessionId, {
   }
 
   const cls = await academicService.getClass(client, session.class_id);
+  // Phase 2 step 15: same swap as assertCanMark above — the vacant-seat
+  // case (null) is handled identically to classes.tutor_user_id: null
+  // was before, a valid approver-chain state, not an error.
+  const tutorUserId = await identityService.resolvePositionOccupant(client, { collegeId: session.college_id, classId: cls.id });
 
   const workflowRequest = await workflowService.submitRequest(client, {
     collegeId: session.college_id,
@@ -409,7 +431,7 @@ async function requestAttendanceCorrection(client, sessionId, {
     entityId: sessionId,
     requestedByUserId,
     origin,
-    approverChain: [{ step: 1, role: 'tutor', user_id: cls.tutor_user_id }],
+    approverChain: [{ step: 1, role: 'tutor', user_id: tutorUserId }],
   });
 
   const correction = await attendanceCorrectionRepository.create(client, {

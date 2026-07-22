@@ -36,7 +36,9 @@ function CreateCollegeCard() {
   const queryClient = useQueryClient();
   const form = useForm({
     resolver: zodResolver(collegeFormSchema),
-    defaultValues: { collegeId: '', name: '', subdomain: '' },
+    defaultValues: {
+      collegeId: '', name: '', subdomain: '', level1PositionTitle: '',
+    },
   });
 
   const createMutation = useMutation({
@@ -54,7 +56,11 @@ function CreateCollegeCard() {
     <Card className="flex h-full flex-col overflow-hidden">
       <CardHeader className="shrink-0">
         <CardTitle>Create New College</CardTitle>
-        <CardDescription>Onboard a new college/organization to the platform.</CardDescription>
+        <CardDescription>
+          Onboard a new college/organization to the platform. When its Principal invitation is
+          accepted, a Level 1 Institutional Position Account is also provisioned alongside the
+          Principal user.
+        </CardDescription>
       </CardHeader>
       <CardContent className="min-h-0 overflow-y-auto">
         <Form {...form}>
@@ -67,6 +73,13 @@ function CreateCollegeCard() {
             )} />
             <FormField control={form.control} name="subdomain" render={({ field }) => (
               <FormItem><FormLabel>Subdomain</FormLabel><FormControl><Input placeholder="e.g. abceng" {...field} /></FormControl><FormMessage /></FormItem>
+            )} />
+            <FormField control={form.control} name="level1PositionTitle" render={({ field }) => (
+              <FormItem className="sm:col-span-3">
+                <FormLabel>Level 1 Position Title (optional)</FormLabel>
+                <FormControl><Input placeholder="e.g. Principal, Director" {...field} /></FormControl>
+                <FormMessage />
+              </FormItem>
             )} />
             <div className="sm:col-span-3">
               <Button type="submit" disabled={createMutation.isPending}>

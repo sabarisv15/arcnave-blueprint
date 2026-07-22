@@ -4,7 +4,11 @@
 // value) — no live Postgres needed: attendanceRepository/
 // attendanceCorrectionRepository/academicService/workflowService/
 // auditLogRepository are stubbed via node:test's built-in mock, same
-// technique as every other *-service.test.js file in this suite.
+// technique as every other *-service.test.js file in this suite. The
+// approver-chain tutor lookup moved off classes.tutor_user_id onto
+// identityService.resolvePositionOccupant's {classId} overload in
+// Phase 2 step 15 — mocked here rather than the class row carrying
+// tutor_user_id.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -13,6 +17,7 @@ const attendanceCorrectionRepository = require('../src/repositories/attendanceCo
 const academicService = require('../src/services/academicService');
 const workflowService = require('../src/services/workflowService');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
+const identityService = require('../src/services/identityService');
 const attendanceService = require('../src/services/attendanceService');
 
 test('lockAttendanceSession', async (t) => {
@@ -70,12 +75,14 @@ test('requestAttendanceCorrection', async (t) => {
 
   await t.test('submits a workflow request (Class Tutor as sole approver) and creates the correction row', async () => {
     const findMock = t.mock.method(attendanceRepository, 'findById', async () => ({ id: 's1', college_id: 'c1', class_id: 'class-1', locked_at: '2026-01-01T00:00:00Z' }));
-    const getClassMock = t.mock.method(academicService, 'getClass', async () => ({ id: 'class-1', tutor_user_id: 'tutor-1' }));
+    const getClassMock = t.mock.method(academicService, 'getClass', async () => ({ id: 'class-1' }));
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'tutor-1');
     const submitMock = t.mock.method(workflowService, 'submitRequest', async (client, fields) => ({ id: 'wf-1', ...fields }));
     const createMock = t.mock.method(attendanceCorrectionRepository, 'create', async (client, fields) => ({ id: 'corr-1', ...fields }));
     t.after(() => {
       findMock.mock.restore();
       getClassMock.mock.restore();
+      resolveTutorMock.mock.restore();
       submitMock.mock.restore();
       createMock.mock.restore();
     });

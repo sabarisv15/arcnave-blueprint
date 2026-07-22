@@ -5,6 +5,10 @@
 // substituteAssignmentRepository/studentService/attendanceRepository/
 // auditLogRepository are stubbed via node:test's built-in mock, same
 // technique as every other *-service.test.js file in this suite.
+// assertCanMark's tutor check moved off classes.tutor_user_id onto
+// identityService.resolvePositionOccupant's {classId} overload in
+// Phase 2 step 15 — mocked here rather than the class row carrying
+// tutor_user_id.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -16,6 +20,7 @@ const studentService = require('../src/services/studentService');
 const classRepository = require('../src/repositories/classRepository');
 const attendanceRepository = require('../src/repositories/attendanceRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
+const identityService = require('../src/services/identityService');
 const attendanceService = require('../src/services/attendanceService');
 const aiToolRegistry = require('../src/services/aiToolRegistry');
 
@@ -106,8 +111,9 @@ test('attendanceService.markAttendanceByRollNumbers', async (t) => {
       { id: 'stu-99', roll_no: '99' },
     ]);
     const getClassMock = t.mock.method(academicService, 'getClass', async () => ({
-      id: 'class-1', college_id: 'c1', tutor_user_id: 'tutor-1', timetable_status: 'Approved',
+      id: 'class-1', college_id: 'c1', timetable_status: 'Approved',
     }));
+    const resolveTutorMock = t.mock.method(identityService, 'resolvePositionOccupant', async () => 'tutor-1');
     const getPeriodMock = t.mock.method(academicService, 'getTimetablePeriodByDayAndHour', async () => null);
     const findSessionMock = t.mock.method(attendanceRepository, 'findByClassSessionAndHour', async () => null);
     const createMock = t.mock.method(attendanceRepository, 'create', async (client, fields) => ({ id: 'sess-1', ...fields }));
@@ -116,6 +122,7 @@ test('attendanceService.markAttendanceByRollNumbers', async (t) => {
       resolveMock.mock.restore();
       rosterMock.mock.restore();
       getClassMock.mock.restore();
+      resolveTutorMock.mock.restore();
       getPeriodMock.mock.restore();
       findSessionMock.mock.restore();
       createMock.mock.restore();

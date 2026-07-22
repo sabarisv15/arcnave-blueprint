@@ -1,7 +1,7 @@
 # ARCNAVE — Architecture
 
 Status: Frozen (decisions). Implementation: in progress.
-Last updated: 2026-07-02
+Last updated: 2026-07-21
 
 ## 1. System Overview
 
@@ -47,6 +47,23 @@ Responsibilities:
   transaction, issues `SET LOCAL app.current_tenant = '<college_id>'`
   before any query runs. Never a bare connection-level `SET` — pooled
   connections would leak tenant context across requests. See ADR-002.
+- Identity model — `Position → Institutional Position Account →
+  Occupant` (ADR-021), for Level 1 and Level 3 positions: credentials,
+  MFA, sessions, and audit identity live on the permanent Position
+  Account, not the person; an append-only Occupant row links whichever
+  person currently holds it. `identityService.resolveCapabilities`
+  (ADR-022) is the one façade resolving a user's active positions,
+  module/department scope, and effective role — routes, AI tools, and
+  `workflowChainService` call only this, never its internal resolver
+  modules directly. **Current cutover state**: `users.role` remains the
+  live authentication mechanism; `position_accounts` are provisioned
+  unconditionally alongside it but have no login path wired up yet —
+  the two identity paths coexist, not yet merged.
+- Session revocation (ADR-024) — every authenticated request
+  re-checks the JWT's `token_version` against the current DB value,
+  unconditionally (not behind a rollout flag). Password reset, MFA
+  reset, or a Position Account occupant change all increment
+  `token_version` and revoke outstanding refresh tokens immediately.
 
 ### 2.4 API layer — Express
 - All endpoints under `/api/v1/...`. Versioned from day one, because

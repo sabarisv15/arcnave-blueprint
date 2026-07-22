@@ -6,11 +6,15 @@ const asyncHandler = require('./middleware/asyncHandler');
 const { requestContextMiddleware } = require('./middleware/requestContext');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
+const { sessionRevocationMiddleware } = require('./middleware/sessionRevocation');
+const { identityMiddleware } = require('./middleware/identity');
 const errorHandler = require('./middleware/errorHandler');
 const createAuthRouter = require('./routes/auth');
 const createConfigurationsRouter = require('./routes/configurations');
 const createAiConfigRouter = require('./routes/aiConfig');
 const createInvitationsRouter = require('./routes/invitations');
+const createPositionAccountInvitationsRouter = require('./routes/positionAccountInvitations');
+const createPositionAccountsRouter = require('./routes/positionAccounts');
 const createStudentsRouter = require('./routes/students');
 const createStaffRouter = require('./routes/staff');
 const createClassesRouter = require('./routes/classes');
@@ -84,6 +88,9 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   // routes/invitations.js), not from anything tenantMiddleware would
   // resolve. It never reaches authMiddleware/tenantMiddleware at all.
   app.use(createInvitationsRouter());
+  // POST /position-accounts/invitations/accept — same reasoning as
+  // /invitations/accept above, own separate token/table.
+  app.use(createPositionAccountInvitationsRouter());
 
   // AuthMiddleware before TenantMiddleware — resolveTenant reads
   // req.jwtClaims, which AuthMiddleware sets. Express runs app.use()
@@ -93,6 +100,15 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   // Python/Starlette port).
   app.use(authMiddleware);
   app.use(asyncHandler(tenantMiddleware));
+  // ADR-024: after tenantMiddleware so req.dbClient (the tenant-scoped
+  // transaction) exists to read token_version through — see
+  // middleware/sessionRevocation.js's own docstring for why this
+  // ordering is load-bearing, not incidental.
+  app.use(asyncHandler(sessionRevocationMiddleware));
+  // Phase 1 (Capability Resolver integration): resolves
+  // req.capabilities exactly once per request, after revocation has
+  // already rejected a stale session — see middleware/identity.js.
+  app.use(asyncHandler(identityMiddleware));
 
   // Proves the whole resolve -> set_tenant_context -> route-handler
   // pipeline actually reaches Postgres: reads current_setting() back
@@ -114,6 +130,7 @@ function createTenantApp({ registerExtraRoutes } = {}) {
   // Ordinary tenant-scoped routes, registered after tenantMiddleware
   // like whoami above — not to be confused with AuthMiddleware.
   app.use(createAuthRouter());
+  app.use(createPositionAccountsRouter());
   app.use(createConfigurationsRouter());
   app.use(createAiConfigRouter());
   app.use(createStudentsRouter());

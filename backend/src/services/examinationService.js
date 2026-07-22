@@ -23,6 +23,7 @@
 // extraction produced the uploaded file.
 
 const classRepository = require('../repositories/classRepository');
+const identityService = require('./identityService');
 const documentService = require('./documentService');
 const examTimetableVersionRepository = require('../repositories/examTimetableVersionRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
@@ -48,12 +49,18 @@ class ExaminationDocumentNotFoundError extends Error {}
 // prevent.
 class ExaminationDocumentClassMismatchError extends Error {}
 
+// Phase 2 step 14: classes.tutor_user_id -> the Position/Account/
+// Occupant model, same swap sendClassAlert's own gate already made
+// (step 13) — identityService.resolvePositionOccupant's {classId}
+// overload is the one entry point, never a direct
+// positionRepository/resolver call of this file's own.
 async function assertIsTutor(client, classId, actorUserId) {
   const cls = await classRepository.findById(client, classId);
   if (cls === null) {
     throw new ExaminationClassNotFoundError(`class ${JSON.stringify(classId)} does not exist`);
   }
-  if (cls.tutor_user_id !== actorUserId) {
+  const tutorUserId = await identityService.resolvePositionOccupant(client, { collegeId: cls.college_id, classId });
+  if (tutorUserId !== actorUserId) {
     throw new ExaminationNotTutorError(`user ${JSON.stringify(actorUserId)} is not the tutor of class ${JSON.stringify(classId)}`);
   }
   return cls;

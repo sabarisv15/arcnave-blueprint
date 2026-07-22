@@ -29,6 +29,7 @@ const http = require('node:http');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const { seedPrincipalPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PASSWORD = 'FinanceTestPass123!';
@@ -121,6 +122,7 @@ async function seedTenant(adminPool, label) {
     `INSERT INTO staff (college_id, user_id, full_name) VALUES ($1, $2, 'Finance API Test Principal')`,
     [college.collegeId, userIds.principaluser],
   );
+  await seedPrincipalPosition(adminPool, { collegeId: college.collegeId, userId: userIds.principaluser, passwordHash });
 
   const cls = await adminPool.query(
     `INSERT INTO classes (college_id, class_name) VALUES ($1, $2) RETURNING id`,
@@ -142,6 +144,7 @@ async function seedTenant(adminPool, label) {
 
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
+  await cleanupPositionRows(adminPool, college.collegeId);
   await adminPool.query('DELETE FROM fee_payments WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM documents WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM fee_structures WHERE college_id = $1', [college.collegeId]);

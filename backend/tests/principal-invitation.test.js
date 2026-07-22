@@ -133,6 +133,17 @@ test('principal invitation', async (t) => {
     for (const cid of createdColleges) {
       // eslint-disable-next-line no-await-in-loop
       await adminPool.query('DELETE FROM principal_invitations WHERE college_id = $1', [cid]);
+      // Every accept now also provisions a Level 1 position/account/
+      // occupant (ADR-021, unconditional) — position_occupants /
+      // position_accounts / positions all FK to users(id)
+      // (created_by/assigned_by), so they must go before the users
+      // delete below, same reasoning as audit_log.user_id.
+      // eslint-disable-next-line no-await-in-loop
+      await adminPool.query('DELETE FROM position_occupants WHERE college_id = $1', [cid]);
+      // eslint-disable-next-line no-await-in-loop
+      await adminPool.query('DELETE FROM position_accounts WHERE college_id = $1', [cid]);
+      // eslint-disable-next-line no-await-in-loop
+      await adminPool.query('DELETE FROM positions WHERE college_id = $1', [cid]);
       // audit_log.user_id FKs users(id) — must go before the users
       // delete below (task #17's login audit logging).
       // eslint-disable-next-line no-await-in-loop

@@ -2,19 +2,50 @@
 
 // Unit tests for StaffService's deactivation + HOD In-Charge functions
 // — no live Postgres needed: staffRepository/authService/
-// facultyAllocationRepository/classRepository/hodInChargeRepository/
-// auditLogRepository are stubbed via node:test's built-in mock, same
-// technique as every other *-service.test.js file in this suite.
+// facultyAllocationRepository/hodInChargeRepository/auditLogRepository
+// are stubbed via node:test's built-in mock, same technique as every
+// other *-service.test.js file in this suite. deactivateStaff's tutor
+// check moved off classRepository.findByTutorUserId onto
+// identityService.resolveActiveClassTutorPosition in Phase 2 step 17 —
+// mocked here rather than classRepository directly.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const staffRepository = require('../src/repositories/staffRepository');
 const authService = require('../src/services/authService');
 const facultyAllocationRepository = require('../src/repositories/facultyAllocationRepository');
-const classRepository = require('../src/repositories/classRepository');
 const hodInChargeRepository = require('../src/repositories/hodInChargeRepository');
 const auditLogRepository = require('../src/repositories/auditLogRepository');
+const positionRepository = require('../src/repositories/positionRepository');
+const identityService = require('../src/services/identityService');
 const staffService = require('../src/services/staffService');
+
+// Phase 1 (Capability Resolver integration): appointHodInCharge now
+// also calls ensureHodPosition/swapHodOccupant (staffService.js) —
+// every test exercising that path needs the Level 3 Position/Account/
+// Occupant plumbing stubbed too, same as every other repository call
+// in this file.
+function mockEnsureHodPositionCalls(t, { existingAssignment = null, existingOccupant = null } = {}) {
+  const findAssignmentMock = t.mock.method(positionRepository, 'findActiveDepartmentAssignment', async () => existingAssignment);
+  const createPositionMock = t.mock.method(positionRepository, 'createPosition', async () => ({ id: 'pos-1', level: 3 }));
+  const createAccountMock = t.mock.method(positionRepository, 'createPositionAccount', async () => ({ id: 'acct-1' }));
+  const createDeptAssignmentMock = t.mock.method(positionRepository, 'createPositionDepartmentAssignment', async () => ({ id: 'deptassign-1' }));
+  const findOccupantMock = t.mock.method(positionRepository, 'findActiveOccupant', async () => existingOccupant);
+  const revokeOccupantMock = t.mock.method(positionRepository, 'revokePositionOccupant', async () => ({ id: 'occ-old', revoked_at: new Date() }));
+  const createOccupantMock = t.mock.method(positionRepository, 'createPositionOccupant', async (client, fields) => ({ id: 'occ-1', ...fields }));
+  t.after(() => {
+    findAssignmentMock.mock.restore();
+    createPositionMock.mock.restore();
+    createAccountMock.mock.restore();
+    createDeptAssignmentMock.mock.restore();
+    findOccupantMock.mock.restore();
+    revokeOccupantMock.mock.restore();
+    createOccupantMock.mock.restore();
+  });
+  return {
+    findAssignmentMock, createPositionMock, createAccountMock, createDeptAssignmentMock, findOccupantMock, revokeOccupantMock, createOccupantMock,
+  };
+}
 
 test('deactivateStaff', async (t) => {
   await t.test('rejects an unknown staff id', async () => {
@@ -45,7 +76,7 @@ test('deactivateStaff', async (t) => {
   await t.test('refuses while the staff member is still a class tutor', async () => {
     const findMock = t.mock.method(staffRepository, 'findById', async () => ({ id: 'staff-1', college_id: 'c1', user_id: 'u1' }));
     const findAllocMock = t.mock.method(facultyAllocationRepository, 'findByStaffUserId', async () => []);
-    const findTutorClassMock = t.mock.method(classRepository, 'findByTutorUserId', async () => ({ id: 'class-1' }));
+    const findTutorClassMock = t.mock.method(identityService, 'resolveActiveClassTutorPosition', async () => 'class-1');
     const deactivateMock = t.mock.method(authService, 'deactivateUser');
     t.after(() => {
       findMock.mock.restore();
@@ -63,7 +94,7 @@ test('deactivateStaff', async (t) => {
   await t.test('deactivates a staff member with no active duties, without deleting the staff row', async () => {
     const findMock = t.mock.method(staffRepository, 'findById', async () => ({ id: 'staff-1', college_id: 'c1', user_id: 'u1' }));
     const findAllocMock = t.mock.method(facultyAllocationRepository, 'findByStaffUserId', async () => []);
-    const findTutorClassMock = t.mock.method(classRepository, 'findByTutorUserId', async () => null);
+    const findTutorClassMock = t.mock.method(identityService, 'resolveActiveClassTutorPosition', async () => null);
     const removeMock = t.mock.method(staffRepository, 'remove');
     const deactivateMock = t.mock.method(authService, 'deactivateUser', async (client, userId) => ({ id: userId, is_active: false }));
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
@@ -91,9 +122,10 @@ test('appointHodInCharge / revokeHodInCharge / findHodForDepartment fallback', a
     );
   });
 
-  await t.test('creates an appointment and audit-logs it', async () => {
+  await t.test('creates an appointment, swaps the position occupant, and audit-logs it', async () => {
     const createMock = t.mock.method(hodInChargeRepository, 'create', async (client, fields) => ({ id: 'appt-1', ...fields }));
     const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    const positionMocks = mockEnsureHodPositionCalls(t);
     t.after(() => {
       createMock.mock.restore();
       auditMock.mock.restore();
@@ -101,6 +133,8 @@ test('appointHodInCharge / revokeHodInCharge / findHodForDepartment fallback', a
     const result = await staffService.appointHodInCharge({}, 'dept-1', 'faculty-1', { reason: 'HOD on leave' }, { actorUserId: 'principal-1', collegeId: 'c1' });
     assert.equal(result.id, 'appt-1');
     assert.equal(auditMock.mock.calls[0].arguments[1].action, 'hod_in_charge_appointed');
+    assert.equal(positionMocks.createOccupantMock.mock.calls[0].arguments[1].userId, 'faculty-1');
+    assert.equal(positionMocks.findOccupantMock.mock.callCount(), 1);
   });
 
   await t.test('maps a duplicate active-appointment constraint violation', async () => {
@@ -111,6 +145,43 @@ test('appointHodInCharge / revokeHodInCharge / findHodForDepartment fallback', a
       () => staffService.appointHodInCharge({}, 'dept-1', 'faculty-1', {}, { actorUserId: 'principal-1', collegeId: 'c1' }),
       staffService.HodInChargeAlreadyActiveError,
     );
+  });
+
+  await t.test('revokeHodInCharge falls back to the permanent HOD occupant when one exists', async () => {
+    const revokeMock = t.mock.method(hodInChargeRepository, 'revoke', async () => ({
+      id: 'appt-1', college_id: 'c1', department_id: 'dept-1', faculty_user_id: 'faculty-1',
+    }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    const findHodMock = t.mock.method(staffRepository, 'findByCollegeDepartmentAndRole', async () => ({ id: 'staff-hod', user_id: 'permanent-hod-1' }));
+    const positionMocks = mockEnsureHodPositionCalls(t, { existingOccupant: { id: 'occ-inCharge', user_id: 'faculty-1' } });
+    t.after(() => {
+      revokeMock.mock.restore();
+      auditMock.mock.restore();
+      findHodMock.mock.restore();
+    });
+
+    const result = await staffService.revokeHodInCharge({}, 'appt-1', { actorUserId: 'principal-1' });
+    assert.equal(result.id, 'appt-1');
+    assert.equal(positionMocks.revokeOccupantMock.mock.calls[0].arguments[1], 'occ-inCharge');
+    assert.equal(positionMocks.createOccupantMock.mock.calls[0].arguments[1].userId, 'permanent-hod-1');
+  });
+
+  await t.test('revokeHodInCharge leaves the position vacant when no permanent HOD exists', async () => {
+    const revokeMock = t.mock.method(hodInChargeRepository, 'revoke', async () => ({
+      id: 'appt-1', college_id: 'c1', department_id: 'dept-1', faculty_user_id: 'faculty-1',
+    }));
+    const auditMock = t.mock.method(auditLogRepository, 'createAuditLogEntry', async () => {});
+    const findHodMock = t.mock.method(staffRepository, 'findByCollegeDepartmentAndRole', async () => null);
+    const positionMocks = mockEnsureHodPositionCalls(t, { existingOccupant: { id: 'occ-inCharge', user_id: 'faculty-1' } });
+    t.after(() => {
+      revokeMock.mock.restore();
+      auditMock.mock.restore();
+      findHodMock.mock.restore();
+    });
+
+    await staffService.revokeHodInCharge({}, 'appt-1', { actorUserId: 'principal-1' });
+    assert.equal(positionMocks.revokeOccupantMock.mock.calls[0].arguments[1], 'occ-inCharge');
+    assert.equal(positionMocks.createOccupantMock.mock.callCount(), 0);
   });
 
   await t.test('revokeHodInCharge on a nonexistent/already-revoked appointment throws', async () => {

@@ -15,6 +15,7 @@ const http = require('node:http');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const { seedClassTutorPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PASSWORD = 'StudentTestPass123!';
@@ -137,12 +138,21 @@ async function seedTenant(adminPool, label) {
   );
 
   const classResult = await adminPool.query(
-    `INSERT INTO classes (college_id, class_name, tutor_user_id, department_id)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO classes (college_id, class_name, department_id)
+     VALUES ($1, $2, $3)
      RETURNING id`,
-    [college.collegeId, `Class ${label}`, userIds.staff, deptAResult.rows[0].id],
+    [college.collegeId, `Class ${label}`, deptAResult.rows[0].id],
   );
   college.classId = classResult.rows[0].id;
+
+  // Phase 2 step 19: staffuser's tutor-of-record status moved off
+  // classes.tutor_user_id onto the real Position/Account/Occupant
+  // fixture — studentService.createStudent/assertCanModifyStudent's
+  // staff branch (identityService.resolveActiveClassTutorPosition)
+  // reads position_class_assignments now, not this column.
+  await seedClassTutorPosition(adminPool, {
+    collegeId: college.collegeId, userId: userIds.staff, classId: college.classId, passwordHash,
+  });
 
   return college;
 }
@@ -151,6 +161,7 @@ async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM students WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM staff WHERE college_id = $1', [college.collegeId]);
+  await cleanupPositionRows(adminPool, college.collegeId);
   await adminPool.query('DELETE FROM classes WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM departments WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);

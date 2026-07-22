@@ -50,6 +50,11 @@ const PERMISSION_ROLES = {
   'classes.update': ['principal'],
   'classes.delete': ['principal'],
   'classes.promote_semester': ['principal', 'hod'],
+  // Phase 2 step 18: POST/PUT /classes/:id/tutor — BusinessRules.md
+  // Staff: "Class Tutor is assigned only by HOD" (own department,
+  // service-layer-enforced via visibilityService.assertIsHodOfDepartment
+  // — this permission only gates the role, not the department scope).
+  'classes.assign_tutor': ['hod'],
 
   // routes/collegeProfile.js — GET/PUT /college-profile. Moved from
   // college_admin to principal: college_admin is no longer a tenant

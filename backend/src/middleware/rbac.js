@@ -29,15 +29,23 @@ const { roleHasPermission } = require('./permissions');
 // re-derive *why* a token was untrustworthy, only that it was.
 
 function isValidAccessClaims(claims) {
-  // Checks type === 'access' explicitly, not just presence of a role
-  // — belt-and-suspenders against a platform-admin token ever working
-  // here even in a hypothetical future where jwtSecretKey and
-  // platformJwtSecretKey were accidentally set to the same value. A
-  // platform token has no role claim at all, so it would already fail
-  // requireRole's allowed-set check without this — but being explicit
-  // here means that's not the only thing standing between the two
-  // token types, same reasoning the deleted Python require_role had.
-  return claims !== null && claims.type === 'access';
+  // Checks type is a real tenant-side access claim explicitly, not
+  // just presence of a role — belt-and-suspenders against a
+  // platform-admin token ever working here even in a hypothetical
+  // future where jwtSecretKey and platformJwtSecretKey were
+  // accidentally set to the same value. A platform token has no role
+  // claim at all, so it would already fail requireRole's allowed-set
+  // check without this — but being explicit here means that's not the
+  // only thing standing between the two token types, same reasoning
+  // the deleted Python require_role had.
+  //
+  // Phase 2: 'position_access' (a Position Account session) is a
+  // second, equally valid tenant-side claim type — it carries no
+  // `role` at all (requireRole's own allowed-set check already denies
+  // it, correctly, for any role-string-based route), but
+  // requirePermission's effectiveRole check below must still run for
+  // it rather than 401 before ever reaching that check.
+  return claims !== null && (claims.type === 'access' || claims.type === 'position_access');
 }
 
 // Any authenticated tenant user, role irrelevant — for routes that
@@ -82,13 +90,21 @@ function requireRole(...allowedRoles) {
 // generic primitive requirePermission is built on, not a competing
 // mechanism, and rbac.test.js still exercises it directly against a
 // throwaway test route.
+//
+// Phase 1 (Capability Resolver integration): reads
+// req.capabilities.effectiveRole (resolved once per request by
+// middleware/identity.js, mounted before any route) instead of
+// req.jwtClaims.role directly — Authorization is one of the four
+// consumers this phase moves onto the Position model as the single
+// source of truth. Stays synchronous: no DB call happens here, the
+// resolution already happened upstream.
 function requirePermission(permission) {
   return (req, res, next) => {
     if (!isValidAccessClaims(req.jwtClaims)) {
       res.status(401).json({ detail: 'Authentication required' });
       return;
     }
-    if (!roleHasPermission(req.jwtClaims.role, permission)) {
+    if (!roleHasPermission(req.capabilities.effectiveRole, permission)) {
       res.status(403).json({ detail: 'Insufficient role' });
       return;
     }

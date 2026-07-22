@@ -22,6 +22,7 @@ const http = require('node:http');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const { seedPrincipalPosition, seedClassTutorPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PASSWORD = 'FacAllocTestPass123!';
@@ -102,6 +103,7 @@ async function seedTenant(adminPool, label) {
     );
     userIds[username] = result.rows[0].id;
   }
+  await seedPrincipalPosition(adminPool, { collegeId: college.collegeId, userId: userIds.principaluser, passwordHash });
 
   // visibilityService.assertCanViewStaff (GET /faculty-allocation?
   // staff_user_id=...) resolves via staffRepository.findByUserId — a
@@ -124,8 +126,12 @@ async function seedTenant(adminPool, label) {
   // tutor/faculty-allocated classes only) — staffuser is made class1's
   // tutor so the "read is allowed for staff" RBAC test below has a
   // real assignment to be visible through, not a leftover assumption
-  // from before that scoping existed.
-  await adminPool.query('UPDATE classes SET tutor_user_id = $1 WHERE id = $2', [userIds.staffuser, class1.rows[0].id]);
+  // from before that scoping existed. Phase 2 step 19: this moved off
+  // classes.tutor_user_id onto the real Position/Account/Occupant
+  // fixture.
+  await seedClassTutorPosition(adminPool, {
+    collegeId: college.collegeId, userId: userIds.staffuser, classId: class1.rows[0].id, passwordHash,
+  });
   const class2 = await adminPool.query(
     `INSERT INTO classes (college_id, class_name) VALUES ($1, 'Fac Alloc Class Two') RETURNING id`,
     [college.collegeId],
@@ -151,6 +157,7 @@ async function seedTenant(adminPool, label) {
 
 async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [college.collegeId]);
+  await cleanupPositionRows(adminPool, college.collegeId);
   await adminPool.query('DELETE FROM faculty_allocation WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM timetable_periods WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM classes WHERE college_id = $1', [college.collegeId]);

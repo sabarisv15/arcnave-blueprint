@@ -348,6 +348,29 @@ async function sendPrincipalInvitationEmail(client, {
   return sendEmail(client, { to, subject, body });
 }
 
+// Phase 2 (Position Account Auth) — the invite-based credential
+// bootstrap for a Position Account (L1/L2/L3 today), same "never
+// return the raw token in an API response, only ever email it" rule
+// as sendPrincipalInvitationEmail above. `client` here can be either a
+// tenant transaction (a Level 2 actor inviting an HOD) or platformPool
+// (a Platform Admin inviting Level 1/2) — harmless for the same reason
+// sendPrincipalInvitationEmail's own comment gives: sendEmail never
+// actually uses its own client parameter.
+async function sendPositionAccountInvitationEmail(client, {
+  to, collegeId, positionTitle, token, expiresAt,
+}) {
+  const subject = `You've been invited to the ${positionTitle} office account for ${collegeId}`;
+  const body = [
+    `You have been invited to set up login credentials for the "${positionTitle}" institutional office account at college "${collegeId}" on ARCNAVE.`,
+    `Invitation token: ${token}`,
+    `This invitation expires at ${expiresAt.toISOString()}.`,
+    '',
+    'Use this token with POST /api/v1/position-accounts/invitations/accept to finish setting up this office account.',
+  ].join('\n');
+
+  return sendEmail(client, { to, subject, body });
+}
+
 // origin has no DB CHECK constraint (see the migration's own file-level
 // comment) — known values ('human'|'ai') enforced here, same house
 // convention workflowService.assertValidOrigin already uses for the
@@ -586,6 +609,7 @@ module.exports = {
   sendPasswordResetEmail,
   sendMfaCodeEmail,
   sendPrincipalInvitationEmail,
+  sendPositionAccountInvitationEmail,
   draftNotification,
   submitForApproval,
   approveNotification,

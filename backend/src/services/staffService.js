@@ -48,11 +48,12 @@ const staffRepository = require('../repositories/staffRepository');
 const authRepository = require('../repositories/authRepository');
 const auditLogRepository = require('../repositories/auditLogRepository');
 const hodInChargeRepository = require('../repositories/hodInChargeRepository');
+const positionRepository = require('../repositories/positionRepository');
 const facultyAllocationRepository = require('../repositories/facultyAllocationRepository');
-const classRepository = require('../repositories/classRepository');
 const workflowService = require('./workflowService');
 const authService = require('./authService');
 const notificationService = require('./notificationService');
+const identityService = require('./identityService');
 const { isUuid, IdentifierResolutionError } = require('../identifierResolution');
 
 // Missing userId or fullName — staff.user_id and staff.full_name are
@@ -261,6 +262,65 @@ async function createStaff(client, { collegeId, userId, fullName, ...rest }, { a
   return staff;
 }
 
+const DEFAULT_LEVEL3_POSITION_TITLE = 'HOD';
+
+// Identity-Architecture.md §5.2 / ADR-021: every department has at
+// most one Level 3 Position, created once, never deleted — mirrors
+// authService.provisionLevel1PositionForNewPrincipal's idempotency
+// shape exactly, just keyed on department instead of college. Callers
+// (provisionHodAccount, appointHodInCharge, revokeHodInCharge) all
+// call this first so the position/account exist before any occupant
+// swap. officialEmail/passwordHash are placeholders — Position
+// Account authentication (Phase 4 target) doesn't exist yet, so
+// nothing reads these until that lands; the real reassignment
+// lifecycle (ADR-021) resets both in place once it does.
+async function ensureHodPosition(client, { collegeId, departmentId, createdBy }) {
+  const existingAssignment = await positionRepository.findActiveDepartmentAssignment(client, departmentId);
+  if (existingAssignment !== null) {
+    const position = await positionRepository.findPositionById(client, existingAssignment.position_id);
+    const account = await positionRepository.findPositionAccountByPositionId(client, existingAssignment.position_id);
+    return { position, account };
+  }
+
+  const position = await positionRepository.createPosition(client, {
+    collegeId, level: 3, title: DEFAULT_LEVEL3_POSITION_TITLE, createdBy,
+  });
+  const account = await positionRepository.createPositionAccount(client, {
+    collegeId,
+    positionId: position.id,
+    officialEmail: `hod-position-${departmentId}@positions.internal`,
+    passwordHash: await security.hashPassword(security.generateTemporaryPassword()),
+  });
+  await positionRepository.createPositionDepartmentAssignment(client, {
+    collegeId, positionId: position.id, departmentId, assignedBy: createdBy,
+  });
+
+  return { position, account };
+}
+
+// Closes whoever currently occupies the department's Level 3 Position
+// (if anyone) and opens a new occupant link for newOccupantUserId —
+// the minimal occupant-tracking half of ADR-021's reassignment
+// lifecycle. NOT the full atomic lifecycle (no session revocation,
+// no credential reset) — there are no real Position Account sessions
+// or credentials to revoke yet (Phase 4 target), so this is purely
+// bookkeeping so the Capability Resolver always reflects who's
+// actually acting as HOD right now. Idempotent: re-appointing the
+// same person is a no-op, not a needless revoke-then-recreate.
+async function swapHodOccupant(client, { collegeId, departmentId, newOccupantUserId, actorUserId }) {
+  const { account } = await ensureHodPosition(client, { collegeId, departmentId, createdBy: actorUserId });
+  const currentOccupant = await positionRepository.findActiveOccupant(client, account.id);
+  if (currentOccupant !== null) {
+    if (currentOccupant.user_id === newOccupantUserId) {
+      return currentOccupant;
+    }
+    await positionRepository.revokePositionOccupant(client, currentOccupant.id, { revokedBy: actorUserId });
+  }
+  return positionRepository.createPositionOccupant(client, {
+    collegeId, positionAccountId: account.id, userId: newOccupantUserId, assignedBy: actorUserId,
+  });
+}
+
 // null means no staff profile exists with this id — not an error. The
 // route turns that into 404, same as studentService.getStudent.
 async function provisionHodAccount(client, { collegeId, username, email, fullName, departmentId, ...rest }, { actorUserId } = {}) {
@@ -312,6 +372,10 @@ async function provisionHodAccount(client, { collegeId, username, email, fullNam
     }
     throw err;
   }
+
+  await swapHodOccupant(client, {
+    collegeId, departmentId, newOccupantUserId: user.id, actorUserId,
+  });
 
   await auditLogRepository.createAuditLogEntry(client, {
     collegeId,
@@ -469,10 +533,15 @@ async function deactivateStaff(client, staffId, { actorUserId } = {}) {
       `staff ${JSON.stringify(staffId)} still has ${activeAllocations.length} active faculty allocation(s) — reassign or remove them first`,
     );
   }
-  const tutoredClass = await classRepository.findByTutorUserId(client, staff.user_id);
-  if (tutoredClass !== null) {
+  // Phase 2 step 17: classes.tutor_user_id -> the Position/Account/
+  // Occupant model, same reverse (user -> tutored class) direction
+  // studentService's two sites already moved onto (step 16) —
+  // identityService.resolveActiveClassTutorPosition, never a direct
+  // classRepository/positionRepository call of this file's own.
+  const tutoredClassId = await identityService.resolveActiveClassTutorPosition(client, { userId: staff.user_id, collegeId: staff.college_id });
+  if (tutoredClassId !== null) {
     throw new StaffDeactivationHasActiveDutiesError(
-      `staff ${JSON.stringify(staffId)} is still the tutor of class ${JSON.stringify(tutoredClass.id)} — reassign the Class Tutor duty first`,
+      `staff ${JSON.stringify(staffId)} is still the tutor of class ${JSON.stringify(tutoredClassId)} — reassign the Class Tutor duty first`,
     );
   }
 
@@ -515,6 +584,10 @@ async function appointHodInCharge(client, departmentId, facultyUserId, { reason 
     throw err;
   }
 
+  await swapHodOccupant(client, {
+    collegeId, departmentId, newOccupantUserId: facultyUserId, actorUserId,
+  });
+
   await auditLogRepository.createAuditLogEntry(client, {
     collegeId,
     userId: actorUserId,
@@ -527,10 +600,32 @@ async function appointHodInCharge(client, departmentId, facultyUserId, { reason 
   return appointment;
 }
 
+// On revocation, the department's Level 3 Position falls back to
+// whichever permanent HOD exists (findByCollegeDepartmentAndRole,
+// same lookup findHodForDepartment below already trusts) — or is
+// left vacant (no active occupant) if there isn't one, matching
+// getActiveHodInCharge/findHodForDepartment's own existing "nothing
+// found is not an error" behavior for that case.
 async function revokeHodInCharge(client, appointmentId, { actorUserId } = {}) {
   const appointment = await hodInChargeRepository.revoke(client, appointmentId, { revokedByUserId: actorUserId });
   if (appointment === null) {
     throw new StaffDeactivationNotFoundError(`HOD In-Charge appointment ${JSON.stringify(appointmentId)} does not exist or is already revoked`);
+  }
+
+  const { account } = await ensureHodPosition(client, {
+    collegeId: appointment.college_id, departmentId: appointment.department_id, createdBy: actorUserId,
+  });
+  const currentOccupant = await positionRepository.findActiveOccupant(client, account.id);
+  if (currentOccupant !== null) {
+    await positionRepository.revokePositionOccupant(client, currentOccupant.id, { revokedBy: actorUserId });
+  }
+  const permanentHod = await staffRepository.findByCollegeDepartmentAndRole(
+    client, appointment.college_id, appointment.department_id, 'hod',
+  );
+  if (permanentHod !== null) {
+    await positionRepository.createPositionOccupant(client, {
+      collegeId: appointment.college_id, positionAccountId: account.id, userId: permanentHod.user_id, assignedBy: actorUserId,
+    });
   }
 
   await auditLogRepository.createAuditLogEntry(client, {
@@ -824,6 +919,7 @@ module.exports = {
   HodInChargeValidationError,
   HodInChargeAlreadyActiveError,
   createStaff,
+  ensureHodPosition,
   provisionHodAccount,
   getStaff,
   getStaffByUserId,

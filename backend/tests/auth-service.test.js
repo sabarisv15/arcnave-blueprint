@@ -184,10 +184,14 @@ test('AuthService.requestPasswordReset / resetPassword (no DB)', async (t) => {
     }));
     const updateMock = t.mock.method(authRepository, 'updatePasswordHash', async () => {});
     const markUsedMock = t.mock.method(authRepository, 'markPasswordResetTokenUsed', async () => {});
+    const incrementVersionMock = t.mock.method(authRepository, 'incrementTokenVersion', async () => 1);
+    const revokeRefreshMock = t.mock.method(authRepository, 'revokeAllRefreshTokensForUser', async () => {});
     t.after(() => {
       lookupMock.mock.restore();
       updateMock.mock.restore();
       markUsedMock.mock.restore();
+      incrementVersionMock.mock.restore();
+      revokeRefreshMock.mock.restore();
     });
 
     await authService.resetPassword({}, { token: 'valid-token', newPassword: 'NewPassword-123' });
@@ -195,5 +199,10 @@ test('AuthService.requestPasswordReset / resetPassword (no DB)', async (t) => {
     assert.equal(updateMock.mock.calls[0].arguments[1], 'user-1');
     assert.ok(await security.verifyPassword('NewPassword-123', updateMock.mock.calls[0].arguments[2]));
     assert.equal(markUsedMock.mock.calls[0].arguments[1], 'prt-1');
+    // ADR-024: a reset must also revoke every already-issued session
+    // for this account, not just change the hash a future login
+    // compares against — see authService.resetPassword's own comment.
+    assert.equal(incrementVersionMock.mock.calls[0].arguments[1], 'user-1');
+    assert.equal(revokeRefreshMock.mock.calls[0].arguments[1], 'user-1');
   });
 });

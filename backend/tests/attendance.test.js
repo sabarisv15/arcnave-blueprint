@@ -34,6 +34,7 @@ const http = require('node:http');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const { seedClassTutorPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PASSWORD = 'AttendanceTestPass123!';
@@ -121,15 +122,23 @@ async function seedTenant(adminPool, label) {
   }
 
   const approvedClass = await adminPool.query(
-    `INSERT INTO classes (college_id, class_name, tutor_user_id, timetable_status)
-     VALUES ($1, 'Attendance API Approved Class', $2, 'Approved') RETURNING id`,
-    [college.collegeId, userIds.tutoruser],
+    `INSERT INTO classes (college_id, class_name, timetable_status)
+     VALUES ($1, 'Attendance API Approved Class', 'Approved') RETURNING id`,
+    [college.collegeId],
   );
   const pendingClass = await adminPool.query(
     `INSERT INTO classes (college_id, class_name, timetable_status)
      VALUES ($1, 'Attendance API Pending Class', 'Pending HOD') RETURNING id`,
     [college.collegeId],
   );
+  // Phase 2 step 19: tutoruser's tutor-of-record status moved off
+  // classes.tutor_user_id onto the real Position/Account/Occupant
+  // fixture — assertCanMark's tutor check (identityService.
+  // resolvePositionOccupant) reads position_class_assignments now, not
+  // this column.
+  await seedClassTutorPosition(adminPool, {
+    collegeId: college.collegeId, userId: userIds.tutoruser, classId: approvedClass.rows[0].id, passwordHash,
+  });
 
   // Hour 3, Saturday — the one real, structured link a "scheduled
   // staff member" mark needs to succeed through.
@@ -156,6 +165,7 @@ async function cleanupTenant(adminPool, college) {
   await adminPool.query('DELETE FROM attendance_sessions WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM faculty_allocation WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM timetable_periods WHERE college_id = $1', [college.collegeId]);
+  await cleanupPositionRows(adminPool, college.collegeId);
   await adminPool.query('DELETE FROM classes WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [college.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [college.collegeId]);

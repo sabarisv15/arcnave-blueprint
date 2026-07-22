@@ -16,6 +16,8 @@ const crypto = require('crypto');
 const config = require('../config');
 const security = require('../security');
 const authRepository = require('../repositories/authRepository');
+const positionRepository = require('../repositories/positionRepository');
+const collegeProfileRepository = require('../repositories/collegeProfileRepository');
 const principalInvitationRepository = require('../repositories/principalInvitationRepository');
 const userMfaOtpRepository = require('../repositories/userMfaOtpRepository');
 const notificationService = require('./notificationService');
@@ -84,8 +86,12 @@ class InvitationInvalidError extends Error {}
 // this username is already taken in the invitation's own college.
 class InvitationUsernameConflictError extends Error {}
 
-async function issueTokenPair(client, { collegeId, userId, role }) {
-  const accessToken = security.createAccessToken({ userId, collegeId, role });
+async function issueTokenPair(client, {
+  collegeId, userId, role, tokenVersion,
+}) {
+  const accessToken = security.createAccessToken({
+    userId, collegeId, role, tokenVersion,
+  });
   const refreshToken = security.generateRefreshToken();
   const expiresAt = new Date(Date.now() + config.refreshTokenExpireDays * 24 * 60 * 60 * 1000);
   await authRepository.createRefreshToken(client, {
@@ -238,7 +244,9 @@ async function verifyMfaLogin(client, { challengeId, code }) {
     metadata: { result: 'success', mfa: true },
   });
 
-  return issueTokenPair(client, { collegeId: user.college_id, userId: user.id, role: user.role });
+  return issueTokenPair(client, {
+    collegeId: user.college_id, userId: user.id, role: user.role, tokenVersion: user.token_version,
+  });
 }
 
 // Business rule task #19's self-opt-in half: meaningful only under
@@ -339,7 +347,9 @@ async function login(client, { collegeId, username, password }) {
     metadata: { result: 'success' },
   });
 
-  return issueTokenPair(client, { collegeId: user.college_id, userId: user.id, role: user.role });
+  return issueTokenPair(client, {
+    collegeId: user.college_id, userId: user.id, role: user.role, tokenVersion: user.token_version,
+  });
 }
 
 async function refresh(client, rawRefreshToken) {
@@ -390,7 +400,9 @@ async function refresh(client, rawRefreshToken) {
   }
 
   await authRepository.revokeRefreshToken(client, stored.id);
-  return issueTokenPair(client, { collegeId: user.college_id, userId: user.id, role: user.role });
+  return issueTokenPair(client, {
+    collegeId: user.college_id, userId: user.id, role: user.role, tokenVersion: user.token_version,
+  });
 }
 
 // Logout. Idempotent and deliberately silent either way (no error for
@@ -476,6 +488,30 @@ async function resetPassword(client, { token, newPassword }) {
 
   await authRepository.updatePasswordHash(client, stored.user_id, await security.hashPassword(newPassword));
   await authRepository.markPasswordResetTokenUsed(client, stored.id);
+
+  // ADR-024: a password reset must revoke every session already
+  // issued for this account, not just change what a future login
+  // would hash-compare against — an already-issued access JWT stays
+  // valid on its own until natural expiry, and a stolen refresh token
+  // would otherwise still mint fresh ones. Bumping token_version
+  // invalidates every live access token the next time
+  // sessionRevocationMiddleware checks it; revoking every refresh
+  // token closes the other half — a reset with only one of these two would
+  // leave a real gap (see ADR-021's "best-effort multi-step process"
+  // alternative, rejected for exactly this reason).
+  await authRepository.incrementTokenVersion(client, stored.user_id);
+  await authRepository.revokeAllRefreshTokensForUser(client, stored.user_id);
+}
+
+// middleware/sessionRevocation.js's one dependency on this service —
+// kept here rather than a direct repository call from the middleware,
+// same "middleware calls a service, not a repository" shape
+// middleware/actorContext.js already establishes for buildActorContext.
+// Returns null for an unknown userId (see
+// authRepository.getTokenVersion) so a forged/stale sub claim fails
+// the middleware's comparison rather than throwing.
+async function getCurrentTokenVersion(client, userId) {
+  return authRepository.getTokenVersion(client, userId);
 }
 
 // Module 8: the "login is enabled only once credentials exist" moment
@@ -547,13 +583,86 @@ async function lookupPendingInvitation(client, token) {
   return invitation;
 }
 
+// ADR-021 — the Level 1 "Institutional Position Account" a new
+// college's Principal gets alongside their `users` row (see
+// acceptInvitation below — this always runs now, unconditionally).
+//
+// Deferred to accept time rather than college-creation time
+// (platformService.createCollege): positions.created_by and
+// position_occupants.assigned_by are NOT NULL FKs to users(id), and at
+// createCollege time no users row for the eventual principal exists
+// yet (their email isn't even known until invitePrincipal, let alone
+// their chosen username/password, which only exist once accept runs).
+// Attributing creation/assignment to the new principal's own id, the
+// moment that id first exists, is the one point in this flow where
+// it's actually possible.
+//
+// Cosmetic Level 1 title ("Principal"/"Director"/etc, per ADR-021) —
+// what a college's positions row gets called when no Platform-Admin-
+// chosen title exists for it (colleges.level1_position_title is null:
+// either the college predates this field, or the admin simply left it
+// blank at createCollege time).
+const DEFAULT_LEVEL1_POSITION_TITLE = 'Principal';
+
+// Idempotency guard: if this college already has a Level 1 position
+// (e.g. a principal was already re-invited/accepted once through this
+// same path), this is a no-op — never a second Level 1 position for
+// one college. The
+// title itself now comes from colleges.level1_position_title — the
+// Platform Admin's own choice at createCollege time
+// (platformService.createCollege), read back here via
+// collegeProfileRepository (tenant-side, SELECT-only, same access shape
+// that repository already uses for the College Admin profile columns) —
+// falling back to DEFAULT_LEVEL1_POSITION_TITLE when null, which is
+// every college created before this field existed, and every college
+// whose admin simply didn't set one.
+async function provisionLevel1PositionForNewPrincipal(client, collegeId, user, passwordHash) {
+  const existing = await positionRepository.findActivePositionByCollegeAndLevel(client, collegeId, 1);
+  if (existing) {
+    return null;
+  }
+
+  const chosenTitle = await collegeProfileRepository.getLevel1PositionTitle(client, collegeId);
+
+  const position = await positionRepository.createPosition(client, {
+    collegeId, level: 1, title: chosenTitle || DEFAULT_LEVEL1_POSITION_TITLE, createdBy: user.id,
+  });
+  const account = await positionRepository.createPositionAccount(client, {
+    collegeId,
+    positionId: position.id,
+    officialEmail: user.email,
+    // authRepository.createUser's RETURNING deliberately omits
+    // password_hash (same "never echo a hash back through a normal
+    // service return value" discipline every other read path in this
+    // codebase follows) — the account's starting credential is the
+    // SAME hash just computed for the user row below, passed through
+    // explicitly rather than re-read off `user`.
+    passwordHash,
+  });
+  const occupant = await positionRepository.createPositionOccupant(client, {
+    collegeId,
+    positionAccountId: account.id,
+    userId: user.id,
+    assignedBy: user.id,
+  });
+
+  return { position, account, occupant };
+}
+
 // The post-transaction half: client here IS the tenant-scoped
 // transaction routes/invitations.js opens (via openTenantTransaction)
 // against invitation.college_id once lookupPendingInvitation has
 // already proven the token authentic. Every invitation accepted this
 // way creates a 'principal' account — the only role this route has
 // ever granted (see the migration's own file-level comment on
-// principal_invitations' purpose).
+// principal_invitations' purpose). This `users.role = 'principal'` row
+// is the CURRENT, ACTIVE authentication mechanism — every
+// permissions.js/aiToolRegistry.js/workflowChainService.js check reads
+// req.jwtClaims.role directly, and position_accounts (ADR-021) have no
+// login system wired up yet (that's an unbuilt future phase), so this
+// row is not legacy/compatibility scaffolding to be retired later —
+// it's how a principal actually authenticates today, alongside the
+// Level 1 Institutional Position Account provisioned below.
 async function acceptInvitation(client, invitation, { username, password }) {
   if (!PASSWORD_COMPLEXITY_RE.test(password || '')) {
     throw new PasswordResetValidationError(
@@ -561,13 +670,14 @@ async function acceptInvitation(client, invitation, { username, password }) {
     );
   }
 
+  const passwordHash = await security.hashPassword(password);
   let user;
   try {
     user = await authRepository.createUser(client, {
       collegeId: invitation.college_id,
       username,
       email: invitation.email,
-      passwordHash: await security.hashPassword(password),
+      passwordHash,
       role: 'principal',
       isActive: true,
     });
@@ -579,6 +689,15 @@ async function acceptInvitation(client, invitation, { username, password }) {
   }
 
   await principalInvitationRepository.markInvitationAccepted(client, invitation.id);
+
+  // Additive to the users.role='principal' row above, never a
+  // replacement for it (see this function's own comment). Runs in the
+  // SAME transaction as the user creation/invitation-accept above, so
+  // the whole accept either fully succeeds (users row + Level 1
+  // position/account/occupant all committed together) or fully rolls
+  // back — never a user with no matching position account, or vice
+  // versa.
+  await provisionLevel1PositionForNewPrincipal(client, invitation.college_id, user, passwordHash);
 
   return user;
 }
@@ -599,6 +718,7 @@ module.exports = {
   revoke,
   requestPasswordReset,
   resetPassword,
+  getCurrentTokenVersion,
   activateUser,
   deactivateUser,
   lookupPendingInvitation,

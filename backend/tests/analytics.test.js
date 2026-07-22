@@ -17,6 +17,7 @@ const http = require('node:http');
 const { Pool } = require('pg');
 const createApp = require('../src/app');
 const security = require('../src/security');
+const { seedPrincipalPosition, seedHodPosition, cleanupPositionRows } = require('./helpers/positionFixtures');
 
 const MIGRATION_DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
 const PASSWORD = 'AnalyticsApiTestPass123!';
@@ -104,6 +105,14 @@ async function seedTenant(adminPool, label) {
     );
     userIds[username] = result.rows[0].id;
   }
+  await seedPrincipalPosition(adminPool, { collegeId, userId: userIds.principaluser, passwordHash });
+  const dept = await adminPool.query(
+    'INSERT INTO departments (college_id, name) VALUES ($1, $2) RETURNING id',
+    [collegeId, `Analytics API Dept ${suffix}`],
+  );
+  await seedHodPosition(adminPool, {
+    collegeId, userId: userIds.hoduser, departmentId: dept.rows[0].id, passwordHash,
+  });
 
   const classA = await adminPool.query(
     `INSERT INTO classes (college_id, class_name, timetable_status) VALUES ($1, $2, 'Approved') RETURNING id`,
@@ -139,8 +148,10 @@ async function cleanupTenant(adminPool, tenant) {
   // audit_log.user_id FKs users(id) — must go before the users delete
   // below (task #17's login audit logging).
   await adminPool.query('DELETE FROM audit_log WHERE college_id = $1', [tenant.collegeId]);
+  await cleanupPositionRows(adminPool, tenant.collegeId);
   await adminPool.query('DELETE FROM attendance_sessions WHERE college_id = $1', [tenant.collegeId]);
   await adminPool.query('DELETE FROM classes WHERE college_id = $1', [tenant.collegeId]);
+  await adminPool.query('DELETE FROM departments WHERE college_id = $1', [tenant.collegeId]);
   await adminPool.query('DELETE FROM refresh_tokens WHERE college_id = $1', [tenant.collegeId]);
   await adminPool.query('DELETE FROM users WHERE college_id = $1', [tenant.collegeId]);
   await adminPool.query('DELETE FROM colleges WHERE college_id = $1', [tenant.collegeId]);
